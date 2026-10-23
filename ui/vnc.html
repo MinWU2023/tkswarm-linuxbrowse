@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>第一页自研浏览器 VNC</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: #0b1220; color: #e2e8f0; font-family: system-ui, sans-serif; }
+    .bar {
+      display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+      background: #111827; border-bottom: 1px solid #1f2937;
+    }
+    .bar code { font-size: 12px; color: #94a3b8; }
+    .bar a { color: #38bdf8; text-decoration: none; }
+    #screen { position: absolute; inset: 48px 0 0 0; background: #000; }
+    #status { margin-left: auto; font-size: 13px; color: #94a3b8; }
+    #status.err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <a href="/">← 控制台</a>
+    <strong>远程查看</strong>
+    <code id="pid">—</code>
+    <span id="status">连接中…</span>
+  </div>
+  <div id="screen"></div>
+  <script type="module">
+    const params = new URLSearchParams(location.search);
+    const id = params.get('id') || '';
+    document.getElementById('pid').textContent = id ? id.slice(0, 16) + '…' : '缺 id';
+    const status = document.getElementById('status');
+
+    if (!id) {
+      status.textContent = '缺少环境 id';
+      status.classList.add('err');
+    } else {
+      try {
+        // 优先本地 vendor（npm @novnc/novnc → /vendor/novnc），离线机房不依赖 CDN
+        let RFB;
+        try {
+          ({ default: RFB } = await import('/vendor/novnc/lib/rfb.js'));
+          status.textContent = '本地 noVNC…';
+        } catch {
+          ({ default: RFB } = await import('https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/lib/rfb.js'));
+          status.textContent = 'CDN noVNC…';
+        }
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const token = localStorage.getItem('tkswarm_lb_token') || '';
+        const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+        const url = `${proto}://${location.host}/vnc-ws/${encodeURIComponent(id)}${qs}`;
+        const rfb = new RFB(document.getElementById('screen'), url);
+        rfb.scaleViewport = true;
+        rfb.resizeSession = true;
+        rfb.addEventListener('connect', () => {
+          status.textContent = '已连接';
+          status.classList.remove('err');
+        });
+        rfb.addEventListener('disconnect', (e) => {
+          status.textContent = e.detail?.clean ? '已断开' : '连接失败 / 已断开';
+          status.classList.add('err');
+        });
+        rfb.addEventListener('credentialsrequired', () => {
+          const pw = prompt('VNC 密码（若服务端设置了 TKSWARM_VNC_PASSWORD）') || '';
+          rfb.sendCredentials({ password: pw });
+        });
+      } catch (e) {
+        status.textContent = e.message || 'noVNC 加载失败（请 npm i @novnc/novnc 或检查网络）';
+        status.classList.add('err');
+      }
+    }
+  </script>
+</body>
+</html>

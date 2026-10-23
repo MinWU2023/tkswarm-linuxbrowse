@@ -1,0 +1,33 @@
+{
+  "name": "tkswarm-linuxbrowse",
+  "version": "1.0.0",
+  "description": "第一页自研浏览器 Linux — Bit Browser API compatible server for tkswarm-node (headless/headed, multi-env)",
+  "main": "src/server/main.js",
+  "author": "TkSwarm",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server/main.js",
+    "dev": "TKSWARM_BROWSER_DEV=1 node src/server/main.js",
+    "postinstall": "node scripts/ensure-chromium.js || exit 0",
+    "chromium": "node scripts/ensure-chromium.js",
+    "smoke": "node scripts/smoke-health.js",
+    "smoke:lifecycle": "node scripts/smoke-lifecycle.js",
+    "smoke:cdp": "node scripts/smoke-cdp.js",
+    "smoke:vnc": "node scripts/smoke-vnc.js",
+    "smoke:ops": "node scripts/smoke-ops.js",
+    "smoke:all": "node scripts/smoke-health.js && node scripts/smoke-lifecycle.js && node scripts/smoke-cdp.js && node scripts/smoke-vnc.js && node scripts/smoke-ops.js",
+    "pilot:snapshot": "node scripts/pilot-snapshot.js"
+  },
+  "dependencies": {
+    "@novnc/novnc": "^1.5.0",
+    "express": "^4.22.3",
+    "uuid": "^11.1.1",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.50.1"
+  }
+}

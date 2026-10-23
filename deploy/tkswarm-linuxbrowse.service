@@ -1,0 +1,30 @@
+[Unit]
+Description=第一页自研浏览器 Linux (Bit-compatible CDP API)
+After=network.target
+
+[Service]
+Type=simple
+User=tkswarm
+Group=tkswarm
+WorkingDirectory=/opt/tkswarm-linuxbrowse
+EnvironmentFile=-/etc/tkswarm-linuxbrowse.env
+Environment=TKSWARM_BROWSER_HOST=0.0.0.0
+Environment=TKSWARM_BROWSER_PORT=54345
+Environment=TKSWARM_BROWSER_DATA=/var/lib/tkswarm-linuxbrowse
+Environment=TKSWARM_BROWSER_XVFB=1
+Environment=TKSWARM_CHROME_NO_SANDBOX=1
+ExecStart=/usr/bin/node /opt/tkswarm-linuxbrowse/src/server/main.js
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+# 日志进 journal：journalctl -u tkswarm-linuxbrowse -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tkswarm-linuxbrowse
+
+# 长驻任务：给 Chrome 足够进程空间
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

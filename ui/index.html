@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>第一页自研浏览器 Linux</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">T</span>
+        <div class="brand-text">
+          <h1 class="brand-name">第一页自研浏览器</h1>
+          <p class="sub">Linux · API <code id="api-url">http://127.0.0.1:54345</code></p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div id="user-chip" class="user-chip hidden"></div>
+        <button id="btn-logout" class="btn ghost hidden" type="button">退出</button>
+      </div>
+    </header>
+
+    <section id="login-panel" class="login-stage">
+      <div class="login-card anim-enter">
+        <p class="login-eyebrow">Linux 服务端指纹浏览器</p>
+        <h2 class="login-brand">第一页自研浏览器</h2>
+        <p class="login-product">Linux</p>
+        <p class="hint">与 tkswarm-node 共用账号体系。专为客服坐席等长驻任务设计；支持有头/无头、多环境多代理。</p>
+        <form id="login-form" class="login-form" autocomplete="on">
+          <label>API 地址
+            <input id="api-base" type="text" placeholder="http://127.0.0.1:8080/api" />
+          </label>
+          <label>用户名
+            <input id="username" type="text" autocomplete="username" />
+          </label>
+          <label>密码
+            <input id="password" type="password" autocomplete="current-password" />
+          </label>
+          <button id="btn-login" class="btn primary block" type="submit">登录</button>
+          <p id="login-error" class="error hidden"></p>
+        </form>
+      </div>
+    </section>
+
+    <section id="dashboard" class="dashboard hidden">
+      <div class="token-bar" id="token-bar">
+        <span class="label">Node API Token · 填入 tkswarm-node 设置</span>
+        <code id="api-token" class="token-code">—</code>
+        <button id="btn-copy-token" class="btn small ghost" type="button">复制</button>
+      </div>
+
+      <div class="meta-strip" id="meta-strip">
+        <div class="meta-item">
+          <span class="meta-label">主机 hostId</span>
+          <strong id="stat-host" class="meta-value">—</strong>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">本账号环境</span>
+          <strong id="stat-self" class="meta-value">0 / 300</strong>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">运行中窗口</span>
+          <strong id="stat-windows" class="meta-value">0</strong>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">并发上限</span>
+          <strong id="stat-max" class="meta-value">—</strong>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">内存 RSS</span>
+          <strong id="stat-rss" class="meta-value">—</strong>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">系统空闲</span>
+          <strong id="stat-memfree" class="meta-value">—</strong>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">并发会话</span>
+          <strong id="stat-sessions" class="meta-value">—</strong>
+        </div>
+        <div class="meta-item meta-grow">
+          <span class="meta-label">子级账号汇总</span>
+          <div id="stat-children" class="children-list muted">—</div>
+        </div>
+      </div>
+
+      <div class="panel anim-fade hidden" id="sessions-panel">
+        <div class="panel-head">
+          <div>
+            <h2>并发登录会话</h2>
+            <p class="panel-desc">多账号可同时登录本服务；Node 用各自 Token 调用 API（仅超管可见）</p>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="win-table">
+            <thead>
+              <tr><th>用户</th><th>角色</th><th>Token</th><th>最近活跃</th></tr>
+            </thead>
+            <tbody id="sess-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel anim-fade">
+        <div class="panel-head">
+          <div>
+            <h2>窗口列表</h2>
+            <p class="panel-desc">筛窗、批量关闭、截图抽检；有头可内嵌 VNC 或新开页</p>
+          </div>
+          <div class="panel-actions">
+            <button id="btn-close-selected" class="btn ghost danger-text" type="button">关闭所选</button>
+            <button id="btn-refresh" class="btn ghost" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="toolbar-row">
+          <input id="win-filter" class="input filter-input" type="search" placeholder="筛选名称 / ID / DISPLAY…" />
+          <select id="win-mode-filter" class="input filter-select">
+            <option value="all">全部模式</option>
+            <option value="headless">仅无头</option>
+            <option value="headed">仅有头</option>
+          </select>
+        </div>
+        <div class="table-scroll">
+          <table class="win-table">
+            <thead>
+              <tr>
+                <th class="col-check"><input type="checkbox" id="win-check-all" title="全选" /></th>
+                <th>环境</th>
+                <th>名称</th>
+                <th>模式</th>
+                <th>PID</th>
+                <th>DISPLAY</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="win-body">
+              <tr><td colspan="7" class="empty">暂无运行中的窗口</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="modal-root" class="modal-root hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-close-modal></div>
+        <div class="modal-card" role="dialog">
+          <div class="modal-head">
+            <strong id="modal-title">预览</strong>
+            <button type="button" class="btn small ghost" data-close-modal>关闭</button>
+          </div>
+          <div id="modal-body" class="modal-body"></div>
+        </div>
+      </div>
+
+      <div class="panel anim-fade">
+        <div class="panel-head">
+          <div>
+            <h2>环境列表</h2>
+            <p class="panel-desc">本账号环境；可导出 Cookie 包换机导入（导出前会关闭窗口）</p>
+          </div>
+          <label class="btn ghost file-btn">
+            导入 .tgz
+            <input id="import-file" type="file" accept=".tgz,application/gzip" hidden />
+          </label>
+        </div>
+        <div class="table-scroll">
+          <table class="win-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>名称/备注</th>
+                <th>分组</th>
+                <th>代理</th>
+                <th>时区</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="profile-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel anim-fade hidden" id="audit-panel">
+        <div class="panel-head">
+          <div>
+            <h2>审计日志</h2>
+            <p class="panel-desc">登录 / 开关窗 / 截图 / 导入导出（仅超管；数据目录 audit.jsonl）</p>
+          </div>
+          <button id="btn-audit-refresh" class="btn ghost" type="button">刷新</button>
+        </div>
+        <div class="table-scroll">
+          <table class="win-table">
+            <thead>
+              <tr><th>时间</th><th>事件</th><th>详情</th></tr>
+            </thead>
+            <tbody id="audit-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
