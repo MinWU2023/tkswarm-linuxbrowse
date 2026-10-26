@@ -3,6 +3,8 @@ const API = window.tkswarmBrowser?.apiPort
   : (window.location.origin || 'http://127.0.0.1:54345');
 
 const TOKEN_KEY = 'tkswarm_lb_token';
+/** 上次登录成功标记：用于刷新时直接进面板（服务端也可能是 Cookie 会话，本地没有 Token） */
+const SEEN_KEY = 'tkswarm_lb_seen';
 /** @type {object[]} */
 let lastWindows = [];
 
@@ -11,8 +13,13 @@ function getToken() {
 }
 
 function setToken(t) {
-  if (t) localStorage.setItem(TOKEN_KEY, t);
-  else localStorage.removeItem(TOKEN_KEY);
+  if (t) {
+    localStorage.setItem(TOKEN_KEY, t);
+    localStorage.setItem(SEEN_KEY, '1');
+  } else {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(SEEN_KEY);
+  }
 }
 
 function authHeaders(extra = {}) {
@@ -427,21 +434,30 @@ async function doLogin(e) {
   await refreshDashboard();
 }
 
+function bootDone() {
+  document.body.classList.remove('booting');
+}
+
 /**
- * 首屏判定：只看本地是否已有 Token，同步执行，避免"先闪一下登录页再跳到面板"。
- * 手上没有 Token 才停在登录页；有 Token 但服务端已失效时，init() 校验失败再退回登录页。
+ * 首屏判定：只看本地登录痕迹（Token / 上次登录标记），同步执行。
+ * 有痕迹就直接进面板，绝不会先显示登录页再跳走；真失效时由 init() 校验后回退登录页。
  */
 function bootUI() {
-  const hasToken = !!getToken();
-  show('#login-panel', !hasToken);
-  show('#dashboard', hasToken);
-  if (hasToken) {
-    show('#user-chip', true);
-    show('#btn-logout', true);
-    const host = document.querySelector('#windows-list') || document.querySelector('#dashboard');
-    if (host && !host.textContent.trim()) host.innerHTML = '<div class="empty">正在恢复会话…</div>';
+  try {
+    const known = !!getToken() || localStorage.getItem(SEEN_KEY) === '1';
+    show('#login-panel', !known);
+    show('#dashboard', known);
+    if (known) {
+      show('#user-chip', true);
+      show('#btn-logout', true);
+    }
+  } finally {
+    bootDone();
   }
 }
+
+/** 兜底：任何异常都不能把页面卡在启动占位上 */
+setTimeout(bootDone, 3000);
 
 async function init() {
   document.getElementById('api-url').textContent = API;
@@ -451,6 +467,7 @@ async function init() {
   }
   const st = await json('GET', '/api/auth/status').catch(() => ({}));
   if (st.loggedIn || getToken()) {
+    localStorage.setItem(SEEN_KEY, '1');
     show('#login-panel', false);
     show('#dashboard', true);
     await refreshDashboard();
