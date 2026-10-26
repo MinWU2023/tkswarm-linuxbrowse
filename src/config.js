@@ -1,6 +1,7 @@
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
+const { resolveCapacity } = require('./capacity');
 
 const isDev = process.argv.includes('--dev') || process.env.TKSWARM_BROWSER_DEV === '1';
 
@@ -23,6 +24,16 @@ function appDataRoot() {
 
 const DATA_ROOT = appDataRoot();
 
+/**
+ * 并发容量：启动时读一次本机 CPU/内存，按档位自动定并发上限，
+ * 并把结论写到 ${DATA_ROOT}/capacity.json（运维可查、可用环境变量覆盖）。
+ */
+const CAPACITY = resolveCapacity({
+  dataRoot: DATA_ROOT,
+  envMax: process.env.TKSWARM_BROWSER_MAX_CONCURRENT,
+  envMaxEnvs: process.env.TKSWARM_BROWSER_MAX_ENVS,
+});
+
 module.exports = {
   isDev,
   PROVIDER_ID: 'tkswarm-linuxbrowse',
@@ -35,8 +46,10 @@ module.exports = {
   // 服务端默认可被同机 Node / 内网 Node 访问；生产请用防火墙收口
   API_HOST: process.env.TKSWARM_BROWSER_HOST || '0.0.0.0',
   API_PORT: Number(process.env.TKSWARM_BROWSER_PORT || 54345),
-  MAX_ENVS_PER_USER: Number(process.env.TKSWARM_BROWSER_MAX_ENVS || 300),
-  MAX_CONCURRENT_OPENS: Number(process.env.TKSWARM_BROWSER_MAX_CONCURRENT || 40),
+  MAX_ENVS_PER_USER: CAPACITY.maxEnvs,
+  MAX_CONCURRENT_OPENS: CAPACITY.maxConcurrent,
+  /** 硬件评估结果（档位、依据、配置文件路径） */
+  CAPACITY,
   DEFAULT_API_TOKEN: process.env.TKSWARM_BROWSER_TOKEN || '',
   TKSWARM_API_BASE: process.env.TKSWARM_API_BASE || 'http://127.0.0.1:8080/api',
   /** 有头模式是否依赖 Xvfb（无物理显示器的服务器建议 1） */

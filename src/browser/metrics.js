@@ -1,6 +1,6 @@
 const os = require('node:os');
 const fs = require('node:fs');
-const { PROFILES_DIR, DATA_ROOT, MAX_CONCURRENT_OPENS } = require('../config');
+const { PROFILES_DIR, DATA_ROOT, MAX_CONCURRENT_OPENS, CAPACITY } = require('../config');
 const manager = require('./manager');
 const db = require('../db');
 
@@ -39,6 +39,16 @@ function collectHealthExtras() {
   return {
     runningWindows: windows.length,
     maxConcurrent: MAX_CONCURRENT_OPENS,
+    // 本机硬件评估出的并发档位（见 capacity.json）
+    capacity: {
+      tier: CAPACITY.tier,
+      tierLabel: CAPACITY.tierLabel,
+      maxConcurrent: CAPACITY.maxConcurrent,
+      limitedBy: CAPACITY.limitedBy,
+      source: CAPACITY.source,
+      hardware: CAPACITY.hardware,
+      filePath: CAPACITY.filePath,
+    },
     headlessWindows: windows.filter((w) => w.headless).length,
     headedWindows: windows.filter((w) => !w.headless).length,
     activeSessions: typeof db.countActiveSessions === 'function' ? db.countActiveSessions() : 0,
