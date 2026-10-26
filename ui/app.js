@@ -427,17 +427,38 @@ async function doLogin(e) {
   await refreshDashboard();
 }
 
+/**
+ * 首屏判定：只看本地是否已有 Token，同步执行，避免"先闪一下登录页再跳到面板"。
+ * 手上没有 Token 才停在登录页；有 Token 但服务端已失效时，init() 校验失败再退回登录页。
+ */
+function bootUI() {
+  const hasToken = !!getToken();
+  show('#login-panel', !hasToken);
+  show('#dashboard', hasToken);
+  if (hasToken) {
+    show('#user-chip', true);
+    show('#btn-logout', true);
+    const host = document.querySelector('#windows-list') || document.querySelector('#dashboard');
+    if (host && !host.textContent.trim()) host.innerHTML = '<div class="empty">正在恢复会话…</div>';
+  }
+}
+
 async function init() {
   document.getElementById('api-url').textContent = API;
   const settings = await json('GET', '/api/settings').catch(() => ({}));
   if (settings.apiBase) {
     document.getElementById('api-base').value = settings.apiBase;
   }
-  const st = await json('GET', '/api/auth/status');
+  const st = await json('GET', '/api/auth/status').catch(() => ({}));
   if (st.loggedIn || getToken()) {
     show('#login-panel', false);
     show('#dashboard', true);
     await refreshDashboard();
+  } else {
+    // Token 缺失或已失效：这时才回登录页
+    setToken('');
+    show('#dashboard', false);
+    show('#login-panel', true);
   }
 
   document.getElementById('login-form').addEventListener('submit', doLogin);
@@ -480,4 +501,5 @@ async function init() {
   }, 8000);
 }
 
+bootUI();
 init().catch(console.error);
