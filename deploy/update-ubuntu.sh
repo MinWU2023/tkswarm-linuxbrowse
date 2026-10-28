@@ -67,6 +67,20 @@ EOF
     npm install --omit=dev --no-fund --no-audit
 fi
 
+# snap 版 chromium 不可用（AppArmor 限制，无法使用自定义 --user-data-dir）：
+# 若环境文件里残留 /snap 路径，自动纠正为可用的非 snap 浏览器
+ENV_FILE=/etc/tkswarm-linuxbrowse.env
+if [[ -f "${ENV_FILE}" ]] && grep -q '^TKSWARM_CHROME_PATH=/snap/' "${ENV_FILE}"; then
+  for c in /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/chromium; do
+    if [[ -x "$c" ]] && [[ "$(readlink -f "$c" 2>/dev/null)" != /usr/bin/snap ]]; then
+      sed -i "s|^TKSWARM_CHROME_PATH=.*|TKSWARM_CHROME_PATH=${c}|" "${ENV_FILE}"
+      log "已把 snap 浏览器路径纠正为 ${c}"
+      break
+    fi
+  done
+  grep -q '^TKSWARM_CHROME_PATH=/snap/' "${ENV_FILE}" \
+    && log "警告: 仍未找到可用的非 snap 浏览器，请安装 Google Chrome 后手动设置 TKSWARM_CHROME_PATH"
+fi
 log "重启服务 ..."
 systemctl restart "${TKSWARM_SERVICE_NAME}"
 sleep 2

@@ -62,14 +62,30 @@ async function authMiddleware(req, res, next) {
   next();
 }
 
-/** 非超管只能操作自己的环境 */
-function assertProfileOwner(user, profile) {
+/** 严格按 owner_id 隔离（老多租户行为）。默认关闭：同机环境共用。 */
+function strictEnvOwner() {
+  return String(process.env.TKSWARM_STRICT_ENV_OWNER || '').trim() === '1';
+}
+
+/**
+ * 环境权限（与 tkswarm-browses 对齐）
+ * ---------------------------------------------------------------
+ * 默认共用：同一 data 目录里的环境，任何已登录用户都能查看、打开、改配置、清理、删除。
+ * A 绑定账号后 B 换账号登录同机，不能再被 owner_id 拦住。
+ * owner_id 只用于记录创建者与每人创建额度（MAX_ENVS_PER_USER）。
+ * 真·多租户主机设 TKSWARM_STRICT_ENV_OWNER=1 退回按人隔离。
+ */
+function assertProfileOwner(user, profile, opts = {}) {
   if (!profile) return { ok: false, msg: 'browser环境不存在或已删除' };
+  if (!user) return { ok: false, msg: 'Login out' };
+  if (!strictEnvOwner()) return { ok: true };
+
+  const write = !!opts.write;
   if (Number(user.is_super) === 1) return { ok: true };
-  if (Number(profile.owner_id) !== Number(user.id)) {
-    return { ok: false, msg: '无权操作该浏览器环境' };
-  }
-  return { ok: true };
+  if (!write) return { ok: true };
+  const owner = Number(profile.owner_id || 0);
+  if (owner === 0 || owner === Number(user.id)) return { ok: true };
+  return { ok: false, msg: '无权修改该浏览器环境（仅创建者可删除或改配置）' };
 }
 
 function toBitProfile(row, runtime = null) {
@@ -158,7 +174,8 @@ function createRouter() {
     const page = Number(req.body?.page || 0);
     const pageSize = Number(req.body?.pageSize || 100);
     const user = req.currentUser;
-    const ownerFilter = Number(user.is_super) === 1 ? null : Number(user.id);
+    // 默认共用：列出全部组；严格模式非超管只看自己的
+    const ownerFilter = (!strictEnvOwner() || Number(user.is_super) === 1) ? null : Number(user.id);
     const all = db.listGroups({ ownerId: ownerFilter });
     const limit = Math.min(500, Math.max(1, pageSize));
     const offset = Math.max(0, page) * limit;
@@ -214,7 +231,8 @@ function createRouter() {
     const name = String(req.body?.name || '');
     const groupId = req.body?.groupId != null ? String(req.body.groupId) : null;
     const user = req.currentUser;
-    const ownerFilter = Number(user.is_super) === 1 ? null : Number(user.id);
+    // 默认共用：列表展示全部本地环境；严格模式非超管只看自己的；额度仍按 owner_id
+    const ownerFilter = (!strictEnvOwner() || Number(user.is_super) === 1) ? null : Number(user.id);
     const pack = db.listProfiles({ page, pageSize, name, ownerId: ownerFilter, groupId });
     const windows = manager.listWindows();
     const winMap = new Map(windows.map((w) => [w.profileId, w]));
@@ -235,7 +253,7 @@ function createRouter() {
   router.post('/browser/host/rebind', authMiddleware, (req, res) => {
     const id = String(req.body?.id || '');
     const row = db.getProfile(id);
-    const gate = assertProfileOwner(req.currentUser, row);
+    const gate = assertProfileOwner(req.currentUser, row, { write: true });
     if (!gate.ok) return res.json(fail(gate.msg, 1, errCodeFromMessage(gate.msg) || 'FORBIDDEN'));
     if (manager.getSession(id)) {
       return res.json(fail('请先关闭窗口再重绑主机', 1, 'STILL_RUNNING'));
@@ -365,7 +383,7 @@ function createRouter() {
     try {
       const id = String(req.body?.id || '');
       const row = db.getProfile(id);
-      const gate = assertProfileOwner(req.currentUser, row);
+      const gate = assertProfileOwner(req.currentUser, row, { write: true });
       if (!gate.ok) return res.json(fail(gate.msg));
       await manager.closeProfile(id).catch(() => {});
       db.deleteProfile(id);
@@ -381,7 +399,7 @@ function createRouter() {
     try {
       const id = String(req.body?.id || '');
       const row = db.getProfile(id);
-      const gate = assertProfileOwner(req.currentUser, row);
+      const gate = assertProfileOwner(req.currentUser, row, { write: true });
       if (!gate.ok) return res.json(fail(gate.msg));
       if (manager.getSession(id)) {
         await manager.closeProfile(id);
@@ -414,7 +432,7 @@ function createRouter() {
       let fields = { timezone: '', language: '', latitude: 0, longitude: 0, country: '' };
       for (const id of ids) {
         const row = db.getProfile(id);
-        const gate = assertProfileOwner(req.currentUser, row);
+        const gate = assertProfileOwner(req.currentUser, row, { write: true });
         if (!gate.ok) return res.json(fail(gate.msg, 1, errCodeFromMessage(gate.msg) || 'FORBIDDEN'));
         const fp = JSON.parse(row.fingerprint_json || '{}');
         const resolved = await resolveGeoFromProxy(proxyFields, fp, {});
@@ -474,7 +492,7 @@ function createRouter() {
       // 带 id：比特兼容 upsert（更新已有环境）
       if (existingId) {
         const existing = db.getProfile(existingId);
-        const gate = assertProfileOwner(user, existing);
+        const gate = assertProfileOwner(user, existing, { write: true });
         if (!gate.ok) return res.json(fail(gate.msg, 1, errCodeFromMessage(gate.msg) || 'FORBIDDEN'));
         const row = db.updateProfileMeta(existingId, {
           name: body.name != null ? body.name : existing.name,
@@ -499,8 +517,11 @@ function createRouter() {
         return res.json(ok(out));
       }
 
+      // 额度归属：可显式指定 ownerId（超管再绑环境耗用指定管理用户额度）；否则记在当前登录用户
+      const requestedOwner = Number(body.ownerId || body.owner_id || 0);
+      const ownerId = requestedOwner > 0 ? requestedOwner : Number(user.id || 0);
       const row = db.createProfile({
-        owner_id: user.id,
+        owner_id: ownerId,
         group_id: body.groupId || body.group_id || 'default',
         name: body.name || `TK-${Date.now()}`,
         remark: body.remark || '',
@@ -531,7 +552,7 @@ function createRouter() {
     try {
       const id = String(req.body?.id || '');
       const row = db.getProfile(id);
-      const gate = assertProfileOwner(req.currentUser, row);
+      const gate = assertProfileOwner(req.currentUser, row, { write: true });
       if (!gate.ok) return res.json(fail(gate.msg));
       const updated = db.updateProfileMeta(id, {
         name: req.body?.name,
@@ -547,4 +568,4 @@ function createRouter() {
   return router;
 }
 
-module.exports = { createRouter, ok, fail, assertProfileOwner };
+module.exports = { createRouter, ok, fail, assertProfileOwner, strictEnvOwner };

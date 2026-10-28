@@ -7,6 +7,8 @@ const TOKEN_KEY = 'tkswarm_lb_token';
 const SEEN_KEY = 'tkswarm_lb_seen';
 /** @type {object[]} */
 let lastWindows = [];
+/** @type {object[]} */
+let cachedProfiles = [];
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY) || '';
@@ -50,6 +52,53 @@ async function bitListProfiles() {
 
 function show(el, on) {
   document.querySelector(el)?.classList.toggle('hidden', !on);
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function toast(message, type = 'info') {
+  const host = document.getElementById('toast-host');
+  if (!host) {
+    // eslint-disable-next-line no-alert
+    alert(message);
+    return;
+  }
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span class="toast-ico" aria-hidden="true"></span><span class="toast-msg">${esc(message)}</span>`;
+  host.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(-6px)';
+    el.style.transition = 'opacity .2s ease, transform .2s ease';
+    setTimeout(() => el.remove(), 220);
+  }, 2800);
+}
+
+function confirmDialog({ title = '确认操作', message = '', confirmText = '确定', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.className = 'confirm-mask';
+    mask.innerHTML = `
+      <div class="confirm-card" role="dialog" aria-modal="true">
+        <div class="modal-head"><strong>${esc(title)}</strong></div>
+        <div class="modal-body">${esc(message)}</div>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-act="cancel">取消</button>
+          <button type="button" class="btn ${danger ? 'danger' : 'primary'}" data-act="ok">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+    const close = (v) => { mask.remove(); resolve(v); };
+    mask.addEventListener('click', (e) => { if (e.target === mask) close(false); });
+    mask.querySelector('[data-act="cancel"]').onclick = () => close(false);
+    mask.querySelector('[data-act="ok"]').onclick = () => close(true);
+    document.body.appendChild(mask);
+    mask.querySelector('[data-act="ok"]').focus();
+  });
 }
 
 function emptyRow(colspan, title, detail) {
@@ -98,6 +147,8 @@ function filteredWindows() {
 function renderWindows() {
   const winBody = document.getElementById('win-body');
   const windows = filteredWindows();
+  const countEl = document.getElementById('win-count');
+  if (countEl) countEl.textContent = `${windows.length} 条`;
   if (!lastWindows.length) {
     winBody.innerHTML = emptyRow(7, '暂无运行中的窗口', '打开环境后会出现在这里');
     return;
@@ -112,11 +163,11 @@ function renderWindows() {
       <td><code title="${esc(w.profileId)}">${esc(String(w.profileId).slice(0, 10))}…</code></td>
       <td>${esc(w.name)}</td>
       <td><span class="tag ${w.headless ? 'headless' : 'visible'}">${w.headless ? '无头' : '有头'}</span></td>
-      <td>${w.pid || '—'}</td>
+      <td><code>${w.pid || '—'}</code></td>
       <td class="muted">${esc(w.display || '—')}</td>
       <td>
         <div class="row-actions">
-          ${w.headless ? `<button class="btn small primary btn-show" type="button" data-id="${esc(w.profileId)}">显示窗口</button>` : ''}
+          ${w.headless ? `<button class="btn small primary btn-show" type="button" data-id="${esc(w.profileId)}">显示</button>` : ''}
           ${!w.headless && w.vnc ? `<button class="btn small primary btn-vnc" type="button" data-id="${esc(w.profileId)}" data-href="${esc(w.vnc.viewPath || ('/vnc.html?id=' + w.profileId))}">VNC</button>` : ''}
           ${!w.headless ? (w.recording
             ? `<button class="btn small ghost btn-rec-stop" type="button" data-id="${esc(w.profileId)}">停录(${w.recording.elapsedSec || 0}s)</button>`
@@ -147,16 +198,85 @@ function renderWindows() {
   });
 }
 
+function proxyTag(p) {
+  const type = String(p.proxyType || 'noproxy').toLowerCase();
+  if (type === 'noproxy' || !type) {
+    return '<span class="tag noproxy">直连</span>';
+  }
+  const host = [p.host, p.port].filter(Boolean).join(':');
+  return `<span class="tag proxy">${esc(type)}</span>${host ? ` <span class="muted">${esc(host)}</span>` : ''}${
+    p.lastIp ? `<div class="cell-sub">IP ${esc(p.lastIp)}</div>` : ''
+  }`;
+}
+
+function renderProfileRows(list) {
+  const profileBody = document.getElementById('profile-body');
+  const countEl = document.getElementById('profile-count');
+  if (countEl) countEl.textContent = `${list.length} 条`;
+  if (!profileBody) return;
+  if (!list.length) {
+    const q = document.getElementById('profile-search')?.value?.trim();
+    profileBody.innerHTML = emptyRow(
+      7,
+      q ? '无匹配结果' : '暂无环境',
+      q ? '尝试其他关键词' : '请在 Node 账号页创建并绑定'
+    );
+    return;
+  }
+  profileBody.innerHTML = list.map((p) => {
+    const running = p.status === 1 || p.status === 2;
+    const group = p.groupId || 'default';
+    return `
+      <tr>
+        <td><code title="${esc(p.id)}">${esc(String(p.id).slice(0, 12))}…</code></td>
+        <td>${esc(p.name)}${p.remark ? `<div class="cell-sub">${esc(p.remark)}</div>` : ''}</td>
+        <td><span class="tag group">${esc(group)}</span></td>
+        <td>${proxyTag(p)}</td>
+        <td>${esc(p.timezone || '—')}</td>
+        <td><span class="status-dot ${running ? 'running' : 'idle'}">${running ? '运行中' : '空闲'}</span></td>
+        <td>
+          <div class="row-actions">
+            <button class="btn small ghost btn-export" type="button" data-id="${esc(p.id)}">导出</button>
+            <button class="btn small ghost btn-rebind" type="button" data-id="${esc(p.id)}" title="将粘滞主机改绑到本机">重绑主机</button>
+          </div>
+          ${p.boundHostId ? `<div class="cell-sub">绑定 ${esc(p.boundHostId)}</div>` : ''}
+        </td>
+      </tr>`;
+  }).join('');
+  profileBody.querySelectorAll('.btn-export').forEach((btn) => {
+    btn.onclick = () => exportProfile(btn.dataset.id);
+  });
+  profileBody.querySelectorAll('.btn-rebind').forEach((btn) => {
+    btn.onclick = () => rebindHost(btn.dataset.id);
+  });
+}
+
+function filterProfiles() {
+  const q = (document.getElementById('profile-search')?.value || '').trim().toLowerCase();
+  if (!q) {
+    renderProfileRows(cachedProfiles);
+    return;
+  }
+  const filtered = cachedProfiles.filter((p) => {
+    const blob = [
+      p.id, p.name, p.remark, p.groupId, p.proxyType, p.host, p.port, p.timezone, p.lastIp, p.boundHostId,
+    ].map((x) => String(x ?? '').toLowerCase()).join(' ');
+    return blob.includes(q);
+  });
+  renderProfileRows(filtered);
+}
+
 async function startRecord(id) {
   const r = await json('POST', `/api/windows/${encodeURIComponent(id)}/record/start`, {});
-  if (!r?.ok) alert(r?.message || '无法开始录屏（需 ffmpeg + 有头）');
+  if (!r?.ok) toast(r?.message || '无法开始录屏（需 ffmpeg + 有头）', 'err');
+  else toast('已开始录屏', 'ok');
   await refreshDashboard();
 }
 
 async function stopRecord(id) {
   const r = await json('POST', `/api/windows/${encodeURIComponent(id)}/record/stop`, {});
   if (!r?.ok) {
-    alert(r?.message || '停止录屏失败');
+    toast(r?.message || '停止录屏失败', 'err');
     await refreshDashboard();
     return;
   }
@@ -171,6 +291,7 @@ async function stopRecord(id) {
       a.download = r.data.fileName || 'recording.mp4';
       a.click();
       URL.revokeObjectURL(url);
+      toast('录屏已保存', 'ok');
     } catch { /* ignore */ }
   }
   await refreshDashboard();
@@ -245,40 +366,18 @@ async function refreshDashboard() {
   renderWindows();
 
   const profiles = await bitListProfiles();
-  const profileBody = document.getElementById('profile-body');
-  if (!profiles.length) {
-    profileBody.innerHTML = emptyRow(7, '暂无环境', '请在 Node 账号页创建并绑定');
-  } else {
-    profileBody.innerHTML = profiles.map((p) => {
-      const running = p.status === 1 || p.status === 2;
-      return `
-      <tr>
-        <td><code title="${esc(p.id)}">${esc(String(p.id).slice(0, 12))}…</code></td>
-        <td>${esc(p.name)}${p.remark ? `<div class="cell-sub">${esc(p.remark)}</div>` : ''}</td>
-        <td>${esc(p.groupId || 'default')}</td>
-        <td>${esc(p.proxyType || 'noproxy')} ${esc(p.host || '')}${p.port ? ':' + p.port : ''}${p.lastIp ? `<div class="cell-sub">IP ${esc(p.lastIp)}</div>` : ''}</td>
-        <td>${esc(p.timezone || '—')}</td>
-        <td><span class="status-dot ${running ? 'running' : 'idle'}">${running ? '运行中' : '空闲'}</span></td>
-        <td>
-          <div class="row-actions">
-            <button class="btn small ghost btn-export" type="button" data-id="${esc(p.id)}">导出</button>
-            <button class="btn small ghost btn-rebind" type="button" data-id="${esc(p.id)}" title="将粘滞主机改绑到本机">重绑主机</button>
-          </div>
-          ${p.boundHostId ? `<div class="cell-sub">绑定 ${esc(p.boundHostId)}</div>` : ''}
-        </td>
-      </tr>`;
-    }).join('');
-    profileBody.querySelectorAll('.btn-export').forEach((btn) => {
-      btn.onclick = () => exportProfile(btn.dataset.id);
-    });
-    profileBody.querySelectorAll('.btn-rebind').forEach((btn) => {
-      btn.onclick = () => rebindHost(btn.dataset.id);
-    });
-  }
+  cachedProfiles = profiles;
+  filterProfiles();
 }
 
 async function rebindHost(id) {
-  if (!confirm('将把该环境的粘滞主机改绑到本机。确认环境已关闭且 userdata 已在本机？')) return;
+  const ok = await confirmDialog({
+    title: '重绑主机',
+    message: '将把该环境的粘滞主机改绑到本机。请确认环境已关闭且 userdata 已在本机。',
+    confirmText: '确认重绑',
+    danger: true,
+  });
+  if (!ok) return;
   const res = await fetch(`${API}/browser/host/rebind`, {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -286,24 +385,29 @@ async function rebindHost(id) {
   });
   const r = await res.json();
   if (!r?.success) {
-    alert(r?.msg || r?.message || '重绑失败');
+    toast(r?.msg || r?.message || '重绑失败', 'err');
     return;
   }
-  alert(`已重绑到 ${r.data?.boundHostId || '本机'}`);
+  toast(`已重绑到 ${r.data?.boundHostId || '本机'}`, 'ok');
   await refreshDashboard();
 }
 
 async function exportProfile(id) {
-  if (!confirm('导出将先关闭该环境窗口（若在运行）。继续？')) return;
+  const ok = await confirmDialog({
+    title: '导出环境',
+    message: '导出将先关闭该环境窗口（若在运行）。是否继续？',
+    confirmText: '继续导出',
+    danger: true,
+  });
+  if (!ok) return;
   const r = await json('POST', `/api/profiles/${encodeURIComponent(id)}/export`);
   if (!r?.ok) {
-    alert(r?.message || '导出失败');
+    toast(r?.message || '导出失败', 'err');
     return;
   }
   const a = document.createElement('a');
   a.href = `${API}${r.download}`;
   a.download = r.fileName || 'profile.tgz';
-  // 带 Token：用 fetch blob
   try {
     const res = await fetch(a.href, { headers: authHeaders() });
     if (!res.ok) throw new Error('下载失败');
@@ -314,8 +418,9 @@ async function exportProfile(id) {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    toast('导出完成', 'ok');
   } catch (e) {
-    alert(e.message || '下载失败');
+    toast(e.message || '下载失败', 'err');
   }
   await refreshDashboard();
 }
@@ -329,10 +434,10 @@ async function importProfileFile(file) {
   });
   const r = await res.json();
   if (!r?.ok) {
-    alert(r?.message || '导入失败');
+    toast(r?.message || '导入失败', 'err');
     return;
   }
-  alert(`已导入环境 ${r.profile?.name || r.profile?.id || ''}`);
+  toast(`已导入环境 ${r.profile?.name || r.profile?.id || ''}`, 'ok');
   await refreshDashboard();
 }
 
@@ -368,17 +473,35 @@ async function showWindow(id) {
 }
 
 async function closeWindow(id) {
+  const ok = await confirmDialog({
+    title: '关闭窗口',
+    message: '确认关闭该运行中的环境窗口？',
+    confirmText: '关闭',
+    danger: true,
+  });
+  if (!ok) return;
   await json('POST', `/api/windows/${encodeURIComponent(id)}/close`);
+  toast('窗口已关闭', 'ok');
   await refreshDashboard();
 }
 
 async function closeSelected() {
   const ids = [...document.querySelectorAll('.win-check:checked')].map((el) => el.value);
-  if (!ids.length) return;
-  if (!confirm(`确认关闭选中的 ${ids.length} 个窗口？`)) return;
+  if (!ids.length) {
+    toast('请先勾选窗口', 'info');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: '批量关闭',
+    message: `确认关闭选中的 ${ids.length} 个窗口？`,
+    confirmText: '全部关闭',
+    danger: true,
+  });
+  if (!ok) return;
   await json('POST', '/api/windows/close-batch', { ids });
   const all = document.getElementById('win-check-all');
   if (all) all.checked = false;
+  toast(`已关闭 ${ids.length} 个窗口`, 'ok');
   await refreshDashboard();
 }
 
@@ -408,12 +531,6 @@ function openVncEmbed(id, href) {
   `);
 }
 
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
 async function doLogin(e) {
   e?.preventDefault?.();
   const errEl = document.getElementById('login-error');
@@ -431,6 +548,7 @@ async function doLogin(e) {
   if (pack.token) setToken(pack.token);
   show('#login-panel', false);
   show('#dashboard', true);
+  toast('登录成功', 'ok');
   await refreshDashboard();
 }
 
@@ -488,9 +606,16 @@ async function init() {
     show('#login-panel', true);
     show('#user-chip', false);
     show('#btn-logout', false);
+    toast('已退出登录', 'info');
   };
-  document.getElementById('btn-refresh').onclick = () => refreshDashboard();
-  document.getElementById('btn-audit-refresh')?.addEventListener('click', () => refreshAudit());
+  document.getElementById('btn-refresh').onclick = async () => {
+    await refreshDashboard();
+    toast('数据已刷新', 'ok');
+  };
+  document.getElementById('btn-audit-refresh')?.addEventListener('click', async () => {
+    await refreshAudit();
+    toast('审计已刷新', 'ok');
+  });
   document.getElementById('import-file')?.addEventListener('change', (e) => {
     const f = e.target.files?.[0];
     e.target.value = '';
@@ -499,6 +624,7 @@ async function init() {
   document.getElementById('btn-close-selected')?.addEventListener('click', closeSelected);
   document.getElementById('win-filter')?.addEventListener('input', renderWindows);
   document.getElementById('win-mode-filter')?.addEventListener('change', renderWindows);
+  document.getElementById('profile-search')?.addEventListener('input', filterProfiles);
   document.getElementById('win-check-all')?.addEventListener('change', (e) => {
     document.querySelectorAll('.win-check').forEach((c) => { c.checked = e.target.checked; });
   });
@@ -507,10 +633,15 @@ async function init() {
   });
   document.getElementById('btn-copy-token').onclick = async () => {
     const t = document.getElementById('api-token').textContent.trim();
-    if (!t || t === '—') return;
+    if (!t || t === '—') {
+      toast('暂无 Token 可复制', 'err');
+      return;
+    }
     await navigator.clipboard.writeText(t);
-    document.getElementById('btn-copy-token').textContent = '已复制';
-    setTimeout(() => { document.getElementById('btn-copy-token').textContent = '复制'; }, 1500);
+    const btn = document.getElementById('btn-copy-token');
+    btn.textContent = '已复制';
+    toast('Token 已复制', 'ok');
+    setTimeout(() => { btn.textContent = '复制'; }, 1500);
   };
   window.tkswarmBrowser?.onWindowsUpdated?.(() => refreshDashboard());
   setInterval(() => {

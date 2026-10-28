@@ -5,31 +5,35 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
   <link rel="apple-touch-icon" href="/favicon.png" />
-  <meta name="theme-color" content="#409eff" />
+  <meta name="theme-color" content="#2563eb" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>第一页自研浏览器 Linux</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=4.0" />
+  <link rel="stylesheet" href="theme-premium.css?v=1.0" />
   <style>
-    /* 首屏防闪：登录态未确认前，登录页和面板都不显示，只显示恢复会话的占位 */
     body.booting #login-panel,
     body.booting #dashboard { display: none !important; }
     #boot-splash {
       position: fixed; inset: 0; z-index: 999;
       display: flex; align-items: center; justify-content: center;
-      background: #0b1220; color: #94a3b8;
-      font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(700px 380px at 50% -10%, rgba(37,99,235,.14), transparent 60%),
+        #f1f5f9;
+      color: #64748b;
+      font: 14px/1.6 "Manrope", system-ui, sans-serif;
     }
     body:not(.booting) #boot-splash { display: none !important; }
     #boot-splash .boot-spin {
       width: 16px; height: 16px; margin-right: 10px; border-radius: 50%;
-      border: 2px solid #1e293b; border-top-color: #409eff;
+      border: 2px solid #e2e8f0; border-top-color: #2563eb;
       animation: boot-spin .8s linear infinite;
     }
     @keyframes boot-spin { to { transform: rotate(360deg); } }
-  </style></head>
+  </style>
+</head>
 <body class="booting">
   <div id="boot-splash"><span class="boot-spin"></span>正在恢复会话…</div>
   <div id="app" class="app-shell">
@@ -49,10 +53,10 @@
 
     <section id="login-panel" class="login-stage">
       <div class="login-card anim-enter">
-        <p class="login-eyebrow">Linux 服务端指纹浏览器</p>
+        <p class="login-eyebrow">管理员登录</p>
         <h2 class="login-brand">第一页自研浏览器</h2>
         <p class="login-product">Linux</p>
-        <p class="hint">与 tkswarm-node 共用账号体系。专为客服坐席等长驻任务设计；支持有头/无头、多环境多代理。</p>
+        <p class="hint">与 Node 共用账号体系。支持有头 / 无头、多环境与代理；适合长驻服务端任务。</p>
         <form id="login-form" class="login-form" autocomplete="on">
           <label>API 地址
             <input id="api-base" type="text" placeholder="http://127.0.0.1:8080/api" />
@@ -128,7 +132,7 @@
         </div>
       </div>
 
-      <div class="panel anim-fade">
+      <div class="panel anim-fade" id="windows-panel">
         <div class="panel-head">
           <div>
             <h2>窗口列表</h2>
@@ -146,6 +150,7 @@
             <option value="headless">仅无头</option>
             <option value="headed">仅有头</option>
           </select>
+          <span id="win-count" class="toolbar-meta">0 条</span>
         </div>
         <div class="table-scroll">
           <table class="win-table">
@@ -178,7 +183,7 @@
         </div>
       </div>
 
-      <div class="panel anim-fade">
+      <div class="panel anim-fade" id="profiles-panel">
         <div class="panel-head">
           <div>
             <h2>环境列表</h2>
@@ -188,6 +193,13 @@
             导入 .tgz
             <input id="import-file" type="file" accept=".tgz,application/gzip" hidden />
           </label>
+        </div>
+        <div class="panel-toolbar search-bar">
+          <label class="search-field">
+            <svg class="search-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input id="profile-search" type="search" placeholder="搜索名称、分组、代理…" autocomplete="off" />
+          </label>
+          <span id="profile-count" class="toolbar-meta">0 条</span>
         </div>
         <div class="table-scroll">
           <table class="win-table">
@@ -226,6 +238,7 @@
       </div>
     </section>
   </div>
-  <script src="app.js?v=3"></script>
+  <div id="toast-host" aria-live="polite" aria-relevant="additions"></div>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

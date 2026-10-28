@@ -1,0 +1,121 @@
+/* ==========================================================================
+   TkSwarm Linux Browse · Deep Premium（最终加载）
+   ========================================================================== */
+
+:root {
+  --px-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Boot splash → 浅色科技 */
+#boot-splash {
+  background:
+    radial-gradient(700px 380px at 50% -10%, rgba(37, 99, 235, 0.14), transparent 60%),
+    #f1f5f9 !important;
+  color: #64748b !important;
+}
+#boot-splash .boot-spin {
+  border-color: #e2e8f0 !important;
+  border-top-color: #2563eb !important;
+}
+
+/* Token 复制按钮对齐 */
+.token-bar .btn {
+  height: 32px;
+  flex-shrink: 0;
+}
+
+/* 危险操作按钮在工具栏 */
+.panel-actions .danger-text {
+  background: #fff1f2 !important;
+  border-color: #fecdd3 !important;
+  color: #e11d48 !important;
+}
+.panel-actions .danger-text:hover {
+  background: #ffe4e6 !important;
+}
+
+/* 行内操作色区分 */
+.row-actions .btn-vnc,
+.row-actions .btn.small.primary.btn-vnc {
+  background: linear-gradient(135deg, #22d3ee, #0891b2) !important;
+  border: none !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(8, 145, 178, 0.28) !important;
+}
+
+.row-actions .btn-shot {
+  background: #eef2ff !important;
+  border-color: #c7d2fe !important;
+  color: #4338ca !important;
+}
+
+.row-actions .btn-rec-start {
+  background: #fff7ed !important;
+  border-color: #fed7aa !important;
+  color: #c2410c !important;
+}
+
+.row-actions .btn-rec-stop {
+  background: #fff1f2 !important;
+  border-color: #fecdd3 !important;
+  color: #e11d48 !important;
+}
+
+.row-actions .btn-close {
+  background: #fff1f2 !important;
+  border-color: #fecdd3 !important;
+  color: #e11d48 !important;
+}
+
+.row-actions .btn-export {
+  background: #ecfeff !important;
+  border-color: #a5f3fc !important;
+  color: #0e7490 !important;
+}
+
+.row-actions .btn-rebind {
+  background: #fdf4ff !important;
+  border-color: #f5d0fe !important;
+  color: #a21caf !important;
+}
+
+/* 筛选条更精致 */
+.toolbar-row .input {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.toolbar-row select.input {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237b8799' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+
+/* 面板左侧色条区分 */
+#sessions-panel { border-left: 3px solid #4f46e5; }
+#windows-panel { border-left: 3px solid #2563eb; }
+#profiles-panel { border-left: 3px solid #0891b2; }
+#audit-panel { border-left: 3px solid #c026d3; }
+
+/* 表格 code 统一 */
+.win-table code {
+  background: #f1f5f9 !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* Modal 头强调 */
+.modal-card::before {
+  content: "";
+  display: block;
+  height: 3px;
+  background: linear-gradient(90deg, #2563eb, #0891b2, #4f46e5);
+}
+
+/* 全宽 */
+.dashboard,
+.app-shell {
+  width: 100%;
+  max-width: none;
+}

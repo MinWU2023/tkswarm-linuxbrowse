@@ -214,30 +214,71 @@ install_system_deps() {
   fi
 }
 
+# snap 版 chromium 只是 wrapper，受 AppArmor 限制：无法使用自定义 --user-data-dir，
+# systemd/无头场景基本不可用，一律不认（否则会误判"已有浏览器"而跳过安装）
+is_snap_wrapper() {
+  local p="${1:-}"
+  [[ -z "$p" ]] && return 0
+  [[ "$p" == /snap/* ]] && return 0
+  [[ "$(readlink -f "$p" 2>/dev/null)" == /usr/bin/snap ]] && return 0
+  return 1
+}
+
+# 解析出真正可用的浏览器路径（跳过 snap 包装）
+real_chrome_path() {
+  local c w
+  for c in /usr/bin/google-chrome-stable /usr/bin/google-chrome /opt/google/chrome/chrome \
+           /usr/bin/chromium /usr/bin/chromium-browser \
+           /var/lib/tkswarm-linuxbrowse/browsers/*/chrome-linux/chrome \
+           /root/.cache/ms-playwright/chromium-*/chrome-linux/chrome; do
+    [[ -x "$c" ]] || continue
+    is_snap_wrapper "$c" && continue
+    echo "$c"; return 0
+  done
+  for w in google-chrome-stable google-chrome chromium chromium-browser; do
+    c="$(command -v "$w" 2>/dev/null || true)"
+    [[ -n "$c" ]] || continue
+    is_snap_wrapper "$c" && continue
+    echo "$c"; return 0
+  done
+  return 1
+}
 has_chromium() {
-  cmd_exists chromium || cmd_exists chromium-browser || cmd_exists google-chrome-stable \
-    || [[ -x /usr/bin/chromium ]] || [[ -x /usr/bin/chromium-browser ]] || [[ -x /usr/bin/google-chrome-stable ]]
+  [[ -n "$(real_chrome_path)" ]]
 }
 
 install_chromium_if_missing() {
   if has_chromium; then
-    log "  已存在 Chromium/Chrome，跳过浏览器安装"
+    log "  已存在可用浏览器（非 snap）：$(real_chrome_path)，跳过安装"
     return 0
   fi
-  export DEBIAN_FRONTEND=noninteractive
-  repair_broken_dpkg || true
-  apt-get update -qq || true
-  for pkg in chromium-browser chromium google-chrome-stable; do
-    if pkg_installed "${pkg}"; then
-      log "  已安装 ${pkg}"
-      has_chromium && return 0
-    fi
+  # 优先装官方 Google Chrome（deb，不受 snap 限制，也不依赖 npm 缓存）
+  if install_google_chrome_deb; then
+    has_chromium && return 0
+  fi
+  local pkg
+  for pkg in chromium-browser chromium; do
+    apt-get install -y -qq "$pkg" 2>/dev/null || continue
+    has_chromium && return 0
   done
-  log "  未检测到浏览器，尝试安装 chromium-browser / chromium ..."
-  apt-get install -y -qq chromium-browser 2>/dev/null \
-    || apt-get install -y -qq chromium 2>/dev/null \
-    || apt-get install -y -qq google-chrome-stable 2>/dev/null \
-    || log "  警告: 未能通过 apt 安装 Chromium，请稍后设置 TKSWARM_CHROME_PATH"
+  log "  ！未装到可用浏览器（snap 版不可用），请手动安装 Google Chrome 后设置 TKSWARM_CHROME_PATH"
+  return 1
+}
+
+# 官方 Google Chrome（apt 源）；失败不影响主流程
+install_google_chrome_deb() {
+  [[ -x /usr/bin/google-chrome-stable ]] && ! is_snap_wrapper /usr/bin/google-chrome-stable && return 0
+  command -v curl >/dev/null 2>&1 || return 1
+  log "  安装 Google Chrome（官方 deb 源）..."
+  install -d -m 0755 /usr/share/keyrings 2>/dev/null || true
+  curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+    | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg 2>/dev/null || return 1
+  echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main' \
+    > /etc/apt/sources.list.d/google-chrome.list
+  apt-get update -qq >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq google-chrome-stable >/dev/null 2>&1 || return 1
+  [[ -x /usr/bin/google-chrome-stable ]] && return 0
+  return 1
 }
 
 node_major_version() {
@@ -454,16 +495,7 @@ fi
 chown -R tkswarm:tkswarm "${TKSWARM_APP_DIR}"
 
 log "========== 5/7 写入环境配置 ${TKSWARM_ENV_FILE} =========="
-CHROME_PATH=""
-# 优先非 snap 的 chromium（snap 在 systemd/无头场景常失败）；再退回 wrapper / snap
-for c in \
-  /usr/bin/google-chrome-stable \
-  /usr/bin/chromium \
-  /snap/bin/chromium \
-  /usr/bin/chromium-browser
-do
-  [[ -x "$c" ]] && CHROME_PATH="$c" && break
-done
+CHROME_PATH="$(real_chrome_path || true)"
 
 if [[ -f "${TKSWARM_ENV_FILE}" ]]; then
   log "  配置文件已存在，保留原文件（仅更新 TKSWARM_API_BASE / VNC / CHROME_PATH 相关项）"
@@ -476,8 +508,17 @@ if [[ -f "${TKSWARM_ENV_FILE}" ]]; then
       && sed -i "s|^TKSWARM_VNC_PASSWORD=.*|TKSWARM_VNC_PASSWORD=${TKSWARM_VNC_PASSWORD}|" "${TKSWARM_ENV_FILE}" \
       || echo "TKSWARM_VNC_PASSWORD=${TKSWARM_VNC_PASSWORD}" >> "${TKSWARM_ENV_FILE}"
   fi
-  if [[ -n "${CHROME_PATH}" ]] && ! grep -q '^TKSWARM_CHROME_PATH=' "${TKSWARM_ENV_FILE}"; then
-    echo "TKSWARM_CHROME_PATH=${CHROME_PATH}" >> "${TKSWARM_ENV_FILE}"
+  if [[ -n "${CHROME_PATH}" ]]; then
+    if grep -q '^TKSWARM_CHROME_PATH=' "${TKSWARM_ENV_FILE}"; then
+      # 已存在：若是 snap 包装则纠正为可用路径，其余保持用户自定义值
+
+      if grep -q '^TKSWARM_CHROME_PATH=/snap/' "${TKSWARM_ENV_FILE}"; then
+        sed -i "s|^TKSWARM_CHROME_PATH=.*|TKSWARM_CHROME_PATH=${CHROME_PATH}|" "${TKSWARM_ENV_FILE}"
+        log "  已把 snap 浏览器路径纠正为 ${CHROME_PATH}"
+      fi
+    else
+      echo "TKSWARM_CHROME_PATH=${CHROME_PATH}" >> "${TKSWARM_ENV_FILE}"
+    fi
   fi
 else
   {

@@ -16,6 +16,7 @@ const { audit, readRecent } = require('../auth/audit');
 const { readSettings, writeSettings, resolveRequestUser, extractBearer } = require('../settings');
 const { TKSWARM_API_BASE, REQUIRE_BEARER, HOST_ID } = require('../config');
 const { assertTokenAlive } = require('../auth/token-guard');
+const { assertProfileOwner, strictEnvOwner } = require('./bit-api');
 
 const router = express.Router();
 
@@ -86,6 +87,7 @@ router.get('/api/dashboard/stats/async', async (req, res) => {
 });
 
 function filterWindowsForUser(user, windows) {
+  if (!strictEnvOwner()) return windows;
   if (Number(user.is_super) === 1) return windows;
   return windows.filter((w) => Number(w.ownerId) === Number(user.id));
 }
@@ -137,10 +139,8 @@ router.post('/api/windows/:id/show', async (req, res) => {
     if (!user) return;
     const id = req.params.id;
     const profile = db.getProfile(id);
-    if (!profile) return res.json({ ok: false, message: '环境不存在' });
-    if (Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-      return res.json({ ok: false, message: '无权操作该环境' });
-    }
+    const gate = assertProfileOwner(user, profile);
+    if (!gate.ok) return res.json({ ok: false, message: gate.msg });
     const data = await manager.showWindow(id);
     res.json({ ok: true, data });
   } catch (e) {
@@ -154,8 +154,9 @@ router.post('/api/windows/:id/close', async (req, res) => {
     if (!user) return;
     const id = req.params.id;
     const profile = db.getProfile(id);
-    if (profile && Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-      return res.json({ ok: false, message: '无权操作该环境' });
+    if (profile) {
+      const gate = assertProfileOwner(user, profile);
+      if (!gate.ok) return res.json({ ok: false, message: gate.msg });
     }
     await manager.closeProfile(id);
     res.json({ ok: true });
@@ -169,8 +170,9 @@ router.get('/api/windows/:id/vnc', async (req, res) => {
   if (!user) return;
   const id = req.params.id;
   const profile = db.getProfile(id);
-  if (profile && Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-    return res.json({ ok: false, message: '无权查看' });
+  if (profile) {
+    const gate = assertProfileOwner(user, profile);
+    if (!gate.ok) return res.json({ ok: false, message: gate.msg });
   }
   const info = vnc.getVncInfo(id);
   if (!info) {
@@ -189,9 +191,12 @@ router.post('/api/windows/close-batch', async (req, res) => {
     const errors = [];
     for (const id of ids) {
       const profile = db.getProfile(id);
-      if (profile && Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-        errors.push({ id, message: '无权' });
-        continue;
+      if (profile) {
+        const gate = assertProfileOwner(user, profile);
+        if (!gate.ok) {
+          errors.push({ id, message: gate.msg || '无权' });
+          continue;
+        }
       }
       try {
         await manager.closeProfile(id);
@@ -212,8 +217,9 @@ router.get('/api/windows/:id/screenshot', async (req, res) => {
     if (!user) return;
     const id = req.params.id;
     const profile = db.getProfile(id);
-    if (profile && Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-      return res.json({ ok: false, message: '无权操作该环境' });
+    if (profile) {
+      const gate = assertProfileOwner(user, profile);
+      if (!gate.ok) return res.json({ ok: false, message: gate.msg });
     }
     const session = manager.getSession(id);
     if (!session) return res.json({ ok: false, message: '环境未在运行' });
@@ -237,10 +243,8 @@ router.post('/api/profiles/:id/export', async (req, res) => {
     if (!user) return;
     const id = req.params.id;
     const profile = db.getProfile(id);
-    if (!profile) return res.json({ ok: false, message: '环境不存在' });
-    if (Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-      return res.json({ ok: false, message: '无权导出' });
-    }
+    const gate = assertProfileOwner(user, profile, { write: true });
+    if (!gate.ok) return res.json({ ok: false, message: gate.msg === 'browser环境不存在或已删除' ? '环境不存在' : (gate.msg || '无权导出') });
     if (manager.getSession(id)) {
       await manager.closeProfile(id).catch(() => {});
     }
@@ -339,10 +343,8 @@ router.post('/api/windows/:id/record/start', async (req, res) => {
     if (!user) return;
     const id = req.params.id;
     const profile = db.getProfile(id);
-    if (!profile) return res.json({ ok: false, message: '环境不存在' });
-    if (Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-      return res.json({ ok: false, message: '无权操作' });
-    }
+    const gate = assertProfileOwner(user, profile);
+    if (!gate.ok) return res.json({ ok: false, message: gate.msg === 'browser环境不存在或已删除' ? '环境不存在' : gate.msg });
     const session = manager.getSession(id);
     if (!session?.display || session.headless) {
       return res.json({ ok: false, message: '仅有头窗口可录屏' });
@@ -361,8 +363,9 @@ router.post('/api/windows/:id/record/stop', async (req, res) => {
     if (!user) return;
     const id = req.params.id;
     const profile = db.getProfile(id);
-    if (profile && Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id)) {
-      return res.json({ ok: false, message: '无权操作' });
+    if (profile) {
+      const gate = assertProfileOwner(user, profile);
+      if (!gate.ok) return res.json({ ok: false, message: gate.msg });
     }
     const result = await record.stopRecording(id);
     audit('browser.record.stop', { userId: user.id, profileId: id, fileName: result.fileName });

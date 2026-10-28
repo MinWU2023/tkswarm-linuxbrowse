@@ -47,14 +47,15 @@ function attachToHttpServer(server) {
       socket.destroy();
       return;
     }
-    // 可选：带 token 时校验归属（无 token 时仅内网场景放行）
+    // 可选：带 token 时校验归属（默认共用放行；与 bit-api assertProfileOwner 一致）。无 token 时仅内网场景放行
     try {
       const db = require('../db');
+      const { assertProfileOwner } = require('../server/bit-api');
       const token = String(url.searchParams.get('token') || '').trim();
       if (token) {
         const user = db.getUserByToken(token);
         const profile = db.getProfile(profileId);
-        if (!user || (profile && Number(user.is_super) !== 1 && Number(profile.owner_id) !== Number(user.id))) {
+        if (!user || (profile && !assertProfileOwner(user, profile).ok)) {
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
           socket.destroy();
           return;

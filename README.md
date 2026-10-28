@@ -43,7 +43,7 @@
 - 多环境 / 多代理 / 多时区 / 独立 `user-data-dir`
 - `browser/open` 支持 **有头 / 无头**（`args` 含 `--headless` 或 `headless: true`）
 - 登录账号与 **TkSwarm 管理后台同一套**（`TKSWARM_API_BASE`）
-- **多账号并发会话**：多人同时登录；Node 用各自 Bearer Token，环境按 owner 隔离
+- **多账号并发会话**：多人同时登录；Node 用各自 Bearer Token；默认**环境共用**（`owner_id` 仅计创建额度；`TKSWARM_STRICT_ENV_OWNER=1` 才按人隔离）
 - 每账号最多 **300** 环境（`TKSWARM_BROWSER_MAX_ENVS`）
 - 首页：本账号用量、子级汇总、并发会话（超管）、运行中窗口
 - 无头可点 **显示窗口**；有头可点 **VNC 查看**（Xvfb + x11vnc + noVNC）
@@ -131,12 +131,13 @@ sudo systemctl enable --now tkswarm-linuxbrowse
 
 ### 多员工 / 多 Token（短期）
 
-Linux 支持多账号同时登录，**每个账号一份 Bearer**，环境按 `owner_id` 隔离。
+Linux 支持多账号同时登录，**每个账号一份 Bearer**。默认**同机环境共用**：任意已登录用户可列表/打开/关闭/改配/删除；`owner_id` 只用于创建额度（`MAX_ENVS_PER_USER`）。真·按人隔离时设 `TKSWARM_STRICT_ENV_OWNER=1`。
 
 | 场景 | 做法 |
 |------|------|
 | 一台 Node 只服务一个坐席员工 | Node 填该员工在 Linux 控制台登录后的 Token |
-| 多员工共用一台 Linux | 每台 Node（或每工作站）各自登录、各自 Token；勿共用超管 Token 跑业务 |
+| 多员工共用一台 Linux | 默认可共用同一批环境；各 Node 各自 Token 即可 |
+| 需要按创建者隔离 | 设 `TKSWARM_STRICT_ENV_OWNER=1`（写操作仅创建者/超管） |
 | 长期 | PHP 侧按员工 lease Token（roadmap L1-2） |
 
 ### 窗口收尸（keepBrowser）
