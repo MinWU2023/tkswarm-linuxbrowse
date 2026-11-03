@@ -402,6 +402,7 @@ router.get('/api/tasks', async (req, res) => {
       },
     };
     if (debug) {
+      const dbgAccountId = Number(req.query.accountId || req.query.account_id || 0) || 0;
       body.debug = {
         userId: user?.id || 0,
         username: user?.username || '',
@@ -421,8 +422,18 @@ router.get('/api/tasks', async (req, res) => {
           seat_action: r.seat_action || r.seatAction || '',
           account_id: r.account_id,
           owner_id: r.owner_id,
+          last_error: r.last_error || '',
         })),
       };
+      // 顺带诊断账号环境包（部署后可直接 ?debug=1&accountId=105）
+      if (dbgAccountId > 0) {
+        try {
+          const packs = await upstreamGet(base, `/node/accounts/${dbgAccountId}/env-packs`, token);
+          body.debug.envPacks = packs.ok ? packs.data : { error: packs.json?.message || 'env-packs 查询失败' };
+        } catch (e) {
+          body.debug.envPacks = { error: e.message || String(e) };
+        }
+      }
     }
     res.json(body);
   } catch (e) {
@@ -497,6 +508,82 @@ router.post('/api/tasks/:id/action', async (req, res) => {
     });
   } catch (e) {
     return res.status(502).json({ ok: false, message: e.message || '无法连接中心 API' });
+  }
+});
+
+/**
+ * GET /api/debug/env-packs?accountId=105
+ * 诊断：账号绑定 vs 中心库是否真有可下载环境包（澄清「API 项目里有包」误解）
+ */
+router.get('/api/debug/env-packs', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  const accountId = Number(req.query.accountId || req.query.account_id || 0) || 0;
+  if (accountId < 1) {
+    return res.status(400).json({ ok: false, message: '请传 accountId' });
+  }
+  const base = apiBase();
+  if (!base) {
+    return res.json({ ok: false, message: '未配置中心 API 地址' });
+  }
+  const token = authToken(req, user);
+  try {
+    const bundle = await upstreamGet(base, `/node/accounts/${accountId}/bundle`, token);
+    const packs = await upstreamGet(base, `/node/accounts/${accountId}/env-packs`, token);
+    const b = bundle.ok ? (bundle.data || {}) : {};
+    const ids = [];
+    const push = (v) => {
+      const s = String(v || '').trim();
+      if (s && !ids.includes(s)) ids.push(s);
+    };
+    push(b.linux_browser_profile_id);
+    push(b.tkswarm_browser_profile_id);
+    push(b.browser_profile_id);
+    const lists = b.env_profile_ids || {};
+    for (const x of [...(lists.linux || []), ...(lists.tkswarm || [])]) push(x);
+
+    const metas = [];
+    for (const pid of ids) {
+      const m = await upstreamGet(base, `/node/browser-profiles/${encodeURIComponent(pid)}/pack-meta`, token);
+      const d = m.ok ? (m.data || {}) : { error: m.json?.message || '查询失败', profileId: pid };
+      metas.push({
+        profileId: pid,
+        exists: !!d.exists,
+        hasPack: !!d.hasPack,
+        packFileExists: !!d.packFileExists,
+        packBytes: Number(d.packBytes || 0),
+        packRevision: Number(d.packRevision || 0),
+        browserBackend: d.browserBackend || '',
+        reason: d.reason || d.error || '',
+        packPath: d.packPath || '',
+      });
+    }
+
+    const packable = packs.ok ? (packs.data?.packable || []) : [];
+    const all = packs.ok ? (packs.data?.all || []) : [];
+    const storageDir = packs.ok ? (packs.data?.storageDir || '') : '';
+
+    return res.json({
+      ok: true,
+      accountId,
+      apiBase: base,
+      bindings: {
+        linux: b.linux_browser_profile_id || '',
+        tkswarm: b.tkswarm_browser_profile_id || '',
+        primary: b.browser_profile_id || '',
+        backend: b.browser_backend || '',
+      },
+      candidateMetas: metas,
+      packableCount: packable.length,
+      packable,
+      allEnvs: all,
+      storageDir,
+      verdict: packable.length > 0
+        ? '中心库有可拉包；若仍报 no-cloud-pack，请更新 Node（env-packs 兜底）后重试'
+        : '中心库对当前绑定没有可下载包：账号绑定了 profileId，但 pack 文件未上传或 API 机磁盘上不存在。桌面打开该环境并关闭一次以首传；不要把「账号已绑环境」当成「已有跨机包」。',
+    });
+  } catch (e) {
+    return res.status(502).json({ ok: false, message: e.message || '诊断失败' });
   }
 });
 
