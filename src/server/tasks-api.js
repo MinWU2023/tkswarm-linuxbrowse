@@ -206,9 +206,13 @@ function mapWorkBatch(row) {
       taskType,
       lastError: row.last_error || '',
     },
-    note: pending
-      ? `${pending} 项待执行`
-      : (row.last_error || `${scopeLabel}${taskType ? ` · ${actionLabel}` : ''}`),
+    note: (() => {
+      const err = String(row.last_error || row.lastError || '').trim();
+      if (err) return err;
+      if (pending) return `${pending} 项待执行`;
+      return `${scopeLabel}${taskType ? ` · ${actionLabel}` : ''}`;
+    })(),
+    lastError: String(row.last_error || row.lastError || '').trim(),
   };
 }
 

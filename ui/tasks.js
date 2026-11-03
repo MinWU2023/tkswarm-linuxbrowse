@@ -200,9 +200,10 @@ function renderRows(items) {
   body.innerHTML = items.map((x) => {
     const payload = x.payload || {};
     const backend = payload.browserBackend || payload.browser_backend || '';
-    const note = x.note
+    const note = x.lastError || x.note
       || (backend ? `后端 ${backend}` : '')
       || (x.group_name || '-');
+    const noteCls = x.lastError ? 'danger-text' : 'muted';
     const key = taskKeyOf(x);
     const active = logViewer.open && logViewer.taskKey === key ? ' is-active' : '';
     return `<tr class="task-row${active}" data-task-key="${esc(key)}">
@@ -212,7 +213,7 @@ function renderRows(items) {
       <td>${statusBadge(x.status)}</td>
       <td><span class="muted">${esc(progressText(x))}</span></td>
       <td class="muted">${esc(x.created_at || '-')}</td>
-      <td class="muted">${esc(note)}</td>
+      <td class="${noteCls}" title="${esc(note)}">${esc(note)}</td>
       <td>${opsCell(x)}</td>
     </tr>`;
   }).join('');
