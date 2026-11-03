@@ -150,7 +150,7 @@ function renderRows(items) {
   if (!items.length) {
     body.innerHTML = `<tr><td colspan="7" class="empty">
       <div class="empty-block"><strong>暂无任务</strong>
-      <span class="muted">客服拉粉丝会以「客服粉丝/关注同步」出现在坐席队列；可切换「全部状态 / 已完成」查看</span></div>
+      <span class="muted">坐席拉粉丝入队后会出现「客服粉丝/关注同步」。请确认本页登录账号与客服台一致，并已更新中心 API + 本服务；可切「全部状态」查看已完成项</span></div>
     </td></tr>`;
     return;
   }

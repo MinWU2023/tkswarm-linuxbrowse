@@ -81,6 +81,63 @@ const SEAT_TYPE_LABEL = {
 const CENTER_SERVER_BROWSER_TYPES = new Set(['ai_lead', 'ai_lead_dm']);
 const CENTER_TYPE_QUERY = 'ai_lead,ai_lead_dm';
 
+/** 坐席/拓客分任务类型（含误入 general 的 sync_fans 等） */
+const SEAT_WORK_TASK_TYPES = new Set([
+  'sync_fans', 'dm_sync', 'dm_reply', 'cs_login', 'cs_logout', 'cs_detect',
+  'ai_lead', 'ai_lead_dm',
+]);
+
+function isSeatWorkRow(row) {
+  const scope = String(row.batch_scope || row.batchScope || '').trim().toLowerCase();
+  if (scope === 'cs_seat' || scope === 'ai_lead') return true;
+  const taskType = String(row.primary_task_type || row.primaryTaskType || '').trim().toLowerCase();
+  if (SEAT_WORK_TASK_TYPES.has(taskType)) return true;
+  const seatAction = String(row.seat_action || row.seatAction || '').trim();
+  return seatAction !== '';
+}
+
+function pickUpstreamRows(block) {
+  return Array.isArray(block?.data?.items)
+    ? block.data.items
+    : (Array.isArray(block?.data?.list) ? block.data.list : []);
+}
+
+/** 旧 API 列表无 primary_task_type 时，抽查分任务识别坐席类 */
+async function enrichSeatRowsFromItems(base, token, rows, limit = 15) {
+  const candidates = rows.filter((r) => !isSeatWorkRow(r)).slice(0, limit);
+  if (!candidates.length) return rows;
+  const found = new Map();
+  await Promise.all(candidates.map(async (r) => {
+    const id = Number(r.id || 0);
+    if (id < 1) return;
+    try {
+      const detail = await upstreamGet(base, `/account-work-batches/${id}/items?pageSize=8`, token);
+      if (!detail.ok) return;
+      const items = pickUpstreamRows(detail);
+      for (const it of items) {
+        const tt = String(it.task_type || it.taskType || '').trim().toLowerCase();
+        const payload = it.payload || {};
+        const seatAction = String(payload.seatAction || payload.seat_action || '').trim();
+        const be = String(payload.browserBackend || payload.browser_backend || '').trim().toLowerCase();
+        const hit = SEAT_WORK_TASK_TYPES.has(tt)
+          || seatAction !== ''
+          || (tt === 'message' && (seatAction || be === 'linux'));
+        if (!hit) continue;
+        found.set(id, {
+          ...r,
+          primary_task_type: tt || r.primary_task_type,
+          seat_action: seatAction || r.seat_action || '',
+          last_item_id: Number(it.id || 0) || r.last_item_id,
+          last_item_status: String(it.status || r.last_item_status || ''),
+        });
+        return;
+      }
+    } catch { /* ignore */ }
+  }));
+  if (!found.size) return rows;
+  return rows.map((r) => found.get(Number(r.id)) || r);
+}
+
 function mapWorkBatch(row) {
   const scope = String(row.batch_scope || row.batchScope || 'general');
   const pending = Number(row.pending_count || 0);
@@ -93,13 +150,16 @@ function mapWorkBatch(row) {
   const actionKey = seatAction || taskType;
   const actionLabel = SEAT_TYPE_LABEL[actionKey] || SEAT_TYPE_LABEL[taskType] || actionKey || scopeLabel;
   const lastItemId = Number(row.last_item_id || row.lastItemId || 0);
+  const listType = scope === 'cs_seat' || SEAT_WORK_TASK_TYPES.has(taskType) || seatAction
+    ? (scope === 'ai_lead' || taskType.startsWith('ai_lead') ? 'ai_lead' : 'chat_seat')
+    : (scope === 'ai_lead' ? 'ai_lead' : 'account_work');
   return {
     id: `awb-${row.id}`,
     workBatchId: Number(row.id),
     workItemId: lastItemId || 0,
     kind: 'account_work',
     name: `${actionLabel} · ${username}`,
-    type: scope === 'cs_seat' ? 'chat_seat' : (scope === 'ai_lead' ? 'ai_lead' : 'account_work'),
+    type: listType,
     taskType: taskType || actionKey || scope,
     typeLabel: actionLabel,
     status: String(row.status || ''),
@@ -167,6 +227,7 @@ router.get('/api/tasks', async (req, res) => {
   const type = String(req.query.type || '').trim();
   const keyword = String(req.query.keyword || req.query.name || '').trim();
   const source = String(req.query.source || 'all').trim().toLowerCase(); // all | work | center
+  const debug = String(req.query.debug || '') === '1';
 
   const base = apiBase();
   if (!base) {
@@ -179,20 +240,32 @@ router.get('/api/tasks', async (req, res) => {
 
   try {
     const fetches = [];
+    const wStatus = workStatusQuery(status);
 
     if (wantWork) {
+      // 优先 forServerBrowser（含 general 里误入的 sync_fans）；旧 API 忽略未知参数时再靠本地过滤
       const wqs = new URLSearchParams();
       wqs.set('page', String(page));
-      wqs.set('pageSize', String(pageSize));
-      wqs.set('batchScope', 'cs_seat,ai_lead');
-      const wStatus = workStatusQuery(status);
+      wqs.set('pageSize', String(Math.max(pageSize, 50)));
+      wqs.set('forServerBrowser', '1');
+      wqs.set('batchScope', 'cs_seat,ai_lead'); // 旧版只认这个；新版 forServerBrowser 优先
       if (wStatus) wqs.set('status', wStatus);
       if (keyword) wqs.set('keyword', keyword);
       fetches.push(
         upstreamGet(base, `/account-work-batches?${wqs}`, token).then((r) => ({ key: 'work', ...r }))
       );
+      // 兜底：无 scope 过滤，本地挑坐席类型（覆盖「新列表过滤 + 旧入队 general」）
+      const fqs = new URLSearchParams();
+      fqs.set('page', '1');
+      fqs.set('pageSize', '50');
+      if (wStatus) fqs.set('status', wStatus);
+      if (keyword) fqs.set('keyword', keyword);
+      fetches.push(
+        upstreamGet(base, `/account-work-batches?${fqs}`, token).then((r) => ({ key: 'workAll', ...r }))
+      );
     } else {
       fetches.push(Promise.resolve({ key: 'work', ok: true, data: { items: [], total: 0, pages: 1 } }));
+      fetches.push(Promise.resolve({ key: 'workAll', ok: true, data: { items: [], total: 0, pages: 1 } }));
     }
 
     // 中心库只拉拓客类；坐席仅在 work 队列；publish/warm 等永不进入本页
@@ -214,10 +287,11 @@ router.get('/api/tasks', async (req, res) => {
 
     const results = await Promise.all(fetches);
     const work = results.find((r) => r.key === 'work') || {};
+    const workAll = results.find((r) => r.key === 'workAll') || {};
     const center = results.find((r) => r.key === 'center') || {};
 
     // 坐席队列失败不整页挂掉（中心任务仍可展示）
-    if (!work.ok && wantWork && !wantCenter) {
+    if (!work.ok && !workAll.ok && wantWork && !wantCenter) {
       return res.status(work.upstream?.status >= 400 ? work.upstream.status : 502).json({
         ok: false,
         message: work.json?.message || work.json?.msg || '拉取坐席任务失败',
@@ -230,31 +304,33 @@ router.get('/api/tasks', async (req, res) => {
       });
     }
 
-    const workRows = Array.isArray(work.data?.items)
-      ? work.data.items
-      : (Array.isArray(work.data?.list) ? work.data.list : []);
-    const centerRows = Array.isArray(center.data?.items)
-      ? center.data.items
-      : (Array.isArray(center.data?.list) ? center.data.list : []);
+    const workRowsScoped = work.ok ? pickUpstreamRows(work) : [];
+    let workRowsAll = workAll.ok ? pickUpstreamRows(workAll) : [];
+    // 列表字段缺 primary_task_type（旧 API）且 scope 过滤为空时，按分任务探测坐席类
+    const needEnrich = workRowsAll.some((r) => !isSeatWorkRow(r)
+      && !String(r.primary_task_type || r.primaryTaskType || '').trim());
+    if (needEnrich && wantWork) {
+      workRowsAll = await enrichSeatRowsFromItems(base, token, workRowsAll, 20);
+    }
+    const byId = new Map();
+    for (const r of [...workRowsScoped, ...workRowsAll]) {
+      const id = Number(r.id || 0);
+      if (id > 0 && isSeatWorkRow(r)) byId.set(id, r);
+    }
+    const workRows = [...byId.values()];
+    const centerRows = pickUpstreamRows(center);
 
-    let workItems = work.ok
-      ? workRows
-        .filter((r) => {
-          const scope = String(r.batch_scope || r.batchScope || '');
-          return scope === 'cs_seat' || scope === 'ai_lead';
-        })
-        .map(mapWorkBatch)
-      : [];
+    let workItems = workRows.map(mapWorkBatch);
     let centerItems = center.ok
       ? centerRows.filter(isAllowedCenterTask).map(mapCenterTask)
       : [];
 
-    // 类型筛选：chat_seat → 只留 cs_seat；ai_lead → 只留拓客
+    // 类型筛选：chat_seat → 只留坐席；ai_lead → 只留拓客
     if (type === 'chat_seat') {
-      workItems = workItems.filter((x) => x.batchScope === 'cs_seat');
+      workItems = workItems.filter((x) => x.type === 'chat_seat' || x.batchScope === 'cs_seat');
       centerItems = [];
     } else if (type === 'ai_lead' || type === 'ai_lead_dm') {
-      workItems = workItems.filter((x) => x.batchScope === 'ai_lead');
+      workItems = workItems.filter((x) => x.type === 'ai_lead' || x.batchScope === 'ai_lead');
       centerItems = centerItems.filter((x) => {
         const t = String(x.type || '');
         return type === 'ai_lead' ? (t === 'ai_lead' || t === 'ai_lead_dm') : t === type;
@@ -267,15 +343,18 @@ router.get('/api/tasks', async (req, res) => {
 
     // 合并：坐席/拓客优先，再拼中心库任务；同页各取 pageSize 再裁切
     const merged = [...workItems, ...centerItems].slice(0, pageSize);
-    const workTotal = work.ok ? Number(work.data?.total || workItems.length || 0) : 0;
+    const workTotal = Math.max(
+      work.ok ? Number(work.data?.total || 0) : 0,
+      workItems.length
+    );
     // 中心库 total 按白名单过滤后的结果估算（避免把 publish 计数算进来）
     const centerDropped = Math.max(0, centerRows.length - (center.ok ? centerRows.filter(isAllowedCenterTask).length : 0));
     const centerTotalRaw = center.ok ? Number(center.data?.total || centerItems.length || 0) : 0;
     const centerTotal = Math.max(0, centerTotalRaw - centerDropped);
-    const total = workTotal + centerTotal;
+    const total = Math.max(workItems.length + centerItems.length, workTotal + centerTotal);
     const pages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
-    res.json({
+    const body = {
       ok: true,
       items: merged,
       total,
@@ -285,10 +364,38 @@ router.get('/api/tasks', async (req, res) => {
       status,
       apiBase: base,
       sources: {
-        work: { ok: !!work.ok, total: workTotal, message: work.ok ? '' : (work.json?.message || '') },
+        work: {
+          ok: !!(work.ok || workAll.ok),
+          total: workItems.length,
+          message: (work.ok || workAll.ok) ? '' : (work.json?.message || workAll.json?.message || ''),
+        },
         center: { ok: !!center.ok, total: centerTotal, message: center.ok ? '' : (center.json?.message || '') },
       },
-    });
+    };
+    if (debug) {
+      body.debug = {
+        userId: user?.id || 0,
+        username: user?.username || '',
+        workOk: !!work.ok,
+        workUpstreamStatus: work.upstream?.status || 0,
+        workRawTotal: Number(work.data?.total || 0),
+        workRawCount: workRowsScoped.length,
+        workAllOk: !!workAll.ok,
+        workAllRawTotal: Number(workAll.data?.total || 0),
+        workAllRawCount: workRowsAll.length,
+        seatMatched: workRows.length,
+        sample: workRowsAll.slice(0, 8).map((r) => ({
+          id: r.id,
+          scope: r.batch_scope || r.batchScope || '',
+          status: r.status,
+          primary_task_type: r.primary_task_type || r.primaryTaskType || '',
+          seat_action: r.seat_action || r.seatAction || '',
+          account_id: r.account_id,
+          owner_id: r.owner_id,
+        })),
+      };
+    }
+    res.json(body);
   } catch (e) {
     res.status(502).json({
       ok: false,

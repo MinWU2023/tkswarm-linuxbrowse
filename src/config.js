@@ -38,7 +38,7 @@ module.exports = {
   isDev,
   PROVIDER_ID: 'tkswarm-linuxbrowse',
   PROVIDER_LABEL: '第一页自研浏览器 Linux',
-  VERSION: '1.0.0',
+  VERSION: '1.0.2',
   DATA_ROOT,
   DB_PATH: path.join(DATA_ROOT, 'tkswarm-linuxbrowse.json'),
   PROFILES_DIR: path.join(DATA_ROOT, 'profiles'),
