@@ -7,7 +7,7 @@ let state = {
   pageSize: 20,
   pages: 1,
   total: 0,
-  status: 'pending',
+  status: 'all',
   keyword: '',
   source: 'all',
   items: [],
@@ -144,13 +144,56 @@ function taskKeyOf(x) {
   return String(x.id);
 }
 
+function actionKindOf(x) {
+  return x.kind === 'account_work' ? 'account_work' : 'task';
+}
+
+function canPause(st) {
+  return ['pending', 'running', 'queued', 'draft'].includes(String(st || ''));
+}
+
+function canResume(st) {
+  return String(st || '') === 'paused';
+}
+
+function canRetry(st) {
+  return ['failed', 'cancelled', 'completed', 'paused'].includes(String(st || ''));
+}
+
+function canForceFail(st, kind) {
+  return kind === 'account_work' && ['pending', 'running', 'paused', 'queued'].includes(String(st || ''));
+}
+
+function opsCell(x) {
+  const key = taskKeyOf(x);
+  const kind = actionKindOf(x);
+  const st = String(x.status || '');
+  const itemId = Number(x.workItemId || 0) || 0;
+  const btns = [
+    `<button type="button" class="btn ghost btn-xs" data-act="logs" data-key="${esc(key)}" data-item-id="${esc(itemId)}">日志</button>`,
+  ];
+  if (canPause(st)) {
+    btns.push(`<button type="button" class="btn ghost btn-xs" data-act="pause" data-key="${esc(key)}" data-kind="${esc(kind)}">暂停</button>`);
+  }
+  if (canResume(st)) {
+    btns.push(`<button type="button" class="btn ghost btn-xs" data-act="resume" data-key="${esc(key)}" data-kind="${esc(kind)}">恢复</button>`);
+  }
+  if (canRetry(st)) {
+    btns.push(`<button type="button" class="btn ghost btn-xs" data-act="retry" data-key="${esc(key)}" data-kind="${esc(kind)}">重试</button>`);
+  }
+  if (canForceFail(st, kind)) {
+    btns.push(`<button type="button" class="btn ghost btn-xs danger-text" data-act="fail" data-key="${esc(key)}" data-kind="${esc(kind)}">失败</button>`);
+  }
+  return `<div class="row-actions">${btns.join('')}</div>`;
+}
+
 function renderRows(items) {
   const body = document.getElementById('task-body');
   state.items = items || [];
   if (!items.length) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">
+    body.innerHTML = `<tr><td colspan="8" class="empty">
       <div class="empty-block"><strong>暂无任务</strong>
-      <span class="muted">坐席拉粉丝入队后会出现「客服粉丝/关注同步」。请确认本页登录账号与客服台一致，并已更新中心 API + 本服务；可切「全部状态」查看已完成项</span></div>
+      <span class="muted">坐席拉粉丝入队后会出现「客服粉丝/关注同步」。请确认本页登录账号与客服台一致</span></div>
     </td></tr>`;
     return;
   }
@@ -162,7 +205,7 @@ function renderRows(items) {
       || (x.group_name || '-');
     const key = taskKeyOf(x);
     const active = logViewer.open && logViewer.taskKey === key ? ' is-active' : '';
-    return `<tr class="task-row${active}" data-task-key="${esc(key)}" data-item-id="${esc(x.workItemId || 0)}" title="点击查看实时日志">
+    return `<tr class="task-row${active}" data-task-key="${esc(key)}">
       <td>${idCell(x)}</td>
       <td><b>${esc(x.name || '-')}</b></td>
       <td>${esc(typeLabel(x))}</td>
@@ -170,17 +213,49 @@ function renderRows(items) {
       <td><span class="muted">${esc(progressText(x))}</span></td>
       <td class="muted">${esc(x.created_at || '-')}</td>
       <td class="muted">${esc(note)}</td>
+      <td>${opsCell(x)}</td>
     </tr>`;
   }).join('');
 
-  body.querySelectorAll('tr.task-row').forEach((tr) => {
-    tr.addEventListener('click', () => {
-      const key = tr.getAttribute('data-task-key') || '';
-      const itemId = Number(tr.getAttribute('data-item-id') || 0) || 0;
+  body.querySelectorAll('[data-act]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const act = btn.getAttribute('data-act') || '';
+      const key = btn.getAttribute('data-key') || '';
+      const kind = btn.getAttribute('data-kind') || 'account_work';
+      const itemId = Number(btn.getAttribute('data-item-id') || 0) || 0;
       const row = state.items.find((x) => taskKeyOf(x) === key);
-      openLogDrawer(row || { id: key, name: key }, itemId);
+      if (act === 'logs') {
+        openLogDrawer(row || { id: key, name: key, kind: 'account_work' }, itemId);
+        return;
+      }
+      runTaskAction(act, key, kind, row);
     });
   });
+}
+
+async function runTaskAction(action, taskKey, kind, row) {
+  const labels = { pause: '暂停', resume: '恢复', retry: '重试', fail: '强制失败' };
+  const label = labels[action] || action;
+  if (action === 'fail' && !window.confirm('确认将该任务标记为失败且不再重推？')) return;
+  if (action === 'retry' && String(row?.status || '') === 'completed'
+    && !window.confirm('任务已完成，确认重置为待执行并重试？')) return;
+
+  try {
+    const j = await json('POST', `/api/tasks/${encodeURIComponent(taskKey)}/action`, {
+      action: action === 'retry' ? 'reset' : action,
+      kind: kind || actionKindOf(row || {}),
+    });
+    if (!j.ok) {
+      toast(j.message || `${label}失败`, 'err');
+      return;
+    }
+    toast(j.message || `已${label}`, 'ok');
+    await loadTasks();
+  } catch (e) {
+    toast(e.message || `${label}失败`, 'err');
+  }
 }
 
 function renderPager() {
@@ -289,12 +364,12 @@ async function loadTasks() {
   const qs = new URLSearchParams({
     page: String(state.page),
     pageSize: String(state.pageSize),
-    status: state.status || 'pending',
+    status: state.status || 'all',
     source: state.source || 'all',
   });
   if (state.keyword) qs.set('keyword', state.keyword);
   const body = document.getElementById('task-body');
-  body.innerHTML = `<tr><td colspan="7" class="empty">加载中…</td></tr>`;
+  body.innerHTML = `<tr><td colspan="8" class="empty">加载中…</td></tr>`;
   try {
     const res = await fetch(`${API}/api/tasks?${qs}`, { headers: authHeaders() });
     const j = await res.json();
@@ -304,7 +379,7 @@ async function loadTasks() {
         toast(j.message || '请先登录', 'err');
         return;
       }
-      body.innerHTML = `<tr><td colspan="7" class="empty">${esc(j.message || '加载失败')}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="8" class="empty">${esc(j.message || '加载失败')}</td></tr>`;
       toast(j.message || '加载失败', 'err');
       return;
     }
@@ -315,7 +390,7 @@ async function loadTasks() {
     renderRows(j.items || []);
     renderPager();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">${esc(e.message || '网络错误')}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="8" class="empty">${esc(e.message || '网络错误')}</td></tr>`;
     toast(e.message || '网络错误', 'err');
   }
 }
@@ -384,6 +459,8 @@ async function doLogin(e) {
 async function boot() {
   bootUI();
   document.getElementById('api-url').textContent = API;
+  const statusEl = document.getElementById('status-filter');
+  if (statusEl) statusEl.value = state.status || 'all';
   try {
     const s = await json('GET', '/api/settings');
     if (s.apiBase) document.getElementById('api-base').value = s.apiBase;

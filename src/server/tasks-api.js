@@ -66,6 +66,31 @@ async function upstreamGet(base, path, token) {
   return { upstream, json, ok, data: json.data || json };
 }
 
+async function upstreamPost(base, path, token, body = {}) {
+  const upstream = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body || {}),
+  });
+  const json = await upstream.json().catch(() => ({}));
+  const ok = json.success === true || json.code === 0 || json.code === 200 || upstream.ok;
+  return { upstream, json, ok, data: json.data || json };
+}
+
+function parseTaskTarget(raw) {
+  const id = String(raw || '').trim();
+  if (/^awb-/i.test(id)) {
+    return { kind: 'account_work', batchId: Number(String(id).replace(/^awb-/i, '')) || 0, taskId: 0 };
+  }
+  const n = Number(id) || 0;
+  // 纯数字：优先按矩阵总任务；中心库拓客也用数字 ID，由路由调用方区分 kind
+  return { kind: 'unknown', batchId: n, taskId: n };
+}
+
 const SEAT_TYPE_LABEL = {
   cs_login: '客服登录',
   cs_logout: '客服退出',
@@ -401,6 +426,73 @@ router.get('/api/tasks', async (req, res) => {
       ok: false,
       message: e.message || '无法连接中心 API',
     });
+  }
+});
+
+/**
+ * POST /api/tasks/:id/action
+ * body: { action: pause|resume|reset|fail, kind?: account_work|task }
+ * awb-* → 矩阵总任务；纯数字且 kind=task → 中心库；默认按矩阵。
+ */
+router.post('/api/tasks/:id/action', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+
+  const action = String(req.body?.action || req.query.action || '').trim().toLowerCase();
+  const allowed = new Set(['pause', 'resume', 'reset', 'retry', 'fail', 'force-fail']);
+  if (!allowed.has(action)) {
+    return res.status(400).json({ ok: false, message: '不支持的操作' });
+  }
+  const base = apiBase();
+  if (!base) {
+    return res.json({ ok: false, message: '未配置中心 API 地址（TKSWARM_API_BASE）' });
+  }
+  const token = authToken(req, user);
+  const raw = String(req.params.id || '').trim();
+  const hintKind = String(req.body?.kind || req.query.kind || '').trim().toLowerCase();
+  const target = parseTaskTarget(raw);
+  // awb-* 或 kind=account_work → 矩阵；kind=task → 中心库；缺省矩阵（坐席主路径）
+  const useCenter = !/^awb-/i.test(raw) && (hintKind === 'task' || hintKind === 'center');
+
+  try {
+    let path = '';
+    let body = {};
+    if (useCenter) {
+      const taskId = target.taskId || Number(raw) || 0;
+      if (taskId < 1) return res.status(400).json({ ok: false, message: '无效任务 ID' });
+      if (action === 'pause') path = `/tasks/${taskId}/pause`;
+      else if (action === 'resume') path = `/tasks/${taskId}/start`;
+      else if (action === 'reset' || action === 'retry') path = `/tasks/${taskId}/retry`;
+      else return res.status(400).json({ ok: false, message: '中心库任务不支持强制失败，请用重试' });
+    } else {
+      const batchId = /^awb-/i.test(raw)
+        ? (Number(String(raw).replace(/^awb-/i, '')) || 0)
+        : (target.batchId || Number(raw) || 0);
+      if (batchId < 1) return res.status(400).json({ ok: false, message: '无效总任务 ID' });
+      if (action === 'pause') path = `/account-work-batches/${batchId}/pause`;
+      else if (action === 'resume') path = `/account-work-batches/${batchId}/resume`;
+      else if (action === 'reset' || action === 'retry') path = `/account-work-batches/${batchId}/reset`;
+      else if (action === 'fail' || action === 'force-fail') {
+        path = `/account-work-batches/${batchId}/force-fail`;
+        body = { errorMessage: String(req.body?.errorMessage || req.body?.reason || '服务器浏览器手动强制失败') };
+      }
+    }
+
+    const r = await upstreamPost(base, path, token, body);
+    if (!r.ok) {
+      return res.status(r.upstream?.status >= 400 ? r.upstream.status : 502).json({
+        ok: false,
+        message: r.json?.message || r.json?.msg || '操作失败',
+      });
+    }
+    return res.json({
+      ok: true,
+      action,
+      message: r.json?.message || '操作成功',
+      data: r.data,
+    });
+  } catch (e) {
+    return res.status(502).json({ ok: false, message: e.message || '无法连接中心 API' });
   }
 });
 

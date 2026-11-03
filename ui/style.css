@@ -732,10 +732,24 @@ code {
 }
 
 .win-table tbody tr.task-row {
-  cursor: pointer;
+  cursor: default;
 }
 .win-table tbody tr.task-row.is-active {
   background: linear-gradient(90deg, rgba(219, 234, 254, 0.95), rgba(236, 254, 255, 0.45));
+}
+
+.win-table .btn-xs {
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  min-height: 0;
+}
+.win-table .btn-xs.danger-text {
+  color: #b91c1c;
+}
+.win-table .btn-xs.danger-text:hover {
+  background: #fef2f2;
+  border-color: #fecaca;
 }
 
 .log-drawer {

@@ -6,11 +6,11 @@
   <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
   <meta name="theme-color" content="#2563eb" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>待执行任务 · 第一页自研浏览器</title>
+  <title>任务列表 · 第一页自研浏览器</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=4.3" />
+  <link rel="stylesheet" href="style.css?v=4.4" />
   <link rel="stylesheet" href="theme-premium.css?v=1.0" />
   <style>
     body.booting #login-panel,
@@ -41,7 +41,7 @@
         <span class="logo" aria-hidden="true">T</span>
         <div class="brand-text">
           <h1 class="brand-name">第一页自研浏览器</h1>
-          <p class="sub">Linux · 待执行任务 · <code id="api-url">—</code></p>
+          <p class="sub">Linux · 任务列表 · <code id="api-url">—</code></p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -55,8 +55,8 @@
     <section id="login-panel" class="login-stage">
       <div class="login-card anim-enter">
         <p class="login-eyebrow">需要登录</p>
-        <h2 class="login-brand">查看待执行任务</h2>
-        <p class="hint">请先登录中心账号，再查看本账号可见的排队 / 草稿 / 运行中任务。</p>
+        <h2 class="login-brand">查看任务列表</h2>
+        <p class="hint">请先登录中心账号，再查看本账号可见的坐席 / 拓客任务。</p>
         <form id="login-form" class="login-form" autocomplete="on">
           <label>API 地址
             <input id="api-base" type="text" placeholder="http://127.0.0.1:8080/api" />
@@ -77,8 +77,8 @@
       <div class="panel anim-fade">
         <div class="panel-head">
           <div>
-            <h2>待执行任务</h2>
-            <p class="panel-desc">仅客服坐席与 AI 拓客（服务器浏览器白名单）；不含发布 / 养号等桌面任务</p>
+            <h2>任务列表</h2>
+            <p class="panel-desc">客服坐席与 AI 拓客（服务器浏览器白名单）；默认展示全部状态</p>
           </div>
           <div class="panel-actions">
             <button id="btn-refresh" class="btn ghost" type="button">刷新</button>
@@ -92,12 +92,12 @@
             <option value="center">AI拓客（中心库）</option>
           </select>
           <select id="status-filter" class="input filter-select" title="状态">
+            <option value="all" selected>全部状态</option>
             <option value="pending">待执行 / 运行中</option>
             <option value="running">仅运行中</option>
             <option value="paused">已暂停</option>
             <option value="completed">已完成</option>
             <option value="failed">失败</option>
-            <option value="all">全部状态</option>
           </select>
           <input id="keyword" class="input filter-input" type="search" placeholder="搜索任务 / 账号…" />
           <button id="btn-search" class="btn primary" type="button">查询</button>
@@ -115,10 +115,11 @@
                 <th>进度</th>
                 <th>创建时间</th>
                 <th>备注</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody id="task-body">
-              <tr><td colspan="7" class="empty">加载中…</td></tr>
+              <tr><td colspan="8" class="empty">加载中…</td></tr>
             </tbody>
           </table>
         </div>
@@ -148,10 +149,10 @@
       </div>
     </div>
     <div id="log-drawer-body" class="log-drawer-body">
-      <p class="muted">点击任务行查看实时日志</p>
+      <p class="muted">点击「日志」按钮查看实时日志</p>
     </div>
   </aside>
   <div id="toast-host" aria-live="polite"></div>
-  <script src="tasks.js?v=4"></script>
+  <script src="tasks.js?v=5"></script>
 </body>
 </html>
