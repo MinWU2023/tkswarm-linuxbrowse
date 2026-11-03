@@ -43,7 +43,14 @@ function strictEnvOwner() {
  * 服务器浏览器大家共用，hydrate/import 不应卡在「某登录用户已满 300」。
  * 严格多租户（TKSWARM_STRICT_ENV_OWNER=1）仍按 owner 计额度。
  */
-function assertCanCreateProfile(ownerId) {
+function resolveEnvLimit(ownerId, overrideLimit) {
+  const o = Number(overrideLimit);
+  if (Number.isFinite(o) && o > 0) return Math.floor(o);
+  return MAX_ENVS_PER_USER;
+}
+
+function assertCanCreateProfile(ownerId, overrideLimit) {
+  const perUserLimit = resolveEnvLimit(ownerId, overrideLimit);
   if (!strictEnvOwner()) {
     const totalCap = Math.max(
       Number(process.env.TKSWARM_BROWSER_MAX_ENVS_TOTAL || 0) || 0,
@@ -54,11 +61,18 @@ function assertCanCreateProfile(ownerId) {
     if (total >= totalCap) {
       throw new Error(`服务器浏览器整机环境已满（${total}/${totalCap}）。可调 TKSWARM_BROWSER_MAX_ENVS_TOTAL`);
     }
+    // 共用模式仍尊重中心下发的每人额度（超管在 Node 设置）
+    if (Number(ownerId) > 0) {
+      const n = countProfilesByOwner(ownerId);
+      if (n >= perUserLimit) {
+        throw new Error(`每个账号最多 ${perUserLimit} 个浏览器环境，当前已用 ${n} 个`);
+      }
+    }
     return;
   }
   const n = countProfilesByOwner(ownerId);
-  if (n >= MAX_ENVS_PER_USER) {
-    throw new Error(`每个账号最多 ${MAX_ENVS_PER_USER} 个浏览器环境，当前已用 ${n} 个`);
+  if (n >= perUserLimit) {
+    throw new Error(`每个账号最多 ${perUserLimit} 个浏览器环境，当前已用 ${n} 个`);
   }
 }
 
@@ -85,7 +99,7 @@ function ensureDefaultGroup(data, ownerId = 0) {
 
 function createProfile(row) {
   return withStore((data) => {
-    assertCanCreateProfile(row.owner_id);
+    assertCanCreateProfile(row.owner_id, row.max_envs ?? row.maxEnvs);
     ensureDefaultGroup(data, row.owner_id);
     const id = row.id || uuidv4().replace(/-/g, '').slice(0, 24);
     const profile = {
@@ -297,9 +311,10 @@ function getCurrentUser() {
   return sessions.getCurrentUser();
 }
 
-function statsForOwner(ownerId) {
+function statsForOwner(ownerId, overrideLimit) {
   const used = countProfilesByOwner(ownerId);
-  return { ownerId, used, limit: MAX_ENVS_PER_USER, remaining: Math.max(0, MAX_ENVS_PER_USER - used) };
+  const limit = resolveEnvLimit(ownerId, overrideLimit);
+  return { ownerId, used, limit, remaining: Math.max(0, limit - used) };
 }
 
 function statsAllOwners() {

@@ -9,6 +9,7 @@ let state = {
   total: 0,
   status: 'pending',
   keyword: '',
+  source: 'all',
 };
 
 function getToken() {
@@ -67,6 +68,7 @@ function toast(message, type = 'info') {
 const STATUS_LABEL = {
   draft: '草稿',
   queued: '排队中',
+  pending: '待执行',
   running: '运行中',
   paused: '已暂停',
   completed: '已完成',
@@ -80,6 +82,7 @@ const TYPE_LABEL = {
   warm: '养号',
   ai_lead: 'AI 拓客',
   chat_seat: '客服坐席',
+  account_work: '矩阵任务',
   comment_reply: '回复评论',
   pull_video_list: '拉取视频列表',
   pull_comments: '拉取视频详情',
@@ -92,17 +95,16 @@ function statusBadge(st) {
   const s = String(st || '');
   const label = STATUS_LABEL[s] || s || '-';
   let cls = 'badge';
-  if (s === 'queued') cls += ' warn';
+  if (s === 'queued' || s === 'pending' || s === 'paused') cls += ' warn';
   else if (s === 'running') cls += ' info';
-  else if (s === 'draft') cls += '';
-  else if (s === 'paused') cls += ' warn';
   else if (s === 'completed') cls += ' success';
   else if (s === 'failed') cls += ' danger';
   return `<span class="${cls}">${esc(label)}</span>`;
 }
 
-function typeLabel(t) {
-  const k = String(t || '');
+function typeLabel(x) {
+  if (x.typeLabel) return x.typeLabel;
+  const k = String(x.type || '');
   return TYPE_LABEL[k] || k || '-';
 }
 
@@ -110,8 +112,20 @@ function progressText(x) {
   const ok = Number(x.success_count || 0);
   const fail = Number(x.fail_count || 0);
   const total = Number(x.total_count || 0);
+  const pending = Number(x.pending_count || 0);
+  if (x.kind === 'account_work') {
+    if (!total) return pending ? `${pending} 待执行` : '-';
+    return `${ok + fail} / ${total}${pending ? `（待 ${pending}）` : ''}`;
+  }
   if (!total) return `${ok + fail} / -`;
   return `${ok + fail} / ${total}`;
+}
+
+function idCell(x) {
+  if (x.kind === 'account_work') {
+    return `<code>B#${esc(x.workBatchId || String(x.id).replace(/^awb-/, ''))}</code>`;
+  }
+  return `<code>#${esc(x.id)}</code>`;
 }
 
 function renderRows(items) {
@@ -119,22 +133,24 @@ function renderRows(items) {
   if (!items.length) {
     body.innerHTML = `<tr><td colspan="7" class="empty">
       <div class="empty-block"><strong>暂无待执行任务</strong>
-      <span class="muted">当前筛选条件下没有任务</span></div>
+      <span class="muted">当前筛选条件下没有任务（含客服坐席推送）</span></div>
     </td></tr>`;
     return;
   }
   body.innerHTML = items.map((x) => {
     const payload = x.payload || {};
     const backend = payload.browserBackend || payload.browser_backend || '';
-    const note = backend ? `后端 ${backend}` : '';
+    const note = x.note
+      || (backend ? `后端 ${backend}` : '')
+      || (x.group_name || '-');
     return `<tr>
-      <td><code>#${esc(x.id)}</code></td>
+      <td>${idCell(x)}</td>
       <td><b>${esc(x.name || '-')}</b></td>
-      <td>${esc(typeLabel(x.type))}</td>
+      <td>${esc(typeLabel(x))}</td>
       <td>${statusBadge(x.status)}</td>
       <td><span class="muted">${esc(progressText(x))}</span></td>
       <td class="muted">${esc(x.created_at || '-')}</td>
-      <td class="muted">${esc(note || (x.group_name || '-'))}</td>
+      <td class="muted">${esc(note)}</td>
     </tr>`;
   }).join('');
 }
@@ -152,6 +168,7 @@ async function loadTasks() {
     page: String(state.page),
     pageSize: String(state.pageSize),
     status: state.status || 'pending',
+    source: state.source || 'all',
   });
   if (state.keyword) qs.set('keyword', state.keyword);
   const body = document.getElementById('task-body');
@@ -201,6 +218,29 @@ function enterTasks(user) {
   document.getElementById('api-url').textContent = API;
 }
 
+function bootDone() {
+  document.body.classList.remove('booting');
+}
+
+/**
+ * 首屏同步判定：有 Token / 上次登录标记则直接进列表，避免先闪登录页再跳回。
+ */
+function bootUI() {
+  try {
+    const known = !!getToken() || localStorage.getItem(SEEN_KEY) === '1';
+    show('#login-panel', !known);
+    show('#tasks-panel', known);
+    if (known) {
+      show('#user-chip', true);
+      show('#btn-logout', true);
+    }
+  } finally {
+    bootDone();
+  }
+}
+
+setTimeout(bootDone, 3000);
+
 async function doLogin(e) {
   e?.preventDefault?.();
   const apiBase = document.getElementById('api-base').value.trim();
@@ -222,20 +262,20 @@ async function doLogin(e) {
 }
 
 async function boot() {
+  bootUI();
   document.getElementById('api-url').textContent = API;
   try {
     const s = await json('GET', '/api/settings');
     if (s.apiBase) document.getElementById('api-base').value = s.apiBase;
   } catch { /* ignore */ }
 
-  const st = await json('GET', '/api/auth/status');
-  if (st.loggedIn && st.user) {
-    enterTasks(st.user);
-    await loadTasks();
-  } else if (getToken()) {
-    enterTasks({ username: '已登录' });
+  const st = await json('GET', '/api/auth/status').catch(() => ({}));
+  if (st.loggedIn || getToken()) {
+    localStorage.setItem(SEEN_KEY, '1');
+    enterTasks(st.user || { username: '已登录' });
     await loadTasks();
   } else {
+    setToken('');
     enterLogin();
   }
 
@@ -250,6 +290,7 @@ async function boot() {
   document.getElementById('btn-search').onclick = () => {
     state.keyword = document.getElementById('keyword').value.trim();
     state.status = document.getElementById('status-filter').value;
+    state.source = document.getElementById('source-filter').value;
     state.page = 1;
     loadTasks();
   };
@@ -258,6 +299,11 @@ async function boot() {
   });
   document.getElementById('status-filter').onchange = () => {
     state.status = document.getElementById('status-filter').value;
+    state.page = 1;
+    loadTasks();
+  };
+  document.getElementById('source-filter').onchange = () => {
+    state.source = document.getElementById('source-filter').value;
     state.page = 1;
     loadTasks();
   };
@@ -284,4 +330,7 @@ async function boot() {
   }, 15000);
 }
 
-boot().catch(console.error);
+boot().catch((e) => {
+  console.error(e);
+  bootDone();
+});

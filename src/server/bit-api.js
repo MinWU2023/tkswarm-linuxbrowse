@@ -555,8 +555,10 @@ function createRouter() {
       // 额度归属：可显式指定 ownerId（超管再绑环境耗用指定管理用户额度）；否则记在当前登录用户
       const requestedOwner = Number(body.ownerId || body.owner_id || 0);
       const ownerId = requestedOwner > 0 ? requestedOwner : Number(user.id || 0);
+      const maxEnvs = Number(body.maxEnvs || body.max_envs || 0);
       const row = db.createProfile({
         owner_id: ownerId,
+        max_envs: Number.isFinite(maxEnvs) && maxEnvs > 0 ? maxEnvs : undefined,
         group_id: body.groupId || body.group_id || 'default',
         name: body.name || `TK-${Date.now()}`,
         remark: body.remark || '',
