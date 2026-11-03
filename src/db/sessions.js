@@ -1,6 +1,7 @@
 /**
- * 多账号并发会话：多个 TkSwarm 用户可同时登录本服务，
- * Node / Web 通过 Bearer Token 识别身份并隔离环境。
+ * 多账号并发会话：多个 TkSwarm 用户可同时登录本服务。
+ * Node / Web 通过 Bearer Token 识别「当前操作者」；
+ * 默认环境共用（owner_id 只计创建额度），见 bit-api.assertProfileOwner。
  */
 const fs = require('node:fs');
 const { DB_PATH, DEFAULT_API_TOKEN } = require('../config');
@@ -181,6 +182,21 @@ function listUsers() {
   })));
 }
 
+/** 含 token 的用户行（仅服务端内部：proxy-enrich 等） */
+function listUsersDetailed() {
+  return readOnly((d) => [...(d.users || [])].sort(
+    (a, b) => String(b.logged_in_at || '').localeCompare(String(a.logged_in_at || ''))
+  ));
+}
+
+/** 本机仍保留的会话 Token（最近 8 个），开窗拉代理账密时兜底 */
+function listSessionTokens() {
+  return readOnly((d) => (Array.isArray(d.sessions) ? d.sessions : [])
+    .map((s) => String(s && s.token ? s.token : '').trim())
+    .filter(Boolean)
+    .slice(0, 8));
+}
+
 function validateApiToken(token) {
   return !!getUserByToken(token);
 }
@@ -198,5 +214,7 @@ module.exports = {
   listSessionsDetailed,
   countActiveSessions,
   listUsers,
+  listUsersDetailed,
+  listSessionTokens,
   validateApiToken,
 };

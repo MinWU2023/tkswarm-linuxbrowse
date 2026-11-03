@@ -1,6 +1,6 @@
 {
   "name": "tkswarm-linuxbrowse",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "第一页自研浏览器 Linux — Bit Browser API compatible server for tkswarm-node (headless/headed, multi-env)",
   "main": "src/server/main.js",
   "author": "TkSwarm",
@@ -11,7 +11,8 @@
   "scripts": {
     "start": "node src/server/main.js",
     "dev": "TKSWARM_BROWSER_DEV=1 node src/server/main.js",
-    "postinstall": "node scripts/ensure-chromium.js || exit 0",
+    "postinstall": "node scripts/ensure-electron.js || node scripts/ensure-chromium.js || exit 0",
+    "electron": "node scripts/ensure-electron.js",
     "chromium": "node scripts/ensure-chromium.js",
     "smoke": "node scripts/smoke-health.js",
     "smoke:lifecycle": "node scripts/smoke-lifecycle.js",
@@ -23,6 +24,7 @@
   },
   "dependencies": {
     "@novnc/novnc": "^1.5.0",
+    "electron": "^33.3.1",
     "express": "^4.22.3",
     "uuid": "^11.1.1",
     "ws": "^8.22.0"

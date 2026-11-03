@@ -24,22 +24,35 @@ async function requireUser(req, res) {
   const { user, token } = resolveRequestUser(req);
   if (user && token) {
     const alive = await assertTokenAlive(token);
-    if (!alive) {
-      res.json({ ok: false, message: 'token 无效或已过期，请重新登录' });
-      return null;
+    if (alive) {
+      const again = resolveRequestUser(req);
+      if (again.user) {
+        req.currentUser = again.user;
+        req.authToken = token;
+        return again.user;
+      }
     }
-    const again = resolveRequestUser(req);
-    req.currentUser = again.user;
-    req.authToken = token;
-    return again.user;
+  } else if (token) {
+    try {
+      const { adoptRemoteToken } = require('../auth/token-guard');
+      const adopted = await adoptRemoteToken(token);
+      if (adopted?.user) {
+        req.currentUser = adopted.user;
+        req.authToken = token;
+        return adopted.user;
+      }
+    } catch { /* fall through */ }
+  }
+  // 本机共用：任意已登录用户即可操作控制台（与 bit-api 鉴权一致）
+  const fallback = db.getCurrentUser();
+  if (fallback) {
+    req.currentUser = fallback;
+    req.authToken = fallback.token || token || '';
+    return fallback;
   }
   if (!REQUIRE_BEARER) {
-    const fallback = db.getCurrentUser();
-    if (fallback) {
-      req.currentUser = fallback;
-      req.authToken = fallback.token || '';
-      return fallback;
-    }
+    res.json({ ok: false, message: '未登录' });
+    return null;
   }
   res.json({ ok: false, message: '未登录' });
   return null;

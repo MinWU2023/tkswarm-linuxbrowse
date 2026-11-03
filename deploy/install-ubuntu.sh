@@ -161,6 +161,7 @@ repair_broken_dpkg() {
 }
 
 # 批量检查系统依赖（每项可写「主包名 备选包名…」，兼容 Ubuntu 22/24）
+# 含 Electron 运行库（强制 EL 核，与桌面自研共用环境包；禁止 Chrome 回退）。
 install_system_deps() {
   local items=(
     "ca-certificates"
@@ -178,6 +179,15 @@ install_system_deps() {
     "libxkbcommon0 libxkbcommon0t64"
     "libgbm1 libgbm1t64"
     "libasound2 libasound2t64"
+    "libgtk-3-0 libgtk-3-0t64"
+    "libnotify4"
+    "libxss1"
+    "libxtst6"
+    "xdg-utils"
+    "libatspi2.0-0 libatspi2.0-0t64"
+    "libuuid1 libuuid1t64"
+    "libsecret-1-0"
+    "libxcb-dri3-0"
   )
   local item pkg pending=()
   for item in "${items[@]}"; do
@@ -311,6 +321,7 @@ npm_deps_ready() {
   [[ -f "${TKSWARM_APP_DIR}/node_modules/express/package.json" ]] \
     && [[ -f "${TKSWARM_APP_DIR}/node_modules/ws/package.json" ]] \
     && [[ -f "${TKSWARM_APP_DIR}/node_modules/call-bind-apply-helpers/index.js" ]] \
+    && [[ -f "${TKSWARM_APP_DIR}/node_modules/electron/package.json" ]] \
     && [[ -f "${TKSWARM_APP_DIR}/package-lock.json" ]] \
     && [[ -f "${TKSWARM_APP_DIR}/node_modules/.package-lock.json" ]]
 }
@@ -373,21 +384,29 @@ run_npm_install_if_needed() {
   npm_deps_ready || die "npm 依赖安装不完整（缺 express/ws/call-bind-apply-helpers），请检查网络与 registry"
 }
 
+run_ensure_electron_if_needed() {
+  if [[ ! -f "${TKSWARM_APP_DIR}/scripts/ensure-electron.js" ]]; then
+    log "  无 ensure-electron.js，跳过"
+    return 0
+  fi
+  log "  检查 Electron 内核 ..."
+  if run_as_tkswarm_npm node scripts/ensure-electron.js; then
+    log "  Electron 就绪"
+    return 0
+  fi
+  log "  Electron 未就绪，尝试补装 electron 包 ..."
+  run_as_tkswarm_npm npm install electron@^33.3.1 --no-fund --no-audit \
+    || log "  错误: electron 安装失败；服务器浏览器强制 EL 核，禁止 Chrome 回退"
+  if ! run_as_tkswarm_npm node scripts/ensure-electron.js; then
+    log "  错误: Electron 仍不可用，服务将无法开窗（请修复 npm electron，勿改用 chrome）"
+    return 1
+  fi
+}
+
 run_ensure_chromium_if_needed() {
-  if has_chromium; then
-    log "  系统已有 Chromium/Chrome，跳过 ensure-chromium.js"
-    return 0
-  fi
-  if [[ -f "${TKSWARM_APP_DIR}/node_modules/playwright-core/.local-browsers" ]] \
-    || [[ -d "${TKSWARM_DATA_DIR}/.cache/ms-playwright" ]]; then
-    log "  Playwright Chromium 缓存已存在，跳过 ensure-chromium.js"
-    return 0
-  fi
-  if [[ -f "${TKSWARM_APP_DIR}/scripts/ensure-chromium.js" ]]; then
-    log "  运行 ensure-chromium.js ..."
-    run_as_tkswarm_npm node scripts/ensure-chromium.js 2>/dev/null \
-      || log "  ensure-chromium 跳过（可手动: sudo -u tkswarm npm run chromium）"
-  fi
+  # 已禁止 Chrome 回退；保留函数以免旧脚本调用报错，仅跳过
+  log "  已跳过 Chromium 安装（强制 Electron EL 核）"
+  return 0
 }
 
 usage() {
@@ -511,7 +530,6 @@ if [[ -f "${TKSWARM_ENV_FILE}" ]]; then
   if [[ -n "${CHROME_PATH}" ]]; then
     if grep -q '^TKSWARM_CHROME_PATH=' "${TKSWARM_ENV_FILE}"; then
       # 已存在：若是 snap 包装则纠正为可用路径，其余保持用户自定义值
-
       if grep -q '^TKSWARM_CHROME_PATH=/snap/' "${TKSWARM_ENV_FILE}"; then
         sed -i "s|^TKSWARM_CHROME_PATH=.*|TKSWARM_CHROME_PATH=${CHROME_PATH}|" "${TKSWARM_ENV_FILE}"
         log "  已把 snap 浏览器路径纠正为 ${CHROME_PATH}"
@@ -519,6 +537,10 @@ if [[ -f "${TKSWARM_ENV_FILE}" ]]; then
     else
       echo "TKSWARM_CHROME_PATH=${CHROME_PATH}" >> "${TKSWARM_ENV_FILE}"
     fi
+  fi
+  # 默认 Electron 内核；已有自定义 ENGINE 则不覆盖
+  if ! grep -q '^TKSWARM_BROWSER_ENGINE=' "${TKSWARM_ENV_FILE}"; then
+    echo "TKSWARM_BROWSER_ENGINE=electron" >> "${TKSWARM_ENV_FILE}"
   fi
 else
   {
@@ -533,6 +555,8 @@ else
     echo "#TKSWARM_BROWSER_MAX_ENVS=300"
     echo "TKSWARM_BROWSER_XVFB=1"
     echo "TKSWARM_CHROME_NO_SANDBOX=1"
+    echo "# 内核：electron（默认）| chrome（系统 Chromium 回退）"
+    echo "TKSWARM_BROWSER_ENGINE=electron"
     echo "TKSWARM_HOST_ID=${TKSWARM_HOST_ID}"
     [[ -n "${TKSWARM_VNC_PASSWORD:-}" ]] && echo "TKSWARM_VNC_PASSWORD=${TKSWARM_VNC_PASSWORD}"
     [[ -n "${CHROME_PATH}" ]] && echo "TKSWARM_CHROME_PATH=${CHROME_PATH}"
@@ -542,6 +566,7 @@ chmod 640 "${TKSWARM_ENV_FILE}"
 
 log "========== 6/7 检查/安装 npm 依赖（已齐全则跳过）=========="
 run_npm_install_if_needed
+run_ensure_electron_if_needed
 run_ensure_chromium_if_needed
 
 log "========== 7/7 安装并启动 systemd =========="

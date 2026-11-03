@@ -29,17 +29,8 @@ async function login({ apiBase, username, password, captcha, captchaKey }) {
   });
   if (token) {
     db.upsertSession({ token, userId: saved.id });
-    // 仅更新默认 apiBase，不覆盖其他账号的 token
+    // 仅更新默认 apiBase；不要写 tkswarmBrowserApiToken 到 PHP（A/B 覆盖会导致 Node 带错 Bearer）
     writeSettings({ apiBase: base });
-    fetch(`${base}/settings`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ tkswarmBrowserApiToken: token }),
-    }).catch(() => {});
   }
   return { token, user: db.getUserByToken(token) || saved };
 }

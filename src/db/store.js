@@ -34,7 +34,28 @@ function countProfilesByOwner(ownerId) {
   return readOnly((d) => d.profiles.filter((p) => Number(p.owner_id) === Number(ownerId)).length);
 }
 
+function strictEnvOwner() {
+  return String(process.env.TKSWARM_STRICT_ENV_OWNER || '').trim() === '1';
+}
+
+/**
+ * 共用服务器（默认）：按整机环境总数上限，不按管理用户拆额度——
+ * 服务器浏览器大家共用，hydrate/import 不应卡在「某登录用户已满 300」。
+ * 严格多租户（TKSWARM_STRICT_ENV_OWNER=1）仍按 owner 计额度。
+ */
 function assertCanCreateProfile(ownerId) {
+  if (!strictEnvOwner()) {
+    const totalCap = Math.max(
+      Number(process.env.TKSWARM_BROWSER_MAX_ENVS_TOTAL || 0) || 0,
+      MAX_ENVS_PER_USER * 20,
+      1000,
+    );
+    const total = readOnly((d) => (Array.isArray(d.profiles) ? d.profiles.length : 0));
+    if (total >= totalCap) {
+      throw new Error(`服务器浏览器整机环境已满（${total}/${totalCap}）。可调 TKSWARM_BROWSER_MAX_ENVS_TOTAL`);
+    }
+    return;
+  }
   const n = countProfilesByOwner(ownerId);
   if (n >= MAX_ENVS_PER_USER) {
     throw new Error(`每个账号最多 ${MAX_ENVS_PER_USER} 个浏览器环境，当前已用 ${n} 个`);
@@ -338,6 +359,8 @@ module.exports = {
   listSessionsDetailed: sessions.listSessionsDetailed,
   countActiveSessions: sessions.countActiveSessions,
   listUsers: sessions.listUsers,
+  listUsersDetailed: sessions.listUsersDetailed,
+  listSessionTokens: sessions.listSessionTokens,
   touchSession: sessions.touchSession,
   MAX_ENVS_PER_USER,
 };

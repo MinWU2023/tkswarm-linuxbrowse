@@ -1,5 +1,7 @@
 const { EventEmitter } = require('node:events');
 const { launchProfile, killProcessAndWait, clearPid, isPidAlive } = require('./launcher');
+const { resolveEngine } = require('./engine');
+const { launchProfileElectron } = require('./electron-launcher');
 const { reclaimOrphans } = require('./process-guard');
 const { releaseDisplay } = require('./display-pool');
 const vnc = require('./vnc');
@@ -102,8 +104,21 @@ async function openProfile(profileId, options = {}) {
       throw new Error(`同时打开窗口已达上限 ${maxConc}，请先关闭部分环境后再试（可用 TKSWARM_BROWSER_MAX_CONCURRENT 调整）`);
     }
 
-    const profile = db.getProfile(id);
+    let profile = db.getProfile(id);
     if (!profile) throw new Error('browser环境不存在或已删除');
+
+    try {
+      const { enrichProfileProxyFromApi } = require('./proxy-enrich');
+      const hasProxy = Boolean(profile.proxy_host && profile.proxy_port);
+      const needCreds = hasProxy
+        && (!String(profile.proxy_user || '').trim() || !String(profile.proxy_pass || ''));
+      const enrichPromise = enrichProfileProxyFromApi(profile).catch(() => profile);
+      if (needCreds) {
+        profile = await enrichPromise;
+      }
+    } catch (error) {
+      console.warn(`[manager] 代理 API 补全跳过: ${error?.message || error}`);
+    }
 
     if (STICKY_HOST) {
       const bound = String(profile.bound_host_id || '').trim();
@@ -118,7 +133,9 @@ async function openProfile(profileId, options = {}) {
       }
     }
 
-    const launched = await launchProfile(profile, {
+    // 强制 EL 核；resolveEngine 在缺 Electron / 配置 chrome 时抛错
+    resolveEngine();
+    const launched = await launchProfileElectron(profile, {
       headless: options.headless,
       args: options.args,
     });

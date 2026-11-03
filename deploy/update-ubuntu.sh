@@ -81,6 +81,17 @@ if [[ -f "${ENV_FILE}" ]] && grep -q '^TKSWARM_CHROME_PATH=/snap/' "${ENV_FILE}"
   grep -q '^TKSWARM_CHROME_PATH=/snap/' "${ENV_FILE}" \
     && log "警告: 仍未找到可用的非 snap 浏览器，请安装 Google Chrome 后手动设置 TKSWARM_CHROME_PATH"
 fi
+# 默认切 Electron 内核（已有显式 ENGINE 则不覆盖）
+if [[ -f "${ENV_FILE}" ]] && ! grep -q '^TKSWARM_BROWSER_ENGINE=' "${ENV_FILE}"; then
+  echo "TKSWARM_BROWSER_ENGINE=electron" >> "${ENV_FILE}"
+  log "已写入 TKSWARM_BROWSER_ENGINE=electron"
+fi
+if [[ -f "${TKSWARM_APP_DIR}/scripts/ensure-electron.js" ]]; then
+  log "检查 Electron ..."
+  sudo -u tkswarm -H env HOME="${TKSWARM_DATA_DIR}" \
+    node "${TKSWARM_APP_DIR}/scripts/ensure-electron.js" \
+    || log "警告: Electron 未就绪，可 npm install electron 或设 TKSWARM_BROWSER_ENGINE=chrome"
+fi
 log "重启服务 ..."
 systemctl restart "${TKSWARM_SERVICE_NAME}"
 sleep 2

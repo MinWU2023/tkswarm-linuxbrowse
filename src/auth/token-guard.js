@@ -101,10 +101,57 @@ function invalidateCache(token) {
   else cache.clear();
 }
 
+/**
+ * 把「本机 sessions 不认识、但对 PHP 仍有效」的 Bearer 登记为本地会话。
+ * 场景：B 只登录了 Node，Node 带着 B 的 Token 调 Linux 浏览器；
+ * A 已在本机建好环境。采纳后 B 也能按共用规则打开 A 的环境。
+ *
+ * @returns {Promise<{ user: object, token: string }|null>}
+ */
+async function adoptRemoteToken(token) {
+  const t = String(token || '').trim();
+  if (!t) return null;
+  if (db.getUserByToken(t)) {
+    return { user: db.getUserByToken(t), token: t };
+  }
+  const remote = await validateTokenRemote(t);
+  if (!remote.ok) return null;
+
+  try {
+    const res = await fetch(`${apiBase()}/auth/status`, {
+      headers: { Authorization: `Bearer ${t}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    const json = await res.json().catch(() => ({}));
+    const body = json.data || json;
+    const user = body.user || body;
+    const id = Number(user?.id || user?.userId || 0);
+    if (!res.ok || id < 1) return null;
+    const role = user.role || user.roleName || user.role_name || '';
+    const isSuper = user.isSuper || user.is_super || Number(user.role_id) === 1 || role === '超级管理员';
+    db.saveUser({
+      id,
+      username: user.username || `user-${id}`,
+      nickname: user.nickname || '',
+      token: t,
+      role_name: role,
+      is_super: isSuper ? 1 : 0,
+      parent_id: 0,
+    });
+    db.upsertSession({ token: t, userId: id });
+    cache.set(t, { ok: true, at: Date.now() });
+    const local = db.getUserByToken(t);
+    return local ? { user: local, token: t } : null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   validateTokenRemote,
   assertTokenAlive,
   sweepInvalidSessions,
   startTokenGuard,
   invalidateCache,
+  adoptRemoteToken,
 };

@@ -255,4 +255,15 @@ async function killProcessAndWait(proc, timeoutMs = 8000, debugPort = 0) {
   return !isPidAlive(pid);
 }
 
-module.exports = { launchProfile, killProcess, killProcessAndWait, profileDir, clearPid, isPidAlive };
+module.exports = {
+  launchProfile,
+  killProcess,
+  killProcessAndWait,
+  profileDir,
+  clearPid,
+  isPidAlive,
+  getFreePort,
+  waitForDevtools,
+  waitForPageTarget,
+  fetchJson,
+};

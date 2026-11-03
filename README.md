@@ -27,7 +27,7 @@
 |---|---|---|
 | 运行时 | **Node.js 18+** | 与 `tkswarm-browses` / Node 栈一致，易维护 |
 | 比特兼容 API | **Express** | 复刻 `POST /health`、`/browser/*`，`BitBrowserProvider` 零改协议 |
-| 内核 | **系统 Chromium / Chrome** | `--remote-debugging-port` → CDP → Playwright `connectOverCDP` |
+| 内核 | **Electron / EL 核（强制）** | 与桌面自研同 EL 核才能**共用环境包**；禁止系统 Chrome/Chromium；`TKSWARM_BROWSER_ENGINE=electron` |
 | 有头（无显示器） | **Xvfb** | 每环境独占 DISPLAY |
 | 远程盯屏 | **x11vnc + noVNC** | 浏览器打开 `/vnc.html?id=` |
 | 指纹 / 代理 | 复用 browses 模块 | Canvas/WebGL 注入、SOCKS 账密桥、时区/地理 |
@@ -43,7 +43,7 @@
 - 多环境 / 多代理 / 多时区 / 独立 `user-data-dir`
 - `browser/open` 支持 **有头 / 无头**（`args` 含 `--headless` 或 `headless: true`）
 - 登录账号与 **TkSwarm 管理后台同一套**（`TKSWARM_API_BASE`）
-- **多账号并发会话**：多人同时登录；Node 用各自 Bearer Token；默认**环境共用**（`owner_id` 仅计创建额度；`TKSWARM_STRICT_ENV_OWNER=1` 才按人隔离）
+- **多账号并发会话**：多人同时登录；默认**环境共用**（`owner_id` 仅计创建额度；`TKSWARM_STRICT_ENV_OWNER=1` 才按人隔离）。Node 调本机 API 时推荐不带 Token（控制台有人登录即可）；未知但有效的 PHP Token 会自动登记为本地会话
 - 每账号最多 **300** 环境（`TKSWARM_BROWSER_MAX_ENVS`）
 - 首页：本账号用量、子级汇总、并发会话（超管）、运行中窗口
 - 无头可点 **显示窗口**；有头可点 **VNC 查看**（Xvfb + x11vnc + noVNC）
@@ -71,11 +71,11 @@ TKSWARM_SMOKE_TOKEN=xxx npm run smoke:cdp
 ```bash
 # 依赖
 sudo apt-get update
-sudo apt-get install -y nodejs npm chromium xvfb x11vnc ffmpeg fonts-noto-cjk
-
+sudo apt-get install -y nodejs npm xvfb x11vnc ffmpeg fonts-noto-cjk \
+  libnss3 libgtk-3-0 libnotify4 libxss1 libxtst6 libsecret-1-0 libgbm1
 cd tkswarm-linuxbrowse
-cp .env.example .env   # 编辑 TKSWARM_API_BASE
-npm install
+cp .env.example .env   # 编辑 TKSWARM_API_BASE；必须 TKSWARM_BROWSER_ENGINE=electron
+npm install            # 必须含 electron（禁止用系统 Chrome 回退）
 npm start
 ```
 

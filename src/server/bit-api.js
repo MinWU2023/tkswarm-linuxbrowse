@@ -7,6 +7,8 @@ const { resolveRequestUser } = require('../settings');
 const { probeExitIp } = require('../browser/exit-ip');
 const { lookupGeoByIp, applyIpCreateFields } = require('../browser/geo-from-ip');
 const { clearProfileCache, removeProfileDir } = require('../browser/profile-cleanup');
+const { exportProfilePack, importProfilePack } = require('../browser/profile-backup');
+const fs = require('node:fs');
 const { REQUIRE_BEARER, HOST_ID } = require('../config');
 const { assertTokenAlive } = require('../auth/token-guard');
 const { collectHealthExtras } = require('../browser/metrics');
@@ -36,30 +38,58 @@ function errCodeFromMessage(msg) {
   return undefined;
 }
 
+/**
+ * 本机环境共用鉴权（与 tkswarm-browses 对齐）
+ * ---------------------------------------------------------------
+ * Node / 另一用户带的 Bearer 常常不是本机 sessions 里的那份（例如 B 登录 Node
+ * 后把 PHP Token 同步到 tkswarmBrowserApiToken，但从未在 Linux 控制台登录）。
+ * 旧逻辑：未知 Bearer → Login out；去掉 Token 重试 → REQUIRE_BEARER 仍拒。
+ * 表现就是「A 建的环境 B 从 Node 打不开」。
+ *
+ * 新逻辑：
+ *  1) 本地能认出 Token → 校验存活后按该用户继续
+ *  2) Token 对 PHP 仍有效但本机没有会话 → 自动登记为本地会话（采纳）
+ *  3) 否则退回「本机最近登录用户」（只要有人登过即可开共用环境）
+ *  4) 本机完全无人登录才 Login out
+ */
 async function authMiddleware(req, res, next) {
   const { user, token } = resolveRequestUser(req);
-  if (!user || !token) {
-    if (!REQUIRE_BEARER) {
-      const fallback = getCurrentUser();
-      if (fallback && !token) {
-        req.currentUser = fallback;
+
+  if (user && token) {
+    const alive = await assertTokenAlive(token);
+    if (alive) {
+      const again = resolveRequestUser(req);
+      if (again.user) {
+        req.currentUser = again.user;
+        req.authToken = token;
         return next();
       }
     }
+    // Token 已失效：不要直接拒，尝试本机其它已登录用户（共用）
+  } else if (token) {
+    // 本地不认识，但可能是 Node 同步来的有效 PHP Token → 采纳为本地会话
+    try {
+      const { adoptRemoteToken } = require('../auth/token-guard');
+      const adopted = await adoptRemoteToken(token);
+      if (adopted?.user) {
+        req.currentUser = adopted.user;
+        req.authToken = token;
+        return next();
+      }
+    } catch { /* fall through */ }
+  }
+
+  const fallback = getCurrentUser();
+  if (fallback) {
+    req.currentUser = fallback;
+    req.authToken = (token && user) ? token : (fallback.token || token || '');
+    return next();
+  }
+
+  if (!REQUIRE_BEARER && !token) {
     return res.json(fail('Login out', 1, 'AUTH_REQUIRED'));
   }
-  const alive = await assertTokenAlive(token);
-  if (!alive) {
-    return res.json(fail('token 无效或已过期，请重新登录', 1, 'TOKEN_INVALID'));
-  }
-  // 可能刚被踢，重新解析
-  const again = resolveRequestUser(req);
-  if (!again.user) {
-    return res.json(fail('Login out', 1, 'AUTH_REQUIRED'));
-  }
-  req.currentUser = again.user;
-  req.authToken = token;
-  next();
+  return res.json(fail('Login out', 1, 'AUTH_REQUIRED'));
 }
 
 /** 严格按 owner_id 隔离（老多租户行为）。默认关闭：同机环境共用。 */
@@ -149,10 +179,12 @@ function createRouter() {
   // health 无需登录也能探活（节点设置页「检测」）；list/open 仍需登录
   router.post('/health', (req, res) => {
     const { PROVIDER_ID, PROVIDER_LABEL, VERSION, MAX_CONCURRENT_OPENS } = require('../config');
+    const { probeEngine } = require('../browser/engine');
     const extras = collectHealthExtras();
     const loggedIn = extras.activeSessions > 0 || !!getCurrentUser();
+    const engineProbe = probeEngine();
     res.json(ok({
-      status: 'ok',
+      status: engineProbe.ok ? 'ok' : 'degraded',
       provider: PROVIDER_ID,
       providerFamily: 'tkswarm',
       providerLabel: PROVIDER_LABEL,
@@ -160,6 +192,9 @@ function createRouter() {
       hostId: HOST_ID,
       loggedIn,
       version: VERSION,
+      engine: engineProbe.engine,
+      engineOk: !!engineProbe.ok,
+      engineError: engineProbe.error || '',
       runningWindows: extras.runningWindows,
       maxConcurrent: extras.maxConcurrent || MAX_CONCURRENT_OPENS,
       headlessWindows: extras.headlessWindows,
@@ -562,6 +597,59 @@ function createRouter() {
       res.json(ok(toBitProfile(updated)));
     } catch (e) {
       res.json(fail(e.message || '更新失败'));
+    }
+  });
+
+  /** 导出环境包（同机 Node 读 filePath 上传中心库） */
+  router.post('/browser/export', authMiddleware, async (req, res) => {
+    try {
+      const id = String(req.body?.id || '');
+      const row = db.getProfile(id);
+      const gate = assertProfileOwner(req.currentUser, row, { write: true });
+      if (!gate.ok) return res.json(fail(gate.msg));
+      if (manager.getSession(id)) {
+        await manager.closeProfile(id).catch(() => {});
+      }
+      const pack = exportProfilePack(id, { closeFirst: true });
+      res.json(ok({
+        id,
+        filePath: pack.filePath,
+        fileName: pack.fileName,
+        bytes: pack.bytes,
+        kind: pack.kind,
+      }));
+    } catch (e) {
+      res.json(fail(e.message || '导出失败'));
+    }
+  });
+
+  /** 导入环境包：keepId 强制同 ID，已存在则覆盖 */
+  router.post('/browser/import', authMiddleware, async (req, res) => {
+    try {
+      const user = req.currentUser;
+      const filePath = String(req.body?.filePath || req.body?.path || '').trim();
+      const hintId = String(req.body?.id || '').trim();
+      const keepId = req.body?.keepId !== false && req.body?.keepId !== 0 && req.body?.keepId !== '0';
+      const forceOverwrite = req.body?.forceOverwrite !== false;
+      if (!filePath || !fs.existsSync(filePath)) {
+        return res.json(fail('缺少有效的 filePath（环境包路径）'));
+      }
+      if (hintId && manager.getSession(hintId)) {
+        await manager.closeProfile(hintId).catch(() => {});
+      }
+      const result = importProfilePack(filePath, {
+        ownerId: Number(user.id || 0) || 1,
+        keepId,
+        forceOverwrite,
+      });
+      res.json(ok({
+        id: result.profile?.id,
+        profile: toBitProfile(result.profile),
+        sourceId: result.sourceId,
+        overwritten: result.overwritten,
+      }));
+    } catch (e) {
+      res.json(fail(e.message || '导入失败'));
     }
   });
 
