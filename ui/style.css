@@ -674,6 +674,63 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+.pager-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--line-soft);
+  background: #f8fafc;
+}
+
+.pager-bar .toolbar-meta {
+  margin-left: 0;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  color: #475569;
+}
+
+.badge.warn {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #c2410c;
+}
+
+.badge.info {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.badge.success {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #15803d;
+}
+
+.badge.danger {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #be123c;
+}
+
+.btn.ghost.is-active-nav {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
 .table-scroll {
   overflow-x: auto;
   margin: 0;

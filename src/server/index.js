@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { createRouter } = require('./bit-api');
 const dashboard = require('./dashboard-api');
+const tasksApi = require('./tasks-api');
 const metricsRoute = require('./metrics-route');
 const { API_HOST, API_PORT } = require('../config');
 const vnc = require('../browser/vnc');
@@ -20,6 +21,7 @@ function createApp() {
 
   app.use(metricsRoute);
   app.use(dashboard);
+  app.use(tasksApi);
   app.use(createRouter());
 
   const uiRoot = path.join(__dirname, '../../ui');
@@ -37,6 +39,9 @@ function createApp() {
   app.use('/ui', express.static(uiRoot));
   app.get('/', (req, res) => {
     res.sendFile(path.join(uiRoot, 'index.html'));
+  });
+  app.get('/tasks', (req, res) => {
+    res.sendFile(path.join(uiRoot, 'tasks.html'));
   });
   app.get('/vnc.html', (req, res) => {
     res.sendFile(path.join(uiRoot, 'vnc.html'));

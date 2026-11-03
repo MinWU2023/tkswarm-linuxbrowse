@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+  <meta name="theme-color" content="#2563eb" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>待执行任务 · 第一页自研浏览器</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=4.1" />
+  <link rel="stylesheet" href="theme-premium.css?v=1.0" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">T</span>
+        <div class="brand-text">
+          <h1 class="brand-name">第一页自研浏览器</h1>
+          <p class="sub">Linux · 待执行任务 · <code id="api-url">—</code></p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn ghost" href="/">控制台</a>
+        <a class="btn ghost is-active-nav" href="/tasks">任务列表</a>
+        <div id="user-chip" class="user-chip hidden"></div>
+        <button id="btn-logout" class="btn ghost hidden" type="button">退出</button>
+      </div>
+    </header>
+
+    <section id="login-panel" class="login-stage">
+      <div class="login-card anim-enter">
+        <p class="login-eyebrow">需要登录</p>
+        <h2 class="login-brand">查看待执行任务</h2>
+        <p class="hint">请先登录中心账号，再查看本账号可见的排队 / 草稿 / 运行中任务。</p>
+        <form id="login-form" class="login-form" autocomplete="on">
+          <label>API 地址
+            <input id="api-base" type="text" placeholder="http://127.0.0.1:8080/api" />
+          </label>
+          <label>用户名
+            <input id="username" type="text" autocomplete="username" />
+          </label>
+          <label>密码
+            <input id="password" type="password" autocomplete="current-password" />
+          </label>
+          <button id="btn-login" class="btn primary block" type="submit">登录</button>
+          <p id="login-error" class="error hidden"></p>
+        </form>
+      </div>
+    </section>
+
+    <section id="tasks-panel" class="dashboard hidden">
+      <div class="panel anim-fade">
+        <div class="panel-head">
+          <div>
+            <h2>待执行任务</h2>
+            <p class="panel-desc">来自中心库任务队列；默认展示草稿 / 排队 / 暂停 / 运行中，支持分页</p>
+          </div>
+          <div class="panel-actions">
+            <button id="btn-refresh" class="btn ghost" type="button">刷新</button>
+          </div>
+        </div>
+
+        <div class="toolbar-row tasks-toolbar">
+          <select id="status-filter" class="input filter-select" title="状态">
+            <option value="pending">待执行（全部）</option>
+            <option value="queued">排队中</option>
+            <option value="draft">草稿</option>
+            <option value="running">运行中</option>
+            <option value="paused">已暂停</option>
+          </select>
+          <input id="keyword" class="input filter-input" type="search" placeholder="搜索任务名称…" />
+          <button id="btn-search" class="btn primary" type="button">查询</button>
+          <span id="task-meta" class="toolbar-meta">0 条</span>
+        </div>
+
+        <div class="table-scroll">
+          <table class="win-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>名称</th>
+                <th>类型</th>
+                <th>状态</th>
+                <th>进度</th>
+                <th>创建时间</th>
+                <th>备注</th>
+              </tr>
+            </thead>
+            <tbody id="task-body">
+              <tr><td colspan="7" class="empty">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pager-bar" id="pager-bar">
+          <button type="button" class="btn ghost" id="btn-prev" disabled>上一页</button>
+          <span id="pager-label" class="toolbar-meta">第 1 / 1 页</span>
+          <button type="button" class="btn ghost" id="btn-next" disabled>下一页</button>
+          <select id="page-size" class="input filter-select" title="每页条数">
+            <option value="10">10 / 页</option>
+            <option value="20" selected>20 / 页</option>
+            <option value="50">50 / 页</option>
+          </select>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div id="toast-host" aria-live="polite"></div>
+  <script src="tasks.js?v=1"></script>
+</body>
+</html>
