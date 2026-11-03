@@ -250,6 +250,7 @@ router.get('/api/tasks', async (req, res) => {
     const centerDropped = Math.max(0, centerRows.length - (center.ok ? centerRows.filter(isAllowedCenterTask).length : 0));
     const centerTotalRaw = center.ok ? Number(center.data?.total || centerItems.length || 0) : 0;
     const centerTotal = Math.max(0, centerTotalRaw - centerDropped);
+    const total = workTotal + centerTotal;
     const pages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
     res.json({
