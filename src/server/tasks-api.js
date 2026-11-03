@@ -1,8 +1,7 @@
 /**
- * 待执行任务列表 API
- * - 中心库 /api/tasks（常规排队任务）
- * - 账号矩阵 /api/account-work-batches（客服坐席 cs_seat / AI 拓客 ai_lead）
- * 服务器浏览器实际领取的是后者；页面合并展示。
+ * 待执行任务列表 API（仅服务器浏览器白名单）
+ * - 账号矩阵 /api/account-work-batches：客服坐席 cs_seat / AI 拓客 ai_lead
+ * - 中心库 /api/tasks：仅 ai_lead / ai_lead_dm（禁止 publish / warm 等）
  */
 const express = require('express');
 const { TKSWARM_API_BASE } = require('../config');
@@ -78,6 +77,10 @@ const SEAT_TYPE_LABEL = {
   ai_lead_dm: 'AI 拓客私信',
 };
 
+/** 中心库 tasks 表里允许出现在服务器浏览器任务页的类型 */
+const CENTER_SERVER_BROWSER_TYPES = new Set(['ai_lead', 'ai_lead_dm']);
+const CENTER_TYPE_QUERY = 'ai_lead,ai_lead_dm';
+
 function mapWorkBatch(row) {
   const scope = String(row.batch_scope || row.batchScope || 'general');
   const pending = Number(row.pending_count || 0);
@@ -113,13 +116,19 @@ function mapWorkBatch(row) {
 }
 
 function mapCenterTask(row) {
+  const t = String(row.type || '');
   return {
     ...row,
     id: row.id,
     kind: 'task',
-    typeLabel: row.type || '',
+    type: t,
+    typeLabel: SEAT_TYPE_LABEL[t] || t || '-',
     payload: row.payload || {},
   };
+}
+
+function isAllowedCenterTask(row) {
+  return CENTER_SERVER_BROWSER_TYPES.has(String(row?.type || '').trim().toLowerCase());
 }
 
 /**
@@ -164,12 +173,15 @@ router.get('/api/tasks', async (req, res) => {
       fetches.push(Promise.resolve({ key: 'work', ok: true, data: { items: [], total: 0, pages: 1 } }));
     }
 
-    if (wantCenter) {
+    // 中心库只拉拓客类；坐席仅在 work 队列；publish/warm 等永不进入本页
+    const skipCenter = !wantCenter || type === 'chat_seat'
+      || (type && type !== 'all' && type !== 'ai_lead' && type !== 'ai_lead_dm');
+    if (!skipCenter) {
       const tqs = new URLSearchParams();
       tqs.set('page', String(page));
       tqs.set('pageSize', String(pageSize));
       tqs.set('status', status);
-      if (type) tqs.set('type', type);
+      tqs.set('type', (type === 'ai_lead' || type === 'ai_lead_dm') ? type : CENTER_TYPE_QUERY);
       if (keyword) tqs.set('name', keyword);
       fetches.push(
         upstreamGet(base, `/tasks?${tqs}`, token).then((r) => ({ key: 'center', ...r }))
@@ -203,23 +215,41 @@ router.get('/api/tasks', async (req, res) => {
       ? center.data.items
       : (Array.isArray(center.data?.list) ? center.data.list : []);
 
-    let workItems = work.ok ? workRows.map(mapWorkBatch) : [];
-    let centerItems = center.ok ? centerRows.map(mapCenterTask) : [];
+    let workItems = work.ok
+      ? workRows
+        .filter((r) => {
+          const scope = String(r.batch_scope || r.batchScope || '');
+          return scope === 'cs_seat' || scope === 'ai_lead';
+        })
+        .map(mapWorkBatch)
+      : [];
+    let centerItems = center.ok
+      ? centerRows.filter(isAllowedCenterTask).map(mapCenterTask)
+      : [];
 
     // 类型筛选：chat_seat → 只留 cs_seat；ai_lead → 只留拓客
     if (type === 'chat_seat') {
       workItems = workItems.filter((x) => x.batchScope === 'cs_seat');
       centerItems = [];
-    } else if (type === 'ai_lead') {
+    } else if (type === 'ai_lead' || type === 'ai_lead_dm') {
       workItems = workItems.filter((x) => x.batchScope === 'ai_lead');
-      centerItems = centerItems.filter((x) => String(x.type || '') === 'ai_lead');
+      centerItems = centerItems.filter((x) => {
+        const t = String(x.type || '');
+        return type === 'ai_lead' ? (t === 'ai_lead' || t === 'ai_lead_dm') : t === type;
+      });
+    } else if (type && type !== 'all') {
+      // 其它类型（publish 等）在本页一律不展示
+      workItems = [];
+      centerItems = [];
     }
 
     // 合并：坐席/拓客优先，再拼中心库任务；同页各取 pageSize 再裁切
     const merged = [...workItems, ...centerItems].slice(0, pageSize);
     const workTotal = work.ok ? Number(work.data?.total || workItems.length || 0) : 0;
-    const centerTotal = center.ok ? Number(center.data?.total || centerItems.length || 0) : 0;
-    const total = workTotal + centerTotal;
+    // 中心库 total 按白名单过滤后的结果估算（避免把 publish 计数算进来）
+    const centerDropped = Math.max(0, centerRows.length - (center.ok ? centerRows.filter(isAllowedCenterTask).length : 0));
+    const centerTotalRaw = center.ok ? Number(center.data?.total || centerItems.length || 0) : 0;
+    const centerTotal = Math.max(0, centerTotalRaw - centerDropped);
     const pages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
     res.json({

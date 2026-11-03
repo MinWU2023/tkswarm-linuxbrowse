@@ -77,18 +77,17 @@ const STATUS_LABEL = {
 };
 
 const TYPE_LABEL = {
-  publish: '发布视频',
-  message: '私信',
-  warm: '养号',
   ai_lead: 'AI 拓客',
+  ai_lead_dm: 'AI 拓客私信',
   chat_seat: '客服坐席',
   account_work: '矩阵任务',
-  comment_reply: '回复评论',
-  pull_video_list: '拉取视频列表',
-  pull_comments: '拉取视频详情',
-  auto_follow: '自动关注',
+  message: '私信',
+  dm_reply: '客服发信',
   sync_fans: '同步粉丝',
   dm_sync: '私信同步',
+  cs_login: '客服登录',
+  cs_logout: '客服退出',
+  cs_detect: '客服检测登录',
 };
 
 function statusBadge(st) {

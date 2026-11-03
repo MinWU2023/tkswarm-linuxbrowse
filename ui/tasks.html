@@ -78,7 +78,7 @@
         <div class="panel-head">
           <div>
             <h2>待执行任务</h2>
-            <p class="panel-desc">含客服坐席 / AI 拓客推送队列，以及中心库排队任务；支持分页</p>
+            <p class="panel-desc">仅客服坐席与 AI 拓客（服务器浏览器白名单）；不含发布 / 养号等桌面任务</p>
           </div>
           <div class="panel-actions">
             <button id="btn-refresh" class="btn ghost" type="button">刷新</button>
@@ -87,9 +87,9 @@
 
         <div class="toolbar-row tasks-toolbar">
           <select id="source-filter" class="input filter-select" title="来源">
-            <option value="all">全部来源</option>
-            <option value="work">坐席 / 拓客</option>
-            <option value="center">中心库任务</option>
+            <option value="all">全部（坐席+拓客）</option>
+            <option value="work">坐席 / 拓客队列</option>
+            <option value="center">AI拓客（中心库）</option>
           </select>
           <select id="status-filter" class="input filter-select" title="状态">
             <option value="pending">待执行（全部）</option>
@@ -136,6 +136,6 @@
     </section>
   </div>
   <div id="toast-host" aria-live="polite"></div>
-  <script src="tasks.js?v=2"></script>
+  <script src="tasks.js?v=3"></script>
 </body>
 </html>
