@@ -10,6 +10,17 @@ let state = {
   status: 'pending',
   keyword: '',
   source: 'all',
+  items: [],
+};
+
+/** 仅内存：刷新页面即清空 */
+const logCache = new Map();
+let logViewer = {
+  open: false,
+  taskKey: '',
+  title: '',
+  itemId: 0,
+  pollTimer: null,
 };
 
 function getToken() {
@@ -84,6 +95,7 @@ const TYPE_LABEL = {
   message: '私信',
   dm_reply: '客服发信',
   sync_fans: '同步粉丝',
+  sync_following: '同步关注',
   dm_sync: '私信同步',
   cs_login: '客服登录',
   cs_logout: '客服退出',
@@ -103,7 +115,7 @@ function statusBadge(st) {
 
 function typeLabel(x) {
   if (x.typeLabel) return x.typeLabel;
-  const k = String(x.type || '');
+  const k = String(x.taskType || x.type || '');
   return TYPE_LABEL[k] || k || '-';
 }
 
@@ -127,12 +139,18 @@ function idCell(x) {
   return `<code>#${esc(x.id)}</code>`;
 }
 
+function taskKeyOf(x) {
+  if (x.kind === 'account_work') return `awb-${x.workBatchId || String(x.id).replace(/^awb-/i, '')}`;
+  return String(x.id);
+}
+
 function renderRows(items) {
   const body = document.getElementById('task-body');
+  state.items = items || [];
   if (!items.length) {
     body.innerHTML = `<tr><td colspan="7" class="empty">
-      <div class="empty-block"><strong>暂无待执行任务</strong>
-      <span class="muted">当前筛选条件下没有任务（含客服坐席推送）</span></div>
+      <div class="empty-block"><strong>暂无任务</strong>
+      <span class="muted">客服拉粉丝会以「客服粉丝/关注同步」出现在坐席队列；可切换「全部状态 / 已完成」查看</span></div>
     </td></tr>`;
     return;
   }
@@ -142,7 +160,9 @@ function renderRows(items) {
     const note = x.note
       || (backend ? `后端 ${backend}` : '')
       || (x.group_name || '-');
-    return `<tr>
+    const key = taskKeyOf(x);
+    const active = logViewer.open && logViewer.taskKey === key ? ' is-active' : '';
+    return `<tr class="task-row${active}" data-task-key="${esc(key)}" data-item-id="${esc(x.workItemId || 0)}" title="点击查看实时日志">
       <td>${idCell(x)}</td>
       <td><b>${esc(x.name || '-')}</b></td>
       <td>${esc(typeLabel(x))}</td>
@@ -152,6 +172,15 @@ function renderRows(items) {
       <td class="muted">${esc(note)}</td>
     </tr>`;
   }).join('');
+
+  body.querySelectorAll('tr.task-row').forEach((tr) => {
+    tr.addEventListener('click', () => {
+      const key = tr.getAttribute('data-task-key') || '';
+      const itemId = Number(tr.getAttribute('data-item-id') || 0) || 0;
+      const row = state.items.find((x) => taskKeyOf(x) === key);
+      openLogDrawer(row || { id: key, name: key }, itemId);
+    });
+  });
 }
 
 function renderPager() {
@@ -160,6 +189,100 @@ function renderPager() {
   document.getElementById('btn-prev').disabled = state.page <= 1;
   document.getElementById('btn-next').disabled = state.page >= state.pages;
   document.getElementById('page-size').value = String(state.pageSize);
+}
+
+function formatLogTime(s) {
+  const t = String(s || '');
+  if (t.length >= 19) return t.slice(11, 19);
+  return t || '--:--:--';
+}
+
+function renderLogBody(lines) {
+  const host = document.getElementById('log-drawer-body');
+  if (!lines.length) {
+    host.innerHTML = `<p class="log-empty">暂无日志（入队后会出现；执行过程中自动刷新）</p>`;
+    return;
+  }
+  host.innerHTML = lines.map((row) => {
+    const lv = String(row.level || 'info').toLowerCase();
+    return `<div class="log-line">
+      <span class="t">${esc(formatLogTime(row.created_at))}</span>
+      <span class="lv ${esc(lv)}">${esc(lv)}</span>
+      <span class="msg">${esc(row.message || '')}</span>
+    </div>`;
+  }).join('');
+  host.scrollTop = host.scrollHeight;
+}
+
+function stopLogPoll() {
+  if (logViewer.pollTimer) {
+    clearInterval(logViewer.pollTimer);
+    logViewer.pollTimer = null;
+  }
+}
+
+function closeLogDrawer() {
+  stopLogPoll();
+  logViewer.open = false;
+  logViewer.taskKey = '';
+  show('#log-drawer', false);
+  document.getElementById('log-drawer')?.setAttribute('aria-hidden', 'true');
+  document.querySelectorAll('tr.task-row.is-active').forEach((el) => el.classList.remove('is-active'));
+}
+
+async function fetchTaskLogs(taskKey, itemId = 0, { silent = false } = {}) {
+  const qs = new URLSearchParams({ limit: '300' });
+  if (itemId > 0) qs.set('itemId', String(itemId));
+  const res = await fetch(`${API}/api/tasks/${encodeURIComponent(taskKey)}/logs?${qs}`, {
+    headers: authHeaders(),
+  });
+  const j = await res.json();
+  if (!j.ok) {
+    if (!silent) toast(j.message || '拉取日志失败', 'err');
+    return [];
+  }
+  const lines = Array.isArray(j.items) ? j.items : [];
+  logCache.set(taskKey, { lines, at: Date.now(), itemId });
+  return lines;
+}
+
+async function openLogDrawer(row, itemId = 0) {
+  const key = taskKeyOf(row);
+  const title = row.name || key;
+  logViewer.open = true;
+  logViewer.taskKey = key;
+  logViewer.title = title;
+  logViewer.itemId = itemId || Number(row.workItemId || 0) || 0;
+
+  document.getElementById('log-drawer-title').textContent = title;
+  document.getElementById('log-drawer-sub').textContent = `${key} · 内存缓存 · 刷新页面后清空`;
+  show('#log-drawer', true);
+  document.getElementById('log-drawer')?.setAttribute('aria-hidden', 'false');
+  document.querySelectorAll('tr.task-row').forEach((el) => {
+    el.classList.toggle('is-active', el.getAttribute('data-task-key') === key);
+  });
+
+  const cached = logCache.get(key);
+  if (cached?.lines?.length) renderLogBody(cached.lines);
+  else document.getElementById('log-drawer-body').innerHTML = `<p class="log-empty">加载日志中…</p>`;
+
+  try {
+    const lines = await fetchTaskLogs(key, logViewer.itemId);
+    if (logViewer.taskKey === key) renderLogBody(lines);
+  } catch (e) {
+    if (logViewer.taskKey === key) {
+      document.getElementById('log-drawer-body').innerHTML = `<p class="log-empty">${esc(e.message || '加载失败')}</p>`;
+    }
+  }
+
+  stopLogPoll();
+  logViewer.pollTimer = setInterval(async () => {
+    if (!logViewer.open || logViewer.taskKey !== key) return;
+    try {
+      const lines = await fetchTaskLogs(key, logViewer.itemId, { silent: true });
+      if (logViewer.taskKey === key) renderLogBody(lines);
+    } catch { /* ignore poll errors */ }
+  }, 2500);
 }
 
 async function loadTasks() {
@@ -198,6 +321,7 @@ async function loadTasks() {
 }
 
 function enterLogin() {
+  closeLogDrawer();
   show('#tasks-panel', false);
   show('#login-panel', true);
   show('#user-chip', false);
@@ -221,9 +345,6 @@ function bootDone() {
   document.body.classList.remove('booting');
 }
 
-/**
- * 首屏同步判定：有 Token / 上次登录标记则直接进列表，避免先闪登录页再跳回。
- */
 function bootUI() {
   try {
     const known = !!getToken() || localStorage.getItem(SEEN_KEY) === '1';
@@ -322,6 +443,17 @@ async function boot() {
     state.pageSize = Number(document.getElementById('page-size').value) || 20;
     state.page = 1;
     loadTasks();
+  };
+  document.getElementById('btn-log-close').onclick = () => closeLogDrawer();
+  document.getElementById('btn-log-refresh').onclick = async () => {
+    if (!logViewer.taskKey) return;
+    try {
+      const lines = await fetchTaskLogs(logViewer.taskKey, logViewer.itemId);
+      renderLogBody(lines);
+      toast('日志已刷新', 'ok');
+    } catch (e) {
+      toast(e.message || '刷新失败', 'err');
+    }
   };
 
   setInterval(() => {

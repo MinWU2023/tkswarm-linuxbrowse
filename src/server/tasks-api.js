@@ -88,14 +88,22 @@ function mapWorkBatch(row) {
   const total = Number(row.item_total || row.item_count || 0);
   const username = row.username || `#${row.account_id || ''}`;
   const scopeLabel = scope === 'cs_seat' ? '客服坐席' : (scope === 'ai_lead' ? 'AI 拓客' : '矩阵任务');
+  const taskType = String(row.primary_task_type || row.primaryTaskType || '').trim();
+  const seatAction = String(row.seat_action || row.seatAction || '').trim();
+  const actionKey = seatAction || taskType;
+  const actionLabel = SEAT_TYPE_LABEL[actionKey] || SEAT_TYPE_LABEL[taskType] || actionKey || scopeLabel;
+  const lastItemId = Number(row.last_item_id || row.lastItemId || 0);
   return {
     id: `awb-${row.id}`,
     workBatchId: Number(row.id),
+    workItemId: lastItemId || 0,
     kind: 'account_work',
-    name: `${scopeLabel} · ${username}`,
+    name: `${actionLabel} · ${username}`,
     type: scope === 'cs_seat' ? 'chat_seat' : (scope === 'ai_lead' ? 'ai_lead' : 'account_work'),
-    typeLabel: scopeLabel,
+    taskType: taskType || actionKey || scope,
+    typeLabel: actionLabel,
     status: String(row.status || ''),
+    itemStatus: String(row.last_item_status || row.lastItemStatus || ''),
     success_count: Math.max(0, total - pending - paused),
     fail_count: 0,
     total_count: total,
@@ -109,10 +117,23 @@ function mapWorkBatch(row) {
       browser_backend: 'linux',
       source: scope === 'cs_seat' ? 'chat.seat' : scope,
       batchScope: scope,
+      seatAction: seatAction || '',
+      taskType,
       lastError: row.last_error || '',
     },
-    note: pending ? `${pending} 项待执行` : (row.last_error || SEAT_TYPE_LABEL[scope] || ''),
+    note: pending
+      ? `${pending} 项待执行`
+      : (row.last_error || `${scopeLabel}${taskType ? ` · ${actionLabel}` : ''}`),
   };
+}
+
+/** 工作队列状态：UI 的 queued/draft 映射为 pending 别名 */
+function workStatusQuery(status) {
+  const s = String(status || 'pending').trim().toLowerCase();
+  if (!s || s === 'all') return '';
+  if (s === 'queued' || s === 'draft') return 'pending';
+  if (s === 'pending') return 'pending'; // PHP 侧展开为 pending,running,paused
+  return s;
 }
 
 function mapCenterTask(row) {
@@ -164,7 +185,8 @@ router.get('/api/tasks', async (req, res) => {
       wqs.set('page', String(page));
       wqs.set('pageSize', String(pageSize));
       wqs.set('batchScope', 'cs_seat,ai_lead');
-      wqs.set('status', status);
+      const wStatus = workStatusQuery(status);
+      if (wStatus) wqs.set('status', wStatus);
       if (keyword) wqs.set('keyword', keyword);
       fetches.push(
         upstreamGet(base, `/account-work-batches?${wqs}`, token).then((r) => ({ key: 'work', ...r }))
@@ -272,6 +294,96 @@ router.get('/api/tasks', async (req, res) => {
       ok: false,
       message: e.message || '无法连接中心 API',
     });
+  }
+});
+
+/**
+ * GET /api/tasks/:id/logs
+ * id: awb-123 | 123（矩阵总任务）或中心库任务数字 ID
+ * 实时日志来自中心库 account_work_logs / 任务事件；本服务不做落库。
+ */
+router.get('/api/tasks/:id/logs', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+
+  const raw = String(req.params.id || '').trim();
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit || req.query.pageSize || 200) || 200));
+  const base = apiBase();
+  if (!base) {
+    return res.json({ ok: false, message: '未配置中心 API 地址（TKSWARM_API_BASE）' });
+  }
+  const token = authToken(req, user);
+
+  let batchId = 0;
+  let itemId = Number(req.query.itemId || 0) || 0;
+  if (/^awb-/i.test(raw)) {
+    batchId = Number(String(raw).replace(/^awb-/i, '')) || 0;
+  } else if (/^\d+$/.test(raw)) {
+    batchId = Number(raw) || 0;
+  }
+
+  try {
+    if (batchId > 0) {
+      const path = itemId > 0
+        ? `/account-work-batches/${batchId}/items/${itemId}/logs?pageSize=${limit}`
+        : `/account-work-batches/${batchId}/logs?pageSize=${limit}`;
+      const r = await upstreamGet(base, path, token);
+      if (!r.ok) {
+        return res.status(r.upstream?.status >= 400 ? r.upstream.status : 502).json({
+          ok: false,
+          message: r.json?.message || r.json?.msg || '拉取任务日志失败',
+        });
+      }
+      const items = Array.isArray(r.data?.items) ? r.data.items : (Array.isArray(r.data?.list) ? r.data.list : []);
+      return res.json({
+        ok: true,
+        kind: 'account_work',
+        batchId,
+        itemId: itemId || Number(r.data?.itemId || 0) || 0,
+        items: items.map((row) => ({
+          id: row.id,
+          level: row.level || 'info',
+          message: row.message || '',
+          created_at: row.created_at || row.createdAt || '',
+          itemId: Number(row.item_id || row.itemId || 0),
+          meta: row.meta || {},
+        })),
+        total: Number(r.data?.total || items.length || 0),
+      });
+    }
+
+    // 中心库任务：事件流
+    const taskId = Number(raw) || 0;
+    if (taskId > 0) {
+      const r = await upstreamGet(base, `/tasks/${taskId}/events?pageSize=${limit}`, token);
+      if (!r.ok) {
+        return res.status(r.upstream?.status >= 400 ? r.upstream.status : 502).json({
+          ok: false,
+          message: r.json?.message || r.json?.msg || '拉取任务事件失败',
+        });
+      }
+      const items = Array.isArray(r.data?.items) ? r.data.items : (Array.isArray(r.data?.list) ? r.data.list : []);
+      return res.json({
+        ok: true,
+        kind: 'task',
+        batchId: 0,
+        itemId: 0,
+        taskId,
+        items: items.map((row) => ({
+          id: row.id,
+          level: row.level || row.type || 'info',
+          message: row.message || row.content || '',
+          created_at: row.created_at || row.createdAt || '',
+          itemId: 0,
+          meta: row.meta || {},
+        })),
+        total: Number(r.data?.total || items.length || 0),
+      });
+    }
+
+    return res.status(400).json({ ok: false, message: '无效任务 ID' });
+  } catch (e) {
+    return res.status(502).json({ ok: false, message: e.message || '无法连接中心 API' });
   }
 });
 

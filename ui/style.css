@@ -731,6 +731,70 @@ code {
   color: #1d4ed8;
 }
 
+.win-table tbody tr.task-row {
+  cursor: pointer;
+}
+.win-table tbody tr.task-row.is-active {
+  background: linear-gradient(90deg, rgba(219, 234, 254, 0.95), rgba(236, 254, 255, 0.45));
+}
+
+.log-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(440px, 100vw);
+  height: 100vh;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-left: 1px solid var(--line-soft, #e2e8f0);
+  box-shadow: -12px 0 40px rgba(15, 23, 42, 0.08);
+}
+.log-drawer.hidden { display: none !important; }
+.log-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line-soft, #e2e8f0);
+  background: #f8fafc;
+}
+.log-drawer-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+.log-drawer-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 16px 24px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+.log-line {
+  display: grid;
+  grid-template-columns: 64px 52px 1fr;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  word-break: break-word;
+}
+.log-line .t { color: #94a3b8; font-variant-numeric: tabular-nums; }
+.log-line .lv { font-weight: 650; text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; }
+.log-line .lv.info { color: #38bdf8; }
+.log-line .lv.warn { color: #fbbf24; }
+.log-line .lv.error,
+.log-line .lv.err { color: #fb7185; }
+.log-line .lv.success,
+.log-line .lv.ok { color: #34d399; }
+.log-line .lv.debug { color: #a78bfa; }
+.log-empty { color: #94a3b8; padding: 24px 8px; text-align: center; }
+
 .table-scroll {
   overflow-x: auto;
   margin: 0;

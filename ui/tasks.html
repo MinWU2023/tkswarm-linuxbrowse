@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=4.2" />
+  <link rel="stylesheet" href="style.css?v=4.3" />
   <link rel="stylesheet" href="theme-premium.css?v=1.0" />
   <style>
     body.booting #login-panel,
@@ -92,11 +92,12 @@
             <option value="center">AI拓客（中心库）</option>
           </select>
           <select id="status-filter" class="input filter-select" title="状态">
-            <option value="pending">待执行（全部）</option>
-            <option value="queued">排队中</option>
-            <option value="draft">草稿</option>
-            <option value="running">运行中</option>
+            <option value="pending">待执行 / 运行中</option>
+            <option value="running">仅运行中</option>
             <option value="paused">已暂停</option>
+            <option value="completed">已完成</option>
+            <option value="failed">失败</option>
+            <option value="all">全部状态</option>
           </select>
           <input id="keyword" class="input filter-input" type="search" placeholder="搜索任务 / 账号…" />
           <button id="btn-search" class="btn primary" type="button">查询</button>
@@ -135,7 +136,22 @@
       </div>
     </section>
   </div>
+  <aside id="log-drawer" class="log-drawer hidden" aria-hidden="true">
+    <div class="log-drawer-head">
+      <div>
+        <h3 id="log-drawer-title">任务日志</h3>
+        <p id="log-drawer-sub" class="panel-desc">内存缓存 · 刷新页面后清空</p>
+      </div>
+      <div class="panel-actions">
+        <button type="button" class="btn ghost" id="btn-log-refresh">刷新日志</button>
+        <button type="button" class="btn ghost" id="btn-log-close">关闭</button>
+      </div>
+    </div>
+    <div id="log-drawer-body" class="log-drawer-body">
+      <p class="muted">点击任务行查看实时日志</p>
+    </div>
+  </aside>
   <div id="toast-host" aria-live="polite"></div>
-  <script src="tasks.js?v=3"></script>
+  <script src="tasks.js?v=4"></script>
 </body>
 </html>
