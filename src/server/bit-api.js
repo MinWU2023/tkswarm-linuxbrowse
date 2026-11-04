@@ -471,6 +471,12 @@ function createRouter() {
         if (!gate.ok) return res.json(fail(gate.msg, 1, errCodeFromMessage(gate.msg) || 'FORBIDDEN'));
         const fp = JSON.parse(row.fingerprint_json || '{}');
         const resolved = await resolveGeoFromProxy(proxyFields, fp, {});
+        // 代理没变就不要关窗：每次登录前都会同步一次代理，无变化时关窗会让已打开的环境消失
+        const proxyChanged = String(row.proxy_type || 'noproxy') !== proxyType
+          || String(row.proxy_host || '') !== host
+          || Number(row.proxy_port || 0) !== port
+          || (proxyUserName !== '' && String(row.proxy_user || '') !== String(proxyUserName))
+          || (proxyPassword !== '' && String(row.proxy_pass || '') !== String(proxyPassword));
         lastIp = resolved.lastIp;
         fields = resolved.fields;
         if (resolved.proxyError) proxyError = resolved.proxyError;
@@ -487,7 +493,7 @@ function createRouter() {
           longitude: fields.longitude,
           country: fields.country,
         });
-        if (manager.getSession(id)) {
+        if (proxyChanged && manager.getSession(id)) {
           await manager.closeProfile(id).catch(() => {});
         }
       }
@@ -609,10 +615,14 @@ function createRouter() {
       const row = db.getProfile(id);
       const gate = assertProfileOwner(req.currentUser, row, { write: true });
       if (!gate.ok) return res.json(fail(gate.msg));
-      if (manager.getSession(id)) {
+      // live=true：窗口保持打开，直接在线打包（登录后排队接力场景，不能关窗）
+      const live = req.body?.live === true || req.body?.live === 1 || req.body?.live === '1';
+      if (live) {
+        await new Promise((r) => setTimeout(r, 1200)); // 给 Chromium 刷 Cookie 到磁盘的时间
+      } else if (manager.getSession(id)) {
         await manager.closeProfile(id).catch(() => {});
       }
-      const pack = exportProfilePack(id, { closeFirst: true });
+      const pack = exportProfilePack(id, { closeFirst: !live });
       res.json(ok({
         id,
         filePath: pack.filePath,

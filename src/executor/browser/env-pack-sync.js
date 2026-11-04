@@ -9,6 +9,13 @@ const os = require('node:os');
 const path = require('node:path');
 const phpApi = require('../php-api');
 const { publish: liveLog } = require('../live-log');
+const packLeasePush = require('./pack-lease-push');
+
+/** profileId -> 最近一次释放返回的 signal（含 nextHostId），供登录后判断是否还有等待方 */
+const lastReleaseSignals = new Map();
+function getLastReleaseSignal(profileId) {
+  return lastReleaseSignals.get(String(profileId || '').trim()) || null;
+}
 
 function hostId() {
   try {
@@ -95,8 +102,8 @@ function packLeaseWaitMs() {
 }
 
 /**
- * 占用跨机租约；若对方占用则 FIFO 入队，并挂起等待中心库「释放信号」（长请求被动唤醒）。
- * 禁止短间隔轮询 pack-lease。唤醒后拉最新包 + 会话凭证自动登录。
+ * 占用跨机租约；若对方占用则 FIFO 入队，并被动等待 WSS 中继推送（无轮询、无服务端长请求）。
+ * 唤醒后拉最新包 + 会话凭证自动登录。
  * @returns {Promise<{ ok: boolean, waited?: boolean, reason?: string, meta?: any, error?: Error }>}
  */
 async function acquirePackLeaseWithWait(profileId, {
@@ -164,41 +171,21 @@ async function acquirePackLeaseWithWait(profileId, {
         lastHint = hint;
         const until = info.leaseUntil ? `，租约至 ${info.leaseUntil}` : '';
         liveLog(
-          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 正被 ${hint} 占用${until}，已加入等待队列（FIFO），挂起等待对方上传凭证并解除占用…`,
+          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 正被 ${hint} 占用${until}，已加入等待队列（FIFO），被动等待对方上传凭证并解除占用（WSS 推送）…`,
           'warn',
           { accountId },
         );
       }
 
-      const remainMs = Math.max(5000, deadline - Date.now());
-      const chunkSec = Math.min(120, Math.max(15, Math.ceil(remainMs / 1000)));
-      let waitResult = null;
+      // 仅 WSS：被动接收中继推送，只有轮到 FIFO 队首才会被唤醒（无轮询、无服务端长请求）
       try {
-        // 一次长挂起：中心库占用解除后按 FIFO 唤醒队首（非客户端轮询）
-        waitResult = await phpApi.post(
-          `/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/wait`,
-          {
-            hostId: hid,
-            accountId: Number(accountId) || 0,
-            timeoutSeconds: chunkSec,
-          },
-          { timeoutMs: (chunkSec + 45) * 1000 },
-        );
-      } catch (waitErr) {
-        // 网关超时等：短暂退后再次挂起，仍不算短轮询 acquire
+        const pushed = await packLeasePush.waitForRelease(pid, {
+          hostId: hid,
+          accountId,
+          timeoutMs: Math.max(5000, deadline - Date.now()),
+        });
         liveLog(
-          `账号 #${accountId || '-'}：等待占用信号临时中断（${waitErr.message || waitErr}），将继续挂起…`,
-          'warn',
-          { accountId },
-        );
-        await new Promise((r) => setTimeout(r, 2000));
-        continue;
-      }
-
-      if (waitResult?.ready) {
-        const pos = Number(waitResult.position || 1);
-        liveLog(
-          `账号 #${accountId || '-'}：收到占用解除信号（队列第 ${pos} 位），准备拉取环境包并自动登录`,
+          `账号 #${accountId || '-'}：收到占用解除${pushed?.pushed ? '推送' : '通知'}（队列第 ${pushed?.position || 1} 位），准备拉取环境包并自动登录`,
           'info',
           { accountId },
         );
@@ -208,20 +195,19 @@ async function acquirePackLeaseWithWait(profileId, {
             accountId,
             profileId: pid,
             hostId: hid,
-            position: pos,
-            releaseSeq: waitResult.releaseSeq,
+            position: pushed?.position || 1,
+            releaseSeq: pushed?.releaseSeq,
+            pushed: !!pushed?.pushed,
           });
         } catch { /* ignore */ }
         continue; // 立即再 acquire
+      } catch (pe) {
+        if (pe?.code === 'RELAY_TIMEOUT') continue; // 回到循环顶部由 deadline 判定超时
+        if (pe?.code === 'RELAY_NOT_FOUND') return { ok: false, reason: 'not-found', error: pe };
+        throw new Error(
+          `等待环境释放失败：WSS 中继不可用（${pe.message || pe}）。请确认已部署中继并配置 TKSWARM_RELAY_SECRET / TKSWARM_RELAY_PUBLIC_URL`,
+        );
       }
-
-      const pos = Number(waitResult?.position || 0);
-      const qSize = Number(waitResult?.queueSize || 0);
-      liveLog(
-        `账号 #${accountId || '-'}：仍在等待队列中（第 ${pos || '?'} / ${qSize || '?'} 位），继续挂起…`,
-        'info',
-        { accountId },
-      );
     }
   }
 }
@@ -595,6 +581,7 @@ async function releasePackLeaseBestEffort(profileId, hostOverride = '') {
       hostId: hid,
     });
     const signal = data?.signal || data;
+    lastReleaseSignals.set(pid, signal || null);
     if (signal?.nextHostId) {
       liveLog(
         `环境 ${pid.slice(0, 8)}… 已解除占用，通知等待队列下一端：${signal.nextHostId}`,
@@ -618,6 +605,7 @@ async function pushLocalEnvPack(profileId, {
   provider,
   hostId: hostOverride = '',
   skipClose = false,
+  live = false,
   forceTiny = false,
 } = {}) {
   const pid = String(profileId || '').trim();
@@ -640,12 +628,13 @@ async function pushLocalEnvPack(profileId, {
   let exportPath = '';
   let handoffPath = '';
   try {
-    if (!skipClose) {
+    if (!skipClose && !live) {
       await provider.close(pid).catch(() => {});
       // Cookie/SQLite 刷盘需要比「强杀进程」更长的时间；过短会打出 1KB 空包被中心库 422
       await new Promise((r) => setTimeout(r, 2500));
     }
-    const exported = await provider.exportPack(pid);
+    // live：窗口不关，由浏览器端刷盘后在线打包
+    const exported = await provider.exportPack(pid, { live });
     exportPath = String(exported?.filePath || '').trim();
     handoffPath = exportPath;
     if (!exportPath || !fs.existsSync(exportPath)) {
@@ -926,4 +915,5 @@ module.exports = {
   acquirePackLeaseWithWait,
   isPackLeaseBusyError,
   releasePackLeaseBestEffort,
+  getLastReleaseSignal,
 };

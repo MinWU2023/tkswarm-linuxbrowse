@@ -145,15 +145,50 @@ async function pushEnvPackBestEffort(accountId, profileId, options = {}) {
   try {
     const { pushLocalEnvPack, releasePackLeaseBestEffort } = require('./env-pack-sync');
     const { getProvider } = require('./providers');
-    await flushBrowserBeforePack(pid, { keepOpen });
+
+    // 登录成功：窗口保持打开 → 刷盘 → 在线(live)导出环境包 → 上传服务器 → 解除占用
+    // （pushLocalEnvPack 的 finally 释放，中心库随后通过 WSS 中继只推给 FIFO 队首）。
+    if (keepOpen) {
+      const prov = sessions.get(pid)?.provider || getProvider();
+      await flushBrowserBeforePack(pid, { keepOpen: true });
+      const { getLastReleaseSignal } = require('./env-pack-sync');
+      const pushed = await pushLocalEnvPack(pid, {
+        accountId: Number(accountId) || 0,
+        provider: prov,
+        skipClose: true,
+        live: true,
+      });
+      if (!pushed?.pushed) await releasePackLeaseBestEffort(pid);
+      const waiting = String(getLastReleaseSignal(pid)?.nextHostId || '').trim();
+      await ensureLoginLandingPage(pid, accountId);
+      try {
+        const { publishEvent } = require('../live-log');
+        publishEvent('pack-lease-released', {
+          accountId: Number(accountId) || 0,
+          profileId: pid,
+          pushed: !!pushed?.pushed,
+          keepOpen: true,
+          live: true,
+          nextHostId: waiting || undefined,
+        });
+      } catch { /* ignore */ }
+      liveLog(
+        `账号 #${accountId}：登录成功，窗口保持打开；环境包${pushed?.pushed ? '已在线上传服务器' : '上传失败'}并已解除占用`
+        + (waiting ? `，已通过 WSS 通知队首等待方 ${waiting}` : ''),
+        pushed?.pushed ? 'info' : 'warn',
+        { accountId },
+      );
+      return;
+    }
+
+    await flushBrowserBeforePack(pid, { keepOpen: false });
     const { keepOpen: _keep, skipClose: skipCloseOpt, ...rest } = options;
     const pushed = await pushLocalEnvPack(pid, {
       accountId: Number(accountId) || 0,
       provider: getProvider(),
       ...rest,
-      skipClose: keepOpen || skipCloseOpt === true,
+      skipClose: skipCloseOpt === true,
     });
-    // 上传成功后中心库已 signal；再显式 release 兜底，并本地 WSS 广播
     await releasePackLeaseBestEffort(pid);
     try {
       const { publishEvent } = require('../live-log');
@@ -161,17 +196,9 @@ async function pushEnvPackBestEffort(accountId, profileId, options = {}) {
         accountId: Number(accountId) || 0,
         profileId: pid,
         pushed: !!pushed?.pushed,
-        keepOpen,
+        keepOpen: false,
       });
     } catch { /* ignore */ }
-    if (keepOpen) {
-      await ensureLoginLandingPage(pid, accountId);
-      liveLog(
-        `账号 #${accountId}：登录凭证与环境包已上传，已解除占用并通知等待方${pushed?.pushed ? '' : '（推包未成功，仍已放锁）'}`,
-        pushed?.pushed ? 'info' : 'warn',
-        { accountId },
-      );
-    }
   } catch { /* ignore */ }
 }
 

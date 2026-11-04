@@ -1,4 +1,4 @@
-﻿const phpApi = require('./php-api');
+const phpApi = require('./php-api');
 const { syncVideos } = require('./browser/tiktok-data');
 const { preparePublish, prepareMessage, connectAccount, closeConnection, forceCloseBrowserProfile } = require('./browser/tiktok-actions');
 const { assertPublishGate, loadGate } = require('./account-gates');
@@ -313,6 +313,79 @@ function describeLoginEvidence(session) {
 }
 
 /**
+ * 总任务内执行过一键登录后：窗口保持打开 → 刷写会话凭证 → 在线(live)导出环境包 → 上传服务器 → 解除占用。
+ * 中心库随后通过 WSS 中继只推给 FIFO 队首的等待设备，对方拉取本机上传的环境包与凭证后自动登录。
+ * 不关窗、不重开、不动 connection，分任务继续在同一窗口里跑。
+ */
+async function uploadPackAfterBatchLogin(accountId, connection, batchId) {
+  const pid = String(connection?.account?.browser_profile_id || '').trim();
+  const provider = connection?.provider;
+  if (!pid || !provider) return false;
+  const sync = require('./browser/env-pack-sync');
+  if (!sync.supportsPackSync(provider)) return false; // 比特等不支持环境包的后端：不处理
+  const ctx = { accountId, batchId, profileId: pid };
+  liveLog(`账号 #${accountId}：登录成功，窗口保持打开，在线上传环境包与登录凭证`, 'info', ctx);
+
+  // 先把最新会话凭证写入中心库，再让浏览器把 Cookie 刷盘
+  if (connection.context) {
+    await persistAccountSessionLog(accountId, connection.context, connection.page).catch(() => {});
+  }
+  try {
+    if (connection.page && !connection.page.isClosed?.()) {
+      await connection.page.evaluate(() => { try { return document.cookie; } catch { return ''; } }).catch(() => {});
+    }
+  } catch { /* ignore */ }
+  await new Promise((r) => setTimeout(r, 800));
+
+  // live：不关窗在线导出；pushLocalEnvPack 的 finally 会解除占用并通知 FIFO 队首
+  const pushed = await sync.pushLocalEnvPack(pid, { accountId, provider, skipClose: true, live: true });
+  try {
+    publishEvent('pack-lease-released', {
+      accountId,
+      profileId: pid,
+      pushed: !!pushed?.pushed,
+      batch: true,
+      live: true,
+      nextHostId: String(sync.getLastReleaseSignal(pid)?.nextHostId || '') || undefined,
+    });
+  } catch { /* ignore */ }
+  const next = String(sync.getLastReleaseSignal(pid)?.nextHostId || '').trim();
+  liveLog(
+    pushed?.pushed
+      ? `账号 #${accountId}：环境包与凭证已上传并解除占用${next ? `，已通过 WSS 通知队首等待设备 ${next}` : ''}；窗口保持打开`
+      : `账号 #${accountId}：登录后环境包上传失败（${pushed?.reason || '未知'}），已解除占用，窗口保持打开继续执行`,
+    pushed?.pushed ? 'info' : 'warn',
+    ctx,
+  );
+  return true;
+}
+
+/**
+ * 排队接力：本机凭借上一台上传的环境包/凭证已经是登录态，不需要再登录也不需要重新导出，
+ * 但必须立刻解除本机持有的占用，中心库才会通过 WSS 把队首的下一台唤醒（第 3、4、5 台依次接力）。
+ */
+async function releaseLeaseAfterLoggedIn(accountId, connection, batchId) {
+  const pid = String(connection?.account?.browser_profile_id || '').trim();
+  if (!pid) return;
+  try {
+    const sync = require('./browser/env-pack-sync');
+    if (!connection?.provider || !sync.supportsPackSync(connection.provider)) return;
+    await sync.releasePackLeaseBestEffort(pid);
+    const next = String(sync.getLastReleaseSignal(pid)?.nextHostId || '').trim();
+    publishEvent('pack-lease-released', {
+      accountId, profileId: pid, pushed: false, batch: true, relay: true, nextHostId: next || undefined,
+    });
+    liveLog(
+      `账号 #${accountId}：已用服务器上的环境包/凭证登录，立即解除占用${next ? `，已通过 WSS 通知队首等待设备 ${next}` : ''}；窗口保持打开`,
+      'info',
+      { accountId, batchId, profileId: pid },
+    );
+  } catch (e) {
+    liveLog(`账号 #${accountId}：解除占用失败：${e.message || e}`, 'warn', { accountId, batchId });
+  }
+}
+
+/**
  * 总任务执行前必须确认「真的登录着」。
  * 桌面自研：未登录则同窗一键登录。
  * 服务器浏览器（linux）：只用环境包/中心库会话同步，禁止密码/2FA；失败则 WAITING_LOGIN_DATA 软等待。
@@ -341,6 +414,7 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
     if (connection?.context) {
       await persistAccountSessionLog(accountId, connection.context, connection.page).catch(() => {});
     }
+    await releaseLeaseAfterLoggedIn(accountId, connection, batchId);
     liveLog(`账号 #${accountId}：已登录，接着执行分任务`, 'info', { accountId, batchId });
     return session;
   }
@@ -384,6 +458,7 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
       if (connection?.context) {
         await persistAccountSessionLog(accountId, connection.context, connection.page).catch(() => {});
       }
+      await releaseLeaseAfterLoggedIn(accountId, connection, batchId);
       liveLog(`账号 #${accountId}：已用同步登录数据恢复会话，继续执行`, 'info', { accountId, batchId });
       return session;
     }
@@ -456,6 +531,10 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
   }
 
   await dataStore.updateLoginStatus(accountId, 'online').catch(() => {});
+  // 执行过登录就要立即上传环境包+凭证并解除占用，不再等到总任务结束
+  if (connection) {
+    await uploadPackAfterBatchLogin(accountId, connection, batchId);
+  }
   liveLog(`账号 #${accountId}：一键登录完成，继续执行分任务`, 'info', { accountId, batchId });
   return login;
 }

@@ -57,6 +57,7 @@ async function runCsLogin(accountId, payload = {}) {
   liveLog(`账号 #${aid}：坐席登录任务开始（服务器浏览器）`, 'info', { accountId: aid });
   const { connection, profileId } = await openSeatBrowser(aid);
   let keepOpen = false;
+  let livePushed = false;
   try {
     let session = await probeLogin(connection, aid);
     if (!session?.loggedIn) {
@@ -82,7 +83,9 @@ async function runCsLogin(accountId, payload = {}) {
     if (connection.context) {
       await persistAccountSessionLog(aid, connection.context, connection.page).catch(() => {});
     }
-    await pushEnvPackBestEffort(aid, profileId);
+    // 登录成功：窗口保持打开 → 在线导出环境包+凭证 → 上传 → 解除占用，WSS 通知队首等待设备
+    await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
+    livePushed = true;
     // 自动标记客服连接在线
     try {
       await phpApi.post(`/chat/accounts/${aid}/connect`, {
@@ -98,7 +101,8 @@ async function runCsLogin(accountId, payload = {}) {
   } finally {
     if (!keepOpen) {
       try { await closeConnection(connection, { force: true }); } catch { /* */ }
-      try { await closeSession(profileId, { accountId: aid, pushPack: true }); } catch { /* */ }
+      // 登录成功时已在线上传并解除占用，这里不再重复导出上传
+      try { await closeSession(profileId, { accountId: aid, pushPack: !livePushed }); } catch { /* */ }
     }
   }
 }

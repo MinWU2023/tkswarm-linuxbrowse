@@ -285,8 +285,11 @@ class BitBrowserProvider {
   detail(id) { return this.request('browser/detail', { id: String(id || '') }); }
 
   /** 导出本地环境包（同机 filePath，供上传中心库） */
-  exportPack(id) {
-    return this.request('browser/export', { id: String(id || '') }, 120000);
+  exportPack(id, opts = {}) {
+    const payload = { id: String(id || '') };
+    // live=true：窗口保持打开，在线导出
+    if (opts.live) payload.live = true;
+    return this.request('browser/export', payload, 120000);
   }
 
   /**
