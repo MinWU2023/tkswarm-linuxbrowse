@@ -1053,6 +1053,41 @@ function cookieHeaderFromPlaywrightCookies(cookies) {
     .join('; ');
 }
 
+/** 中心库 PUT /session 的 LocalStorage 上限约 2MB；超出则裁剪，Cookie 仍可单独保存 */
+const SESSION_STORAGE_MAX_BYTES = 1_800_000;
+const SESSION_STORAGE_VALUE_MAX = 32_000;
+
+/**
+ * 裁剪 localStorage JSON：丢掉超大单项，按 key 长度优先保留，总长压到上限内。
+ * 登录恢复主要靠 Cookie；Storage 过大时宁可省略也不要 422。
+ */
+function trimStorageJson(rawJson, maxBytes = SESSION_STORAGE_MAX_BYTES) {
+  const raw = String(rawJson || '');
+  if (!raw || raw.length <= maxBytes) return raw;
+  let obj = null;
+  try { obj = JSON.parse(raw); } catch { return ''; }
+  if (!obj || typeof obj !== 'object') return '';
+  const entries = Object.entries(obj)
+    .filter(([k, v]) => {
+      if (k == null) return false;
+      const s = v == null ? '' : String(v);
+      return s.length <= SESSION_STORAGE_VALUE_MAX;
+    })
+    .sort((a, b) => String(a[0]).length - String(b[0]).length || String(a[1]).length - String(b[1]).length);
+  const out = {};
+  let packed = '{}';
+  for (const [k, v] of entries) {
+    out[k] = v == null ? '' : String(v);
+    const next = JSON.stringify(out);
+    if (next.length > maxBytes) {
+      delete out[k];
+      break;
+    }
+    packed = next;
+  }
+  return packed === '{}' ? '' : packed;
+}
+
 async function collectStorageSnapshot(page) {
   if (!page || page.isClosed()) return '';
   try {
@@ -1066,7 +1101,7 @@ async function collectStorageSnapshot(page) {
       } catch { /* ignore */ }
       return out;
     });
-    return JSON.stringify(raw || {});
+    return trimStorageJson(JSON.stringify(raw || {}));
   } catch {
     return '';
   }
@@ -1077,9 +1112,30 @@ async function persistAccountSessionLog(accountId, context, page, fingerprint = 
     const cookies = await context.cookies().catch(() => []);
     const cookie = cookieHeaderFromPlaywrightCookies(cookies);
     if (!cookie || !/sessionid|sid_tt/i.test(cookie)) return false;
-    const storage = await collectStorageSnapshot(page);
-    await dataStore.saveSession(accountId, { cookie, storage, fingerprint: fingerprint || '' });
-    liveLog(`账号 #${accountId}：已写入最新登录会话日志（Cookie+Storage）`, 'info', { accountId });
+    let storage = await collectStorageSnapshot(page);
+    try {
+      await dataStore.saveSession(accountId, { cookie, storage, fingerprint: fingerprint || '' });
+    } catch (e) {
+      // 仍可能被网关/旧 API 拒：降级只存 Cookie
+      if (/LocalStorage|过大|422|413|payload|entity too large/i.test(String(e.message || e))) {
+        storage = '';
+        await dataStore.saveSession(accountId, { cookie, storage: '', fingerprint: fingerprint || '' });
+        liveLog(
+          `账号 #${accountId}：LocalStorage 过大，已仅保存 Cookie（登录态仍有效）`,
+          'warn',
+          { accountId }
+        );
+        return true;
+      }
+      throw e;
+    }
+    liveLog(
+      storage
+        ? `账号 #${accountId}：已写入最新登录会话日志（Cookie+Storage）`
+        : `账号 #${accountId}：已写入最新登录会话日志（仅 Cookie）`,
+      'info',
+      { accountId }
+    );
     return true;
   } catch (e) {
     liveLog(`账号 #${accountId}：保存会话日志失败：${e.message || e}`, 'warn', { accountId });
