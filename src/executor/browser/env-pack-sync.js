@@ -177,7 +177,7 @@ async function acquirePackLeaseWithWait(profileId, {
         );
       }
 
-      // 仅 WSS：被动接收中继推送，只有轮到 FIFO 队首才会被唤醒（无轮询、无服务端长请求）
+      // 优先 WSS 中继被动推送；中继未部署时退回短轮询 enqueue（避免整链路卡死）
       try {
         const pushed = await packLeasePush.waitForRelease(pid, {
           hostId: hid,
@@ -204,6 +204,38 @@ async function acquirePackLeaseWithWait(profileId, {
       } catch (pe) {
         if (pe?.code === 'RELAY_TIMEOUT') continue; // 回到循环顶部由 deadline 判定超时
         if (pe?.code === 'RELAY_NOT_FOUND') return { ok: false, reason: 'not-found', error: pe };
+        const relayMissing = pe?.code === 'RELAY_UNCONFIGURED' || pe?.code === 'RELAY_CONNECT'
+          || /中继未配置|RELAY_UNCONFIGURED|TKSWARM_RELAY/i.test(String(pe?.message || pe));
+        if (relayMissing) {
+          if (!announced || lastHint !== `${hint}|poll`) {
+            lastHint = `${hint}|poll`;
+            liveLog(
+              `账号 #${accountId || '-'}：WSS 中继不可用（${pe.message || pe}），改用短轮询等待占用释放（建议部署 ws-relay 并配置 TKSWARM_RELAY_SECRET / TKSWARM_RELAY_PUBLIC_URL）`,
+              'warn',
+              { accountId },
+            );
+          }
+          try {
+            const state = await phpApi.post(
+              `/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/enqueue`,
+              { hostId: hid, accountId: Number(accountId) || 0 },
+            );
+            if (state?.ready) {
+              liveLog(
+                `账号 #${accountId || '-'}：轮询到队首可占用（第 ${state.position || 1} 位），准备拉取环境包`,
+                'info',
+                { accountId },
+              );
+              continue;
+            }
+          } catch (enqErr) {
+            if (/不存在|404/i.test(String(enqErr.message || enqErr))) {
+              return { ok: false, reason: 'not-found', error: enqErr };
+            }
+          }
+          await new Promise((r) => setTimeout(r, 5000));
+          continue;
+        }
         throw new Error(
           `等待环境释放失败：WSS 中继不可用（${pe.message || pe}）。请确认已部署中继并配置 TKSWARM_RELAY_SECRET / TKSWARM_RELAY_PUBLIC_URL`,
         );

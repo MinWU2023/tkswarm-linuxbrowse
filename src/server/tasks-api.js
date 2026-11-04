@@ -82,6 +82,33 @@ async function upstreamPost(base, path, token, body = {}) {
   return { upstream, json, ok, data: json.data || json };
 }
 
+async function upstreamDelete(base, path, token) {
+  const upstream = await fetch(`${base}${path}`, {
+    method: 'DELETE',
+    headers: {
+      Accept: 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  const json = await upstream.json().catch(() => ({}));
+  const ok = json.success === true || json.code === 0 || json.code === 200 || upstream.ok;
+  return { upstream, json, ok, data: json.data || json };
+}
+
+/** 清空时尽量打断本机正在跑的矩阵总任务 */
+async function localAbortRunningBatches(reason) {
+  const ids = [...(worker.stats()?.runningBatchIds || [])];
+  const out = [];
+  for (const id of ids) {
+    try {
+      out.push(await worker.forceStop(id, reason));
+    } catch (e) {
+      out.push({ ok: false, batchId: id, message: e.message || String(e) });
+    }
+  }
+  return out;
+}
+
 function parseTaskTarget(raw) {
   const id = String(raw || '').trim();
   if (/^awb-/i.test(id)) {
@@ -447,7 +474,7 @@ router.get('/api/tasks', async (req, res) => {
 
 /**
  * POST /api/tasks/:id/action
- * body: { action: pause|resume|reset|fail, kind?: account_work|task }
+ * body: { action: pause|resume|reset|fail|delete, kind?: account_work|task }
  * awb-* → 矩阵总任务；纯数字且 kind=task → 中心库；默认按矩阵。
  */
 router.post('/api/tasks/:id/action', async (req, res) => {
@@ -455,7 +482,7 @@ router.post('/api/tasks/:id/action', async (req, res) => {
   if (!user) return;
 
   const action = String(req.body?.action || req.query.action || '').trim().toLowerCase();
-  const allowed = new Set(['pause', 'resume', 'reset', 'retry', 'fail', 'force-fail']);
+  const allowed = new Set(['pause', 'resume', 'reset', 'retry', 'fail', 'force-fail', 'delete', 'remove']);
   if (!allowed.has(action)) {
     return res.status(400).json({ ok: false, message: '不支持的操作' });
   }
@@ -469,23 +496,32 @@ router.post('/api/tasks/:id/action', async (req, res) => {
   const target = parseTaskTarget(raw);
   // awb-* 或 kind=account_work → 矩阵；kind=task → 中心库；缺省矩阵（坐席主路径）
   const useCenter = !/^awb-/i.test(raw) && (hintKind === 'task' || hintKind === 'center');
+  const isDelete = action === 'delete' || action === 'remove';
 
   try {
     let path = '';
     let body = {};
+    let method = 'POST';
+    let batchId = 0;
+    let taskId = 0;
+
     if (useCenter) {
-      const taskId = target.taskId || Number(raw) || 0;
+      taskId = target.taskId || Number(raw) || 0;
       if (taskId < 1) return res.status(400).json({ ok: false, message: '无效任务 ID' });
-      if (action === 'pause') path = `/tasks/${taskId}/pause`;
+      if (isDelete) {
+        path = `/tasks/${taskId}`;
+        method = 'DELETE';
+      } else if (action === 'pause') path = `/tasks/${taskId}/pause`;
       else if (action === 'resume') path = `/tasks/${taskId}/start`;
       else if (action === 'reset' || action === 'retry') path = `/tasks/${taskId}/retry`;
-      else return res.status(400).json({ ok: false, message: '中心库任务不支持强制失败，请用重试' });
+      else return res.status(400).json({ ok: false, message: '中心库任务不支持强制失败，请用重试或删除' });
     } else {
-      const batchId = /^awb-/i.test(raw)
+      batchId = /^awb-/i.test(raw)
         ? (Number(String(raw).replace(/^awb-/i, '')) || 0)
         : (target.batchId || Number(raw) || 0);
       if (batchId < 1) return res.status(400).json({ ok: false, message: '无效总任务 ID' });
-      if (action === 'pause') path = `/account-work-batches/${batchId}/pause`;
+      if (isDelete) path = `/account-work-batches/${batchId}/delete`;
+      else if (action === 'pause') path = `/account-work-batches/${batchId}/pause`;
       else if (action === 'resume') path = `/account-work-batches/${batchId}/resume`;
       else if (action === 'reset' || action === 'retry') path = `/account-work-batches/${batchId}/reset`;
       else if (action === 'fail' || action === 'force-fail') {
@@ -494,7 +530,9 @@ router.post('/api/tasks/:id/action', async (req, res) => {
       }
     }
 
-    const r = await upstreamPost(base, path, token, body);
+    const r = method === 'DELETE'
+      ? await upstreamDelete(base, path, token)
+      : await upstreamPost(base, path, token, body);
     if (!r.ok) {
       return res.status(r.upstream?.status >= 400 ? r.upstream.status : 502).json({
         ok: false,
@@ -502,29 +540,26 @@ router.post('/api/tasks/:id/action', async (req, res) => {
       });
     }
 
-    // 本进程内置队列：重试入队 / 强制关停（不再转发同机 tkswarm-node）
+    // 本进程内置队列：重试入队 / 强制关停 / 删除打断
     let workerKick = null;
-    if (!useCenter) {
-      const batchId = /^awb-/i.test(raw)
-        ? (Number(String(raw).replace(/^awb-/i, '')) || 0)
-        : (target.batchId || Number(raw) || 0);
-      if (batchId > 0) {
-        try {
-          if (action === 'reset' || action === 'retry' || action === 'resume') {
-            if (token) process.env.TKSWARM_API_TOKEN = token;
-            const out = await worker.kickBatch(batchId);
-            await worker.fillSlots().catch(() => {});
-            workerKick = { ok: true, data: out };
-          } else if (action === 'fail' || action === 'force-fail') {
-            const out = await worker.forceStop(
-              batchId,
-              body.errorMessage || '服务器浏览器手动强制失败',
-            );
-            workerKick = { ok: true, data: out };
-          }
-        } catch (e) {
-          workerKick = { ok: false, message: e.message || '本机执行器失败' };
+    if (!useCenter && batchId > 0) {
+      try {
+        if (action === 'reset' || action === 'retry' || action === 'resume') {
+          if (token) process.env.TKSWARM_API_TOKEN = token;
+          const out = await worker.kickBatch(batchId);
+          await worker.fillSlots().catch(() => {});
+          workerKick = { ok: true, data: out };
+        } else if (action === 'fail' || action === 'force-fail' || isDelete) {
+          const out = await worker.forceStop(
+            batchId,
+            isDelete
+              ? '服务器浏览器手动删除任务'
+              : (body.errorMessage || '服务器浏览器手动强制失败'),
+          );
+          workerKick = { ok: true, data: out };
         }
+      } catch (e) {
+        workerKick = { ok: false, message: e.message || '本机执行器失败' };
       }
     }
 
@@ -534,15 +569,101 @@ router.post('/api/tasks/:id/action', async (req, res) => {
       message = `${message}，已进入本机执行队列（最多 3 路）`;
     } else if (kicked && (action === 'fail' || action === 'force-fail')) {
       message = `${message}，已强制关停`;
+    } else if (kicked && isDelete) {
+      message = `${message}，已打断本机执行`;
     } else if (workerKick && !kicked && workerKick.message) {
       message = `${message}（执行器：${workerKick.message}）`;
     }
     return res.json({
       ok: true,
-      action,
+      action: isDelete ? 'delete' : action,
       message,
       data: r.data,
       workerKick,
+    });
+  } catch (e) {
+    return res.status(502).json({ ok: false, message: e.message || '无法连接中心 API' });
+  }
+});
+
+/**
+ * POST /api/tasks/clear
+ * body: { source?: all|work|center }
+ * - work/all：按权限软删全部矩阵总任务，并打断本机执行中的批次
+ * - center/all：删除本页可见的 AI 拓客中心库任务（分页拉取后 batch-delete）
+ */
+router.post('/api/tasks/clear', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+
+  const source = String(req.body?.source || req.query.source || 'all').trim().toLowerCase();
+  const wantWork = source !== 'center';
+  const wantCenter = source !== 'work';
+  const base = apiBase();
+  if (!base) {
+    return res.json({ ok: false, message: '未配置中心 API 地址（TKSWARM_API_BASE）' });
+  }
+  const token = authToken(req, user);
+
+  try {
+    let workDeleted = 0;
+    let workSkipped = 0;
+    let centerDeleted = 0;
+    const parts = [];
+
+    if (wantWork) {
+      const localStops = await localAbortRunningBatches('服务器浏览器清空全部任务');
+      const r = await upstreamPost(base, '/account-work-batches/clear', token, { all: true });
+      if (!r.ok) {
+        return res.status(r.upstream?.status >= 400 ? r.upstream.status : 502).json({
+          ok: false,
+          message: r.json?.message || r.json?.msg || '清空坐席任务失败',
+          localStops,
+        });
+      }
+      workDeleted = Number(r.data?.deleted || 0) || 0;
+      workSkipped = Number(r.data?.skipped || 0) || 0;
+      parts.push(`坐席/拓客队列已清 ${workDeleted}`);
+      if (workSkipped) parts.push(`跳过 ${workSkipped}`);
+      if (localStops.length) parts.push(`本机打断 ${localStops.length} 路`);
+    }
+
+    if (wantCenter) {
+      const ids = [];
+      for (let page = 1; page <= 20; page += 1) {
+        const tqs = new URLSearchParams();
+        tqs.set('page', String(page));
+        tqs.set('pageSize', '100');
+        // 不传 status：中心库 list 会返回全部状态（传 all 会被当成字面状态过滤空结果）
+        tqs.set('type', CENTER_TYPE_QUERY);
+        const list = await upstreamGet(base, `/tasks?${tqs}`, token);
+        if (!list.ok) break;
+        const rows = pickUpstreamRows(list).filter(isAllowedCenterTask);
+        for (const row of rows) {
+          const id = Number(row.id || 0);
+          if (id > 0) ids.push(id);
+        }
+        const totalPages = Number(list.data?.pages || list.json?.data?.pages || 1) || 1;
+        if (page >= totalPages || rows.length < 1) break;
+      }
+      const uniq = [...new Set(ids)];
+      if (uniq.length) {
+        // 分批删，避免单次 body 过大
+        for (let i = 0; i < uniq.length; i += 100) {
+          const chunk = uniq.slice(i, i + 100);
+          const del = await upstreamPost(base, '/tasks/batch-delete', token, { taskIds: chunk });
+          if (del.ok) {
+            centerDeleted += Number(del.data?.deleted || chunk.length) || chunk.length;
+          }
+        }
+      }
+      parts.push(`中心库拓客已删 ${centerDeleted}`);
+    }
+
+    return res.json({
+      ok: true,
+      message: parts.length ? parts.join('；') : '没有可清空的任务',
+      data: { workDeleted, workSkipped, centerDeleted, source },
     });
   } catch (e) {
     return res.status(502).json({ ok: false, message: e.message || '无法连接中心 API' });

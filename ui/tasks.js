@@ -168,6 +168,10 @@ function canForceFail(st, kind) {
   return kind === 'account_work' && ['pending', 'running', 'paused', 'queued'].includes(String(st || ''));
 }
 
+function canDelete(st) {
+  return String(st || '') !== 'deleted';
+}
+
 function opsCell(x) {
   const key = taskKeyOf(x);
   const kind = actionKindOf(x);
@@ -187,6 +191,9 @@ function opsCell(x) {
   }
   if (canForceFail(st, kind)) {
     btns.push(`<button type="button" class="btn ghost btn-xs danger-text" data-act="fail" data-key="${esc(key)}" data-kind="${esc(kind)}">失败</button>`);
+  }
+  if (canDelete(st)) {
+    btns.push(`<button type="button" class="btn ghost btn-xs danger-text" data-act="delete" data-key="${esc(key)}" data-kind="${esc(kind)}">删除</button>`);
   }
   return `<div class="row-actions">${btns.join('')}</div>`;
 }
@@ -234,9 +241,10 @@ function renderRows(items) {
 }
 
 async function runTaskAction(action, taskKey, kind, row) {
-  const labels = { pause: '暂停', resume: '恢复', retry: '重试', fail: '强制失败' };
+  const labels = { pause: '暂停', resume: '恢复', retry: '重试', fail: '强制失败', delete: '删除' };
   const label = labels[action] || action;
   if (action === 'fail' && !window.confirm('确认将该任务标记为失败且不再重推？')) return;
+  if (action === 'delete' && !window.confirm('确认删除该任务？删除后不再执行（不可恢复）。')) return;
   if (action === 'retry' && String(row?.status || '') === 'completed'
     && !window.confirm('任务已完成，确认重置为待执行并重试？')) return;
 
@@ -250,6 +258,10 @@ async function runTaskAction(action, taskKey, kind, row) {
       return;
     }
     toast(j.message || `已${label}`, 'ok');
+    if (action === 'delete' && logViewer.open && logViewer.taskKey === taskKey) {
+      closeLogDrawer();
+      logCache.delete(taskKey);
+    }
     // 重试/恢复后立刻清缓存并拉新日志（抽屉开着时不能继续只显示失败前的老记录）
     if (action === 'retry' || action === 'resume') {
       logCache.delete(taskKey);
@@ -274,6 +286,34 @@ async function runTaskAction(action, taskKey, kind, row) {
     await loadTasks();
   } catch (e) {
     toast(e.message || `${label}失败`, 'err');
+  }
+}
+
+async function clearAllTasks() {
+  const source = state.source || 'all';
+  const scopeHint = source === 'work'
+    ? '当前筛选：坐席/拓客队列'
+    : source === 'center'
+      ? '当前筛选：AI 拓客（中心库）'
+      : '当前筛选：全部（坐席+拓客）';
+  if (!window.confirm(`${scopeHint}\n确认清空全部可见任务？此操作不可恢复。`)) return;
+  const btn = document.getElementById('btn-clear-all');
+  if (btn) btn.disabled = true;
+  try {
+    const j = await json('POST', '/api/tasks/clear', { source });
+    if (!j.ok) {
+      toast(j.message || '清空失败', 'err');
+      return;
+    }
+    if (logViewer.open) closeLogDrawer();
+    logCache.clear();
+    toast(j.message || '已清空', 'ok');
+    state.page = 1;
+    await loadTasks();
+  } catch (e) {
+    toast(e.message || '清空失败', 'err');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -575,6 +615,7 @@ async function boot() {
     toast('已退出', 'info');
   };
   document.getElementById('btn-refresh').onclick = () => loadTasks();
+  document.getElementById('btn-clear-all').onclick = () => clearAllTasks();
   document.getElementById('btn-search').onclick = () => {
     state.keyword = document.getElementById('keyword').value.trim();
     state.status = document.getElementById('status-filter').value;

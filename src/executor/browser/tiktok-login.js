@@ -1870,6 +1870,70 @@ async function closeSession(profileId, { accountId = 0, pushPack = true } = {}) 
   }
 }
 
+/**
+ * 「打开环境」后的后台自动恢复登录（不关窗、不弹表单、不清 Cookie）：
+ * 1) 环境包里的登录态已生效 → 直接标记在线；
+ * 2) 否则用中心库保存的会话凭证（Cookie/Storage）注入并校验；
+ * 3) 仍无效 → 只记日志，保留现场，由用户点「登录」走表单并保存新凭证。
+ */
+async function restoreLoginOnOpen(accountId, profileId, provider) {
+  const aid = Number(accountId) || 0;
+  const pid = String(profileId || '').trim();
+  if (!aid || !pid || !provider) return { restored: false, reason: 'skip' };
+  // 正在登录的账号不要抢页面
+  if (activeLogins.has(String(aid))) return { restored: false, reason: 'login-running' };
+  try {
+    const session = await getSession(pid, provider, {
+      forceOpen: true,
+      forceVisible: true,
+      forceRelaunch: false,
+    });
+    const pages = session.context.pages().filter((p) => !p.isClosed());
+    const page = pages.find((p) => /tiktok\.com/i.test(p.url())) || session.page;
+    session.page = page;
+    if (!/tiktok\.com/i.test(String(page.url() || ''))) {
+      await page.goto('https://www.tiktok.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+    }
+
+    let status = await inspectTikTokSession(session.ws, page).catch(() => null);
+    if (status?.loggedIn && !(await pageLooksLoggedOut(page))) {
+      await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
+      liveLog(`账号 #${aid}：打开环境后检测到已登录（环境包登录态有效）`, 'info', { accountId: aid });
+      return { restored: true, source: 'env-pack' };
+    }
+
+    const saved = await dataStore.getSession(aid).catch(() => null);
+    if (!saved?.cookie) {
+      liveLog(`账号 #${aid}：打开环境后未登录，且中心库无已存凭证，请点「登录」走表单登录并保存凭证`, 'warn', { accountId: aid });
+      return { restored: false, reason: 'no-saved-session' };
+    }
+    liveLog(`账号 #${aid}：打开环境后未登录，正在用已存凭证自动登录`, 'info', { accountId: aid });
+    await applySavedSessionToContext(session.context, page, saved);
+    await page.goto('https://www.tiktok.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+    status = await inspectTikTokSession(session.ws, page).catch(() => null);
+    if (status?.loggedIn && !(await pageLooksLoggedOut(page))) {
+      await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
+      await persistAccountSessionLog(aid, session.context, page, saved.fingerprint || '', pid).catch(() => {});
+      liveLog(`账号 #${aid}：已用已存凭证自动登录成功`, 'info', { accountId: aid });
+      return { restored: true, source: 'session-log' };
+    }
+    // 注意：这里不清 Cookie、不清会话日志，避免打开环境就破坏现场
+    liveLog(`账号 #${aid}：已存凭证已失效，请点「登录」走表单登录并保存新凭证`, 'warn', { accountId: aid });
+    return { restored: false, reason: 'session-expired' };
+  } catch (e) {
+    liveLog(`账号 #${aid}：打开环境后自动恢复登录失败：${e.message || e}`, 'warn', { accountId: aid });
+    return { restored: false, reason: String(e.message || e) };
+  } finally {
+    // 打开环境时 prepareEnvForOpen 占了租约；恢复检测结束就释放，WSS 才能唤醒队首等待设备
+    try {
+      const { releasePackLeaseBestEffort } = require('./env-pack-sync');
+      await releasePackLeaseBestEffort(pid);
+    } catch { /* ignore */ }
+  }
+}
+
 /** 仅丢掉登录 CDP 缓存，不关浏览器窗口 */
 function forgetSession(profileId) {
   const pid = String(profileId || '');
@@ -1883,6 +1947,7 @@ module.exports = {
   closeSession,
   clearTikTokCookiesOnly,
   forgetSession,
+  restoreLoginOnOpen,
   detectBrowserNetworkError,
   networkErrorMessage,
   applySavedSessionToContext,
