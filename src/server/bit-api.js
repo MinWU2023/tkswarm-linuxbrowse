@@ -318,7 +318,12 @@ function createRouter() {
       const args = req.body?.args;
       const headlessFromArgs = Array.isArray(args) && args.some((a) => /headless/i.test(String(a)));
       const headless = req.body?.headless === true || req.body?.headless === 1 || headlessFromArgs;
-      const data = await manager.openProfile(id, { headless, args, queue: req.body?.queue !== false });
+      const data = await manager.openProfile(id, {
+        headless,
+        args,
+        queue: req.body?.queue !== false,
+        forceRelaunch: req.body?.forceRelaunch === true || req.body?.forceRelaunch === 1,
+      });
       audit('browser.open', {
         userId: req.currentUser?.id,
         profileId: id,

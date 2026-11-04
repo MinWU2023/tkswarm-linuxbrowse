@@ -110,6 +110,8 @@ async function ensurePlaywrightPage(browser, {
   timeoutMs = 45000,
   preferUrl = /tiktok\.com/i,
   allowNewPage = true,
+  /** 可选：http://127.0.0.1:port，用于交叉核对 /json/list（Electron Debugger 占用时 Playwright 页列表为空） */
+  httpBase = '',
 } = {}) {
   let page = await waitForPlaywrightPage(browser, { timeoutMs, preferUrl });
   if (page && !page.isClosed?.()) return page;
@@ -117,9 +119,28 @@ async function ensurePlaywrightPage(browser, {
   page = listOpenPages(browser)[0] || null;
   if (page && !page.isClosed?.()) return page;
 
+  // 再等一小段：Electron 窗 loadURL 可能晚于 CDP 握手
+  page = await waitForPlaywrightPage(browser, {
+    timeoutMs: Math.min(12000, Math.max(3000, Number(timeoutMs) || 0)),
+    preferUrl,
+  });
+  if (page && !page.isClosed?.()) return page;
+
   if (!allowNewPage) {
+    let listHint = '';
+    const base = String(httpBase || '').replace(/\/+$/, '');
+    if (base) {
+      try {
+        const res = await fetch(`${base}/json/list`);
+        const list = await res.json().catch(() => []);
+        const pages = Array.isArray(list) ? list.filter((t) => t?.type === 'page') : [];
+        listHint = pages.length
+          ? `（CDP /json/list 有 ${pages.length} 个 page，但 Playwright 不可见——常见于 Electron debugger 未 detach）`
+          : '（CDP /json/list 也无 page，窗口可能未创建成功）';
+      } catch { /* ignore */ }
+    }
     throw Object.assign(
-      new Error('Electron 环境未出现可用页面（不支持 CDP 新建页）。请确认有头窗口已启动且未立刻退出'),
+      new Error(`Electron 环境未出现可用页面（不支持 CDP 新建页）。请确认有头窗口已启动且未立刻退出${listHint}`),
       { code: 'NO_PAGE_ELECTRON' }
     );
   }

@@ -128,20 +128,32 @@
       status.classList.add('err');
     } else {
       try {
+        // npm 包 lib/rfb.js 是 CommonJS；esbuild 后可能出现 default.default 双层包裹
+        const resolveRfb = (mod) => {
+          let c = mod?.default ?? mod?.RFB ?? mod;
+          if (c && typeof c !== 'function' && typeof c.default === 'function') c = c.default;
+          if (typeof c !== 'function') {
+            throw new Error('RFB is not a constructor（noVNC 未正确加载）');
+          }
+          return c;
+        };
         let RFB;
-        // npm 包 lib/rfb.js 是 CommonJS（exports），浏览器直接 import 会报 exports is not defined。
-        // 优先用本仓库 esbuild 打好的 ESM：/vendor/novnc-rfb.js
         try {
-          ({ default: RFB } = await import('/vendor/novnc-rfb.js'));
+          RFB = resolveRfb(await import('/vendor/novnc-rfb.js'));
           status.textContent = '本地 noVNC…';
-        } catch {
-          ({ default: RFB } = await import('https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/+esm'));
-          status.textContent = 'CDN noVNC…';
+        } catch (localErr) {
+          try {
+            RFB = resolveRfb(await import('https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/+esm'));
+            status.textContent = 'CDN noVNC…';
+          } catch (cdnErr) {
+            throw localErr?.message ? localErr : cdnErr;
+          }
         }
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
         const token = localStorage.getItem('tkswarm_lb_token') || '';
         const qs = token ? `?token=${encodeURIComponent(token)}` : '';
         const url = `${proto}://${location.host}/vnc-ws/${encodeURIComponent(id)}${qs}`;
+        status.textContent = '连接中…';
         const rfb = new RFB(document.getElementById('screen'), url);
         rfb.scaleViewport = true;
         rfb.resizeSession = true;

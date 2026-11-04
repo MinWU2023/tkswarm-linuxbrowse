@@ -1,4 +1,9 @@
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __commonJS = (cb, mod) => function __require() {
   try {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -6,6 +11,22 @@ var __commonJS = (cb, mod) => function __require() {
     throw mod = 0, e;
   }
 };
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 
 // node_modules/@novnc/novnc/lib/util/int.js
 var require_int = __commonJS({
@@ -14308,6 +14329,7 @@ var require_jpeg = __commonJS({
 // node_modules/@novnc/novnc/lib/rfb.js
 var require_rfb = __commonJS({
   "node_modules/@novnc/novnc/lib/rfb.js"(exports) {
+    "use strict";
     function _typeof(o) {
       "@babel/helpers - typeof";
       return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function(o2) {
@@ -14794,10 +14816,10 @@ var require_rfb = __commonJS({
     var extendedClipboardActionPeek = 1 << 26;
     var extendedClipboardActionNotify = 1 << 27;
     var extendedClipboardActionProvide = 1 << 28;
-    var RFB = exports["default"] = /* @__PURE__ */ (function(_EventTargetMixin) {
-      function RFB2(target, urlOrChannel, options) {
+    var RFB2 = exports["default"] = /* @__PURE__ */ (function(_EventTargetMixin) {
+      function RFB3(target, urlOrChannel, options) {
         var _this;
-        _classCallCheck(this, RFB2);
+        _classCallCheck(this, RFB3);
         if (!target) {
           throw new Error("Must specify target");
         }
@@ -14807,7 +14829,7 @@ var require_rfb = __commonJS({
         if (!window.isSecureContext) {
           Log.Error("noVNC requires a secure context (TLS). Expect crashes!");
         }
-        _this = _callSuper(this, RFB2);
+        _this = _callSuper(this, RFB3);
         _this._target = target;
         if (typeof urlOrChannel === "string") {
           _this._url = urlOrChannel;
@@ -14900,7 +14922,7 @@ var require_rfb = __commonJS({
         _this._canvas.tabIndex = -1;
         _this._screen.appendChild(_this._canvas);
         _this._cursor = new _cursor["default"]();
-        _this._cursorImage = RFB2.cursors.none;
+        _this._cursorImage = RFB3.cursors.none;
         _this._decoders[_encodings.encodings.encodingRaw] = new _raw["default"]();
         _this._decoders[_encodings.encodings.encodingCopyRect] = new _copyrect["default"]();
         _this._decoders[_encodings.encodings.encodingRRE] = new _rre["default"]();
@@ -14946,8 +14968,8 @@ var require_rfb = __commonJS({
         _this._compressionLevel = 2;
         return _this;
       }
-      _inherits(RFB2, _EventTargetMixin);
-      return _createClass(RFB2, [{
+      _inherits(RFB3, _EventTargetMixin);
+      return _createClass(RFB3, [{
         key: "viewOnly",
         get: function get() {
           return this._viewOnly;
@@ -15150,13 +15172,13 @@ var require_rfb = __commonJS({
           if (this._qemuExtKeyEventSupported && scancode) {
             keysym = keysym || 0;
             Log.Info("Sending key (" + (down ? "down" : "up") + "): keysym " + keysym + ", scancode " + scancode);
-            RFB2.messages.QEMUExtendedKeyEvent(this._sock, keysym, down, scancode);
+            RFB3.messages.QEMUExtendedKeyEvent(this._sock, keysym, down, scancode);
           } else {
             if (!keysym) {
               return;
             }
             Log.Info("Sending keysym (" + (down ? "down" : "up") + "): " + keysym);
-            RFB2.messages.keyEvent(this._sock, keysym, down ? 1 : 0);
+            RFB3.messages.keyEvent(this._sock, keysym, down ? 1 : 0);
           }
         }
       }, {
@@ -15177,7 +15199,7 @@ var require_rfb = __commonJS({
           }
           if (this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] && this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
             this._clipboardText = text;
-            RFB2.messages.extendedClipboardNotify(this._sock, [extendedClipboardFormatText]);
+            RFB3.messages.extendedClipboardNotify(this._sock, [extendedClipboardFormatText]);
           } else {
             var length, i;
             var data;
@@ -15210,7 +15232,7 @@ var require_rfb = __commonJS({
             } finally {
               _iterator2.f();
             }
-            RFB2.messages.clientCutText(this._sock, data);
+            RFB3.messages.clientCutText(this._sock, data);
           }
         }
       }, {
@@ -15444,7 +15466,7 @@ var require_rfb = __commonJS({
             return;
           }
           var size = this._screenSize();
-          RFB2.messages.setDesktopSize(this._sock, Math.floor(size.w), Math.floor(size.h), this._screenID, this._screenFlags);
+          RFB3.messages.setDesktopSize(this._sock, Math.floor(size.w), Math.floor(size.h), this._screenID, this._screenFlags);
           Log.Debug("Requested new desktop size: " + size.w + "x" + size.h);
         }
         // Gets the the size of the available screen
@@ -15751,7 +15773,7 @@ var require_rfb = __commonJS({
           if (this._viewOnly) {
             return;
           }
-          RFB2.messages.pointerEvent(this._sock, this._display.absX(x), this._display.absY(y), mask);
+          RFB3.messages.pointerEvent(this._sock, this._display.absX(x), this._display.absY(y), mask);
         }
       }, {
         key: "_handleWheel",
@@ -16194,7 +16216,7 @@ var require_rfb = __commonJS({
             return false;
           }
           var challenge = Array.prototype.slice.call(this._sock.rQshiftBytes(16));
-          var response = RFB2.genDES(this._rfbCredentials.password, challenge);
+          var response = RFB3.genDES(this._rfbCredentials.password, challenge);
           this._sock.sQpushBytes(response);
           this._sock.flush();
           this._rfbInitState = "SecurityResult";
@@ -16621,9 +16643,9 @@ var require_rfb = __commonJS({
             Log.Warn("Intel AMT KVM only supports 8/16 bit depths. Using low color mode.");
             this._fbDepth = 8;
           }
-          RFB2.messages.pixelFormat(this._sock, this._fbDepth, true);
+          RFB3.messages.pixelFormat(this._sock, this._fbDepth, true);
           this._sendEncodings();
-          RFB2.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
+          RFB3.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
           this._updateConnectionState("connected");
           return true;
         }
@@ -16657,7 +16679,7 @@ var require_rfb = __commonJS({
             encs.push(_encodings.encodings.pseudoEncodingVMwareCursor);
             encs.push(_encodings.encodings.pseudoEncodingCursor);
           }
-          RFB2.messages.clientEncodings(this._sock, encs);
+          RFB3.messages.clientEncodings(this._sock, encs);
         }
         /* RFB protocol initialization states:
          *   ProtocolVersion
@@ -16749,7 +16771,7 @@ var require_rfb = __commonJS({
                 this._clipboardServerCapabilitiesActions[_index] = !!(actions & _index);
               }
               var clientActions = [extendedClipboardActionCaps, extendedClipboardActionRequest, extendedClipboardActionPeek, extendedClipboardActionNotify, extendedClipboardActionProvide];
-              RFB2.messages.extendedClipboardCaps(this._sock, clientActions, {
+              RFB3.messages.extendedClipboardCaps(this._sock, clientActions, {
                 extendedClipboardFormatText: 0
               });
             } else if (actions === extendedClipboardActionRequest) {
@@ -16758,7 +16780,7 @@ var require_rfb = __commonJS({
               }
               if (this._clipboardText != null && this._clipboardServerCapabilitiesActions[extendedClipboardActionProvide]) {
                 if (formats & extendedClipboardFormatText) {
-                  RFB2.messages.extendedClipboardProvide(this._sock, [extendedClipboardFormatText], [this._clipboardText]);
+                  RFB3.messages.extendedClipboardProvide(this._sock, [extendedClipboardFormatText], [this._clipboardText]);
                 }
               }
             } else if (actions === extendedClipboardActionPeek) {
@@ -16767,9 +16789,9 @@ var require_rfb = __commonJS({
               }
               if (this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
                 if (this._clipboardText != null) {
-                  RFB2.messages.extendedClipboardNotify(this._sock, [extendedClipboardFormatText]);
+                  RFB3.messages.extendedClipboardNotify(this._sock, [extendedClipboardFormatText]);
                 } else {
-                  RFB2.messages.extendedClipboardNotify(this._sock, []);
+                  RFB3.messages.extendedClipboardNotify(this._sock, []);
                 }
               }
             } else if (actions === extendedClipboardActionNotify) {
@@ -16778,7 +16800,7 @@ var require_rfb = __commonJS({
               }
               if (this._clipboardServerCapabilitiesActions[extendedClipboardActionRequest]) {
                 if (formats & extendedClipboardFormatText) {
-                  RFB2.messages.extendedClipboardRequest(this._sock, [extendedClipboardFormatText]);
+                  RFB3.messages.extendedClipboardRequest(this._sock, [extendedClipboardFormatText]);
                 }
               }
             } else if (actions === extendedClipboardActionProvide) {
@@ -16854,7 +16876,7 @@ var require_rfb = __commonJS({
             return this._fail("Unexpected fence response");
           }
           flags &= 1 << 0 | 1 << 1;
-          RFB2.messages.clientFence(this._sock, flags, payload);
+          RFB3.messages.clientFence(this._sock, flags, payload);
           return true;
         }
       }, {
@@ -16895,7 +16917,7 @@ var require_rfb = __commonJS({
             case 0:
               ret = this._framebufferUpdate();
               if (ret && !this._enabledContinuousUpdates) {
-                RFB2.messages.fbUpdateRequest(this._sock, true, 0, 0, this._fbWidth, this._fbHeight);
+                RFB3.messages.fbUpdateRequest(this._sock, true, 0, 0, this._fbWidth, this._fbHeight);
               }
               return ret;
             case 1:
@@ -17211,7 +17233,7 @@ var require_rfb = __commonJS({
           if (!this._enabledContinuousUpdates) {
             return;
           }
-          RFB2.messages.enableContinuousUpdates(this._sock, true, 0, 0, this._fbWidth, this._fbHeight);
+          RFB3.messages.enableContinuousUpdates(this._sock, true, 0, 0, this._fbWidth, this._fbHeight);
         }
       }, {
         key: "_resize",
@@ -17231,7 +17253,7 @@ var require_rfb = __commonJS({
             return;
           }
           Log.Info("Sending XVP operation " + op + " (version " + ver + ")");
-          RFB2.messages.xvpOp(this._sock, ver, op);
+          RFB3.messages.xvpOp(this._sock, ver, op);
         }
       }, {
         key: "_updateCursor",
@@ -17264,7 +17286,7 @@ var require_rfb = __commonJS({
           if (this._rfbConnectionState !== "connecting" && this._rfbConnectionState !== "connected") {
             return;
           }
-          var image = this._shouldShowDotCursor() ? RFB2.cursors.dot : this._cursorImage;
+          var image = this._shouldShowDotCursor() ? RFB3.cursors.dot : this._cursorImage;
           this._cursor.change(image.rgbaPixels, image.hotx, image.hoty, image.w, image.h);
         }
       }], [{
@@ -17282,7 +17304,7 @@ var require_rfb = __commonJS({
         }
       }]);
     })(_eventtarget["default"]);
-    RFB.messages = {
+    RFB2.messages = {
       keyEvent: function keyEvent(sock, keysym, down) {
         sock.sQpush8(4);
         sock.sQpush8(down);
@@ -17347,17 +17369,17 @@ var require_rfb = __commonJS({
         }
         var deflatedData = deflator.deflate(new Uint8Array(dataToDeflate));
         var data = new Uint8Array(4 + deflatedData.length);
-        data.set(RFB.messages._buildExtendedClipboardFlags([extendedClipboardActionProvide], formats));
+        data.set(RFB2.messages._buildExtendedClipboardFlags([extendedClipboardActionProvide], formats));
         data.set(deflatedData, 4);
-        RFB.messages.clientCutText(sock, data, true);
+        RFB2.messages.clientCutText(sock, data, true);
       },
       extendedClipboardNotify: function extendedClipboardNotify(sock, formats) {
-        var flags = RFB.messages._buildExtendedClipboardFlags([extendedClipboardActionNotify], formats);
-        RFB.messages.clientCutText(sock, flags, true);
+        var flags = RFB2.messages._buildExtendedClipboardFlags([extendedClipboardActionNotify], formats);
+        RFB2.messages.clientCutText(sock, flags, true);
       },
       extendedClipboardRequest: function extendedClipboardRequest(sock, formats) {
-        var flags = RFB.messages._buildExtendedClipboardFlags([extendedClipboardActionRequest], formats);
-        RFB.messages.clientCutText(sock, flags, true);
+        var flags = RFB2.messages._buildExtendedClipboardFlags([extendedClipboardActionRequest], formats);
+        RFB2.messages.clientCutText(sock, flags, true);
       },
       extendedClipboardCaps: function extendedClipboardCaps(sock, actions, formats) {
         var formatKeys = Object.keys(formats);
@@ -17368,7 +17390,7 @@ var require_rfb = __commonJS({
         formatKeys.sort(function(a, b) {
           return a - b;
         });
-        data.set(RFB.messages._buildExtendedClipboardFlags(actions, []));
+        data.set(RFB2.messages._buildExtendedClipboardFlags(actions, []));
         var loopOffset = 4;
         for (var i = 0; i < formatKeys.length; i++) {
           data[loopOffset] = formats[formatKeys[i]] >> 24;
@@ -17378,7 +17400,7 @@ var require_rfb = __commonJS({
           loopOffset += 4;
           data[3] |= 1 << formatKeys[i];
         }
-        RFB.messages.clientCutText(sock, data, true);
+        RFB2.messages.clientCutText(sock, data, true);
       },
       clientCutText: function clientCutText(sock, data) {
         var extended = arguments.length > 2 && arguments[2] !== void 0 ? arguments[2] : false;
@@ -17491,7 +17513,7 @@ var require_rfb = __commonJS({
         sock.flush();
       }
     };
-    RFB.cursors = {
+    RFB2.cursors = {
       none: {
         rgbaPixels: new Uint8Array(),
         w: 0,
@@ -17511,7 +17533,13 @@ var require_rfb = __commonJS({
     };
   }
 });
-export default require_rfb();
+
+// scripts/novnc-entry.js
+var import_rfb = __toESM(require_rfb());
+var novnc_entry_default = import_rfb.default?.default || import_rfb.default;
+export {
+  novnc_entry_default as default
+};
 /*! Bundled license information:
 
 @novnc/novnc/lib/crypto/aes.js:

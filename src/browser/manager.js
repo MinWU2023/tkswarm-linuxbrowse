@@ -85,17 +85,24 @@ function enqueueOpen(fn) {
 
 async function openProfile(profileId, options = {}) {
   const id = String(profileId);
+  const forceRelaunch = Boolean(options.forceRelaunch);
   dropStaleSession(id);
   const existing = running.get(id);
-  if (existing?.ws && isSessionAlive(existing)) {
+  // 显式 forceRelaunch：先关再开，避免僵尸进程「活着但无 page」被 Playwright 连上后空转 45s
+  if (forceRelaunch && existing) {
+    await closeProfile(id).catch(() => {});
+  } else if (existing?.ws && isSessionAlive(existing)) {
     return formatOpenResult(id, existing);
   }
-  if (existing) dropStaleSession(id);
+  if (existing && !forceRelaunch) dropStaleSession(id);
 
   return enqueueOpen(async () => {
     dropStaleSession(id);
-    if (running.has(id) && isSessionAlive(running.get(id))) {
+    if (!forceRelaunch && running.has(id) && isSessionAlive(running.get(id))) {
       return formatOpenResult(id, running.get(id));
+    }
+    if (forceRelaunch && running.has(id)) {
+      await closeProfile(id).catch(() => {});
     }
 
     for (const rid of [...running.keys()]) dropStaleSession(rid);

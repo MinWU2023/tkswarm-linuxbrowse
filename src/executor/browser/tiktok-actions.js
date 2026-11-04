@@ -319,15 +319,20 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
         timeoutMs: 45000,
         preferUrl: /tiktokstudio\/upload|tiktok\.com/i,
         allowNewPage: !isLinux,
+        httpBase: openedInner?.http || '',
       });
     } catch (e) {
+      const noPage = e?.code === 'NO_PAGE_ELECTRON' || /未出现可用页面|NO_PAGE/i.test(String(e?.message || e));
+      const createUnsupported = isCreateTargetUnsupported(e) || e?.code === 'CREATE_TARGET_UNSUPPORTED';
+      const hint = createUnsupported
+        ? '（Electron 请复用窗口内已有页，勿 CDP newPage）'
+        : noPage
+          ? '（窗口可能未挂上页 / Debugger 被占用；将强制重开）'
+          : '（浏览器已关闭，请确认未并发关窗/推环境包）';
       const err = new Error(
-        `${synced.provider.backendLabel || '本地浏览器'} 无法取得页面：${e.message || e}`
-        + (isCreateTargetUnsupported(e) || e?.code === 'CREATE_TARGET_UNSUPPORTED'
-          ? '（Electron 请复用窗口内已有页，勿 CDP newPage）'
-          : '（浏览器已关闭，请确认未并发关窗/推环境包）')
+        `${synced.provider.backendLabel || '本地浏览器'} 无法取得页面：${e.message || e}${hint}`
       );
-      err.code = e?.code || (isCreateTargetUnsupported(e) ? 'CREATE_TARGET_UNSUPPORTED' : 'PAGE_CONTEXT_CLOSED');
+      err.code = e?.code || (createUnsupported ? 'CREATE_TARGET_UNSUPPORTED' : (noPage ? 'NO_PAGE_ELECTRON' : 'PAGE_CONTEXT_CLOSED'));
       throw err;
     }
     const contextInner = pageInner.context?.() || browserInner.contexts()[0] || null;
