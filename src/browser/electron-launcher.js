@@ -143,7 +143,13 @@ async function launchProfileElectron(profile, options = {}) {
   }
 
   const httpUrl = `http://127.0.0.1:${port}`;
-  await waitForPageTarget(port, 20000).catch(() => null);
+  // Electron 必须等 page target；桌面端也是返回 page 级 ws，browser 级 ws 下 Playwright 常看不到页
+  const pageTarget = await waitForPageTarget(port, 30000);
+  if (!pageTarget?.webSocketDebuggerUrl) {
+    clearPid(profile.id);
+    try { child.kill(); } catch { /* */ }
+    throw new Error(`Electron 已启动但未出现可用页面（CDP :${port} /json/list 无 page）`);
+  }
 
   const injectSrc = buildInjectScript(profile.id, {
     ...fp,
@@ -157,16 +163,23 @@ async function launchProfileElectron(profile, options = {}) {
   }
   await applyEmulation(port, { timezone, locale, latitude, longitude }).catch(() => null);
 
-  let ws = ver.webSocketDebuggerUrl;
+  // 注入后 page target 可能刷新，再取一次最新 page ws
+  let pageWs = pageTarget.webSocketDebuggerUrl;
   try {
-    const fresh = await fetchJson(`http://127.0.0.1:${port}/json/version`);
-    if (fresh?.webSocketDebuggerUrl) ws = fresh.webSocketDebuggerUrl;
-  } catch { /* */ }
+    const again = await waitForPageTarget(port, 8000);
+    if (again?.webSocketDebuggerUrl) pageWs = again.webSocketDebuggerUrl;
+  } catch { /* keep first */ }
+
+  const browserWs = ver.webSocketDebuggerUrl
+    || (await fetchJson(`http://127.0.0.1:${port}/json/version`).catch(() => null))?.webSocketDebuggerUrl
+    || '';
 
   return {
     pid: child.pid,
     port,
-    ws,
+    // 对 Playwright：优先 page 级 ws（与 tkswarm-browses inProcess 一致）
+    ws: pageWs || browserWs,
+    browserWs,
     http: httpUrl,
     headless,
     display,
@@ -176,6 +189,7 @@ async function launchProfileElectron(profile, options = {}) {
     timezone,
     fp,
     engine: 'electron',
+    preferPageWs: true,
     releaseProxy: proxy.release || (() => {}),
     localProxyPort: proxy.localPort || 0,
   };

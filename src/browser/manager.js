@@ -185,6 +185,7 @@ function formatOpenResult(id, session) {
   return {
     id,
     ws: session.ws,
+    browserWs: session.browserWs || '',
     http: session.http,
     pid: session.pid,
     name: session.profile?.name || id,
@@ -193,6 +194,8 @@ function formatOpenResult(id, session) {
     headless: session.headless,
     display: session.display || null,
     vnc: vncInfo,
+    engine: session.engine || '',
+    preferPageWs: Boolean(session.preferPageWs || session.engine === 'electron'),
   };
 }
 

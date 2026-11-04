@@ -18,10 +18,32 @@ function isCreateTargetUnsupported(err) {
   return /Not supported|createTarget|Target\.createTarget/i.test(msg);
 }
 
+async function fetchJsonList(httpBase) {
+  const base = String(httpBase || '').replace(/\/+$/, '');
+  if (!base) return [];
+  try {
+    const res = await fetch(`${base}/json/list`);
+    const list = await res.json().catch(() => []);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 从 /json/list 取最新 page 级 webSocketDebuggerUrl */
+async function resolvePageWs(httpBase, fallbackWs = '') {
+  const list = await fetchJsonList(httpBase);
+  const pages = list.filter((t) => t?.type === 'page' && t?.webSocketDebuggerUrl);
+  const preferred = pages.find((t) => /tiktok\.com/i.test(String(t.url || '')))
+    || pages.find((t) => t.url && !/^about:/i.test(String(t.url || '')))
+    || pages[0];
+  return preferred?.webSocketDebuggerUrl || String(fallbackWs || '').trim() || '';
+}
+
 /**
  * 连接本地浏览器 CDP（比特 / 自研 Electron）。
  * - 优先 http://host:port（Playwright 官方推荐），失败再回退 ws
- * - 自研同进程环境窗使用 session partition，必须连 page ws（inProcess）
+ * - Electron / 同进程：必须连 page 级 ws（browser 级常导致 contexts/pages 为空）
  * - 刚 open 后常出现「ws connected 但协议握手超时」，故短等 + 重试
  */
 async function connectPlaywrightOverCDP(opened, {
@@ -30,13 +52,23 @@ async function connectPlaywrightOverCDP(opened, {
   settleMs = 600,
 } = {}) {
   const http = String(opened?.http || opened?.httpUrl || '').trim().replace(/\/+$/, '');
-  const ws = String(opened?.ws || '').trim();
+  let ws = String(opened?.ws || '').trim();
   const inProcess = Boolean(opened?.inProcess);
+  const preferPageWs = Boolean(
+    opened?.preferPageWs
+    || inProcess
+    || String(opened?.engine || '').toLowerCase() === 'electron'
+  );
   const opts = { timeout: Math.max(15000, Number(timeoutMs) || 60000) };
   const maxAttempts = Math.max(1, Number(retries) || 1);
 
-  if (inProcess) {
-    if (!ws) throw new Error('同进程环境窗未返回 page CDP WebSocket 地址');
+  if (preferPageWs && http) {
+    const pageWs = await resolvePageWs(http, ws);
+    if (pageWs) ws = pageWs;
+  }
+
+  if (inProcess || preferPageWs) {
+    if (!ws) throw new Error('Electron/同进程环境未返回 page CDP WebSocket 地址');
   } else {
     const endpoint = http || wsToHttpBase(ws);
     if (!endpoint && !ws) throw new Error('本地浏览器未返回 CDP 地址');
@@ -48,9 +80,14 @@ async function connectPlaywrightOverCDP(opened, {
       await sleep(settleMs);
     } else if (attempt > 1) {
       await sleep(700 * attempt);
+      // 重试前刷新 page ws（注入/导航后 target id 可能变）
+      if (preferPageWs && http) {
+        const fresh = await resolvePageWs(http, ws);
+        if (fresh) ws = fresh;
+      }
     }
     try {
-      if (inProcess) {
+      if (inProcess || preferPageWs) {
         return await chromium.connectOverCDP(ws, opts);
       }
       const endpoint = http || wsToHttpBase(ws);
@@ -105,23 +142,47 @@ async function waitForPlaywrightPage(browser, { timeoutMs = 30000, preferUrl = /
 /**
  * 取得可用 Page。Electron CDP 不支持 Target.createTarget，禁止依赖 newPage()。
  * 比特等 Chromium 在无页时可回退 newPage。
+ * @returns {Promise<{ page: import('playwright-core').Page, browser?: any }>}
+ * 兼容旧调用：若只拿 Page，仍返回 Page；内部失败时抛错。
  */
 async function ensurePlaywrightPage(browser, {
   timeoutMs = 45000,
   preferUrl = /tiktok\.com/i,
   allowNewPage = true,
-  /** 可选：http://127.0.0.1:port，用于交叉核对 /json/list（Electron Debugger 占用时 Playwright 页列表为空） */
   httpBase = '',
+  /** 若 browser 级连接看不到页，允许用 page ws 重连并替换 */
+  allowPageWsReconnect = true,
 } = {}) {
-  let page = await waitForPlaywrightPage(browser, { timeoutMs, preferUrl });
+  let page = await waitForPlaywrightPage(browser, { timeoutMs: Math.min(8000, timeoutMs), preferUrl });
   if (page && !page.isClosed?.()) return page;
 
   page = listOpenPages(browser)[0] || null;
   if (page && !page.isClosed?.()) return page;
 
-  // 再等一小段：Electron 窗 loadURL 可能晚于 CDP 握手
+  // Electron：browser 连接无页时，改连 /json/list 的 page ws（与桌面 inProcess 一致）
+  if (!allowNewPage && allowPageWsReconnect && httpBase) {
+    const pageWs = await resolvePageWs(httpBase);
+    if (pageWs) {
+      try {
+        const alt = await chromium.connectOverCDP(pageWs, {
+          timeout: Math.max(15000, Number(timeoutMs) || 45000),
+        });
+        page = await waitForPlaywrightPage(alt, {
+          timeoutMs: Math.min(15000, Math.max(5000, Number(timeoutMs) || 0)),
+          preferUrl,
+        });
+        if (page && !page.isClosed?.()) {
+          // 挂上替代 browser，供调用方后续 close（若需要）
+          page._tkswarmAltBrowser = alt;
+          return page;
+        }
+        await alt.close().catch(() => {});
+      } catch { /* fall through */ }
+    }
+  }
+
   page = await waitForPlaywrightPage(browser, {
-    timeoutMs: Math.min(12000, Math.max(3000, Number(timeoutMs) || 0)),
+    timeoutMs: Math.max(5000, Number(timeoutMs) || 45000),
     preferUrl,
   });
   if (page && !page.isClosed?.()) return page;
@@ -130,14 +191,11 @@ async function ensurePlaywrightPage(browser, {
     let listHint = '';
     const base = String(httpBase || '').replace(/\/+$/, '');
     if (base) {
-      try {
-        const res = await fetch(`${base}/json/list`);
-        const list = await res.json().catch(() => []);
-        const pages = Array.isArray(list) ? list.filter((t) => t?.type === 'page') : [];
-        listHint = pages.length
-          ? `（CDP /json/list 有 ${pages.length} 个 page，但 Playwright 不可见——常见于 Electron debugger 未 detach）`
-          : '（CDP /json/list 也无 page，窗口可能未创建成功）';
-      } catch { /* ignore */ }
+      const list = await fetchJsonList(base);
+      const pages = list.filter((t) => t?.type === 'page');
+      listHint = pages.length
+        ? `（CDP /json/list 有 ${pages.length} 个 page，但 Playwright 不可见——请确认已用 page 级 ws 连接）`
+        : '（CDP /json/list 也无 page，窗口可能未创建成功或立刻退出）';
     }
     throw Object.assign(
       new Error(`Electron 环境未出现可用页面（不支持 CDP 新建页）。请确认有头窗口已启动且未立刻退出${listHint}`),
@@ -164,7 +222,6 @@ async function ensurePlaywrightPage(browser, {
     return await context.newPage();
   } catch (e) {
     if (isCreateTargetUnsupported(e)) {
-      // 再等一轮已有页（窗口可能刚挂上）
       page = await waitForPlaywrightPage(browser, { timeoutMs: 15000, preferUrl });
       if (page) return page;
       throw Object.assign(
@@ -183,4 +240,6 @@ module.exports = {
   listOpenPages,
   wsToHttpBase,
   isCreateTargetUnsupported,
+  resolvePageWs,
+  fetchJsonList,
 };

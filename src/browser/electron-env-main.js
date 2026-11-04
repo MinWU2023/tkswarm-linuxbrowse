@@ -84,20 +84,9 @@ app.whenReady().then(async () => {
     },
   });
 
-  // 时区交给父进程 cdp-inject.applyEmulation；切勿在此 attach debugger 并长期占用——
-  // Electron 单页 Debugger 互斥，占着会导致 Playwright connectOverCDP 看不到任何 page（RFB/任务双挂）。
-  if (cfg.timezone && win.webContents?.debugger) {
-    try {
-      const dbg = win.webContents.debugger;
-      if (!dbg.isAttached()) dbg.attach('1.3');
-      await dbg.sendCommand('Emulation.setTimezoneOverride', {
-        timezoneId: String(cfg.timezone),
-      });
-    } catch { /* non-fatal */ }
-    try {
-      if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach();
-    } catch { /* ignore */ }
-  }
+  // 时区 / 指纹由父进程 cdp-inject.applyEmulation 注入。
+  // 禁止在此 attach webContents.debugger：Electron 页级 Debugger 互斥，
+  // 占着会导致 Playwright 连 browser CDP 后 contexts/pages 为空。
 
   win.webContents.setUserAgent(userAgent || win.webContents.getUserAgent());
   if (locale) {
