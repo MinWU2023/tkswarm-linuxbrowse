@@ -12,7 +12,7 @@ const {
   protocolBackendId,
 } = require('./providers');
 const { inspectTikTokSession, pageLooksLoggedOut } = require('./cdp-client');
-const { connectPlaywrightOverCDP, waitForPlaywrightPage } = require('./cdp-connect');
+const { connectPlaywrightOverCDP, ensurePlaywrightPage } = require('./cdp-connect');
 const dataStore = require('../data-store');
 const phpApi = require('../php-api');
 const { publish: liveLog } = require('../live-log');
@@ -1286,15 +1286,12 @@ async function getSession(profileId, provider, {
   }
   if (!opened?.ws && !opened?.http) throw new Error(`${label}未返回 CDP 地址`);
   const browser = await connectPlaywrightOverCDP(opened, { timeoutMs: 60000 });
-  const context = browser.contexts()[0] || await browser.newContext();
-  let page = await waitForPlaywrightPage(browser, { preferUrl: /tiktok\.com/i });
-  if (!page) {
-    const openPages = context.pages().filter((item) => !item.isClosed());
-    page = openPages.find((item) => /tiktok\.com\/login\/2sv\//i.test(item.url()))
-      || openPages.find((item) => /tiktok\.com/i.test(item.url()))
-      || openPages[0];
-  }
-  if (!page) page = await context.newPage();
+  // Electron 不支持 CDP newPage：复用窗口已有页
+  const page = await ensurePlaywrightPage(browser, {
+    preferUrl: /tiktok\.com/i,
+    allowNewPage: !/linux|第一页自研浏览器 Linux/i.test(label),
+  });
+  const context = page.context?.() || browser.contexts()[0];
   const session = {
     browser,
     context,

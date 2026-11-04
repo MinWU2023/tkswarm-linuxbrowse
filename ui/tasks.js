@@ -195,19 +195,13 @@ function renderRows(items) {
   const body = document.getElementById('task-body');
   state.items = items || [];
   if (!items.length) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">
+    body.innerHTML = `<tr><td colspan="7" class="empty">
       <div class="empty-block"><strong>暂无任务</strong>
       <span class="muted">坐席拉粉丝入队后会出现「客服粉丝/关注同步」。请确认本页登录账号与客服台一致</span></div>
     </td></tr>`;
     return;
   }
   body.innerHTML = items.map((x) => {
-    const payload = x.payload || {};
-    const backend = payload.browserBackend || payload.browser_backend || '';
-    const note = x.lastError || x.note
-      || (backend ? `后端 ${backend}` : '')
-      || (x.group_name || '-');
-    const noteCls = x.lastError ? 'danger-text' : 'muted';
     const key = taskKeyOf(x);
     const active = logViewer.open && logViewer.taskKey === key ? ' is-active' : '';
     return `<tr class="task-row${active}" data-task-key="${esc(key)}">
@@ -217,7 +211,6 @@ function renderRows(items) {
       <td>${statusBadge(x.status)}</td>
       <td><span class="muted">${esc(progressText(x))}</span></td>
       <td class="muted">${esc(x.created_at || '-')}</td>
-      <td class="${noteCls}" title="${esc(note)}">${esc(note)}</td>
       <td>${opsCell(x)}</td>
     </tr>`;
   }).join('');
@@ -466,7 +459,7 @@ async function loadTasks() {
   });
   if (state.keyword) qs.set('keyword', state.keyword);
   const body = document.getElementById('task-body');
-  body.innerHTML = `<tr><td colspan="8" class="empty">加载中…</td></tr>`;
+  body.innerHTML = `<tr><td colspan="7" class="empty">加载中…</td></tr>`;
   try {
     const res = await fetch(`${API}/api/tasks?${qs}`, { headers: authHeaders() });
     const j = await res.json();
@@ -476,7 +469,7 @@ async function loadTasks() {
         toast(j.message || '请先登录', 'err');
         return;
       }
-      body.innerHTML = `<tr><td colspan="8" class="empty">${esc(j.message || '加载失败')}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="7" class="empty">${esc(j.message || '加载失败')}</td></tr>`;
       toast(j.message || '加载失败', 'err');
       return;
     }
@@ -488,7 +481,7 @@ async function loadTasks() {
     renderPager();
     refreshQueueBanner();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">${esc(e.message || '网络错误')}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="empty">${esc(e.message || '网络错误')}</td></tr>`;
     toast(e.message || '网络错误', 'err');
   }
 }

@@ -1,6 +1,11 @@
 ﻿const { getProvider } = require('./providers');
 const { inspectTikTokSession } = require('./cdp-client');
-const { connectPlaywrightOverCDP, waitForPlaywrightPage } = require('./cdp-connect');
+const {
+  connectPlaywrightOverCDP,
+  waitForPlaywrightPage,
+  ensurePlaywrightPage,
+  isCreateTargetUnsupported,
+} = require('./cdp-connect');
 const { inspectPage, inspectPageForDm, capture, classify } = require('../automation-guard');
 const dataStore = require('../data-store');
 const phpApi = require('../php-api');
@@ -305,34 +310,27 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
     if (!browserInner?.isConnected?.()) {
       throw new Error(`${synced.provider.backendLabel || '本地浏览器'} CDP 已断开（环境可能刚被关窗写代理，请重试）`);
     }
-    let contextInner = browserInner.contexts()[0] || null;
-    if (!contextInner) {
-      try {
-        contextInner = await browserInner.newContext();
-      } catch (e) {
-        throw new Error(
-          `${synced.provider.backendLabel || '本地浏览器'} 上下文不可用：${e.message || e}`
-          + '（常见于关窗写代理后未强制重开）'
-        );
-      }
+    // Electron（linux）不支持 Target.createTarget：只能等/复用已有页，禁止 newPage
+    const isLinux = String(options.browserBackend || account.browser_backend || '').toLowerCase() === 'linux'
+      || /linux|第一页自研浏览器 Linux/i.test(String(synced.provider.backendLabel || ''));
+    let pageInner;
+    try {
+      pageInner = await ensurePlaywrightPage(browserInner, {
+        timeoutMs: 45000,
+        preferUrl: /tiktokstudio\/upload|tiktok\.com/i,
+        allowNewPage: !isLinux,
+      });
+    } catch (e) {
+      const err = new Error(
+        `${synced.provider.backendLabel || '本地浏览器'} 无法取得页面：${e.message || e}`
+        + (isCreateTargetUnsupported(e) || e?.code === 'CREATE_TARGET_UNSUPPORTED'
+          ? '（Electron 请复用窗口内已有页，勿 CDP newPage）'
+          : '（浏览器已关闭，请确认未并发关窗/推环境包）')
+      );
+      err.code = e?.code || (isCreateTargetUnsupported(e) ? 'CREATE_TARGET_UNSUPPORTED' : 'PAGE_CONTEXT_CLOSED');
+      throw err;
     }
-    let pageInner = await waitForPlaywrightPage(browserInner, { preferUrl: /tiktokstudio\/upload|tiktok\.com/i })
-      || contextInner.pages().find((p) => /tiktokstudio\/upload/i.test(p.url() || ''))
-      || contextInner.pages().find((p) => /tiktok\.com/i.test(p.url() || ''))
-      || contextInner.pages()[0]
-      || null;
-    if (!pageInner || pageInner.isClosed?.()) {
-      try {
-        pageInner = await contextInner.newPage();
-      } catch (e) {
-        const err = new Error(
-          `${synced.provider.backendLabel || '本地浏览器'} 无法新建页面：${e.message || e}`
-          + '（浏览器已关闭，请确认未并发关窗/推环境包）'
-        );
-        err.code = 'PAGE_CONTEXT_CLOSED';
-        throw err;
-      }
-    }
+    const contextInner = pageInner.context?.() || browserInner.contexts()[0] || null;
     return { opened: openedInner, browser: browserInner, context: contextInner, page: pageInner };
   }
 
@@ -344,7 +342,7 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
     ({ opened, browser, context, page } = await openAndAttach(forceRelaunch));
   } catch (e) {
     // 僵尸/半关进程：强制关窗后整窗重开一次
-    if (/PAGE_CONTEXT_CLOSED|has been closed|Target closed|Target page|context or browser/i.test(String(e?.message || e))) {
+    if (/PAGE_CONTEXT_CLOSED|CREATE_TARGET_UNSUPPORTED|NO_PAGE|has been closed|Target closed|Target page|context or browser|Not supported/i.test(String(e?.message || e || e?.code))) {
       const { publish: liveLog } = require('../live-log');
       liveLog(
         `账号 #${accountId}：开页失败（${String(e.message || e).slice(0, 120)}），强制重开环境再试`,
@@ -397,11 +395,11 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
       });
       if (!reOpened?.ws && !reOpened?.http) throw new Error(`${recovered.provider.backendLabel || '本地浏览器'}重开后未返回 CDP`);
       const browser2 = await connectPlaywrightOverCDP(reOpened, { timeoutMs: 60000, retries: 3, settleMs: 800 });
-      const context2 = browser2.contexts()[0] || await browser2.newContext();
-      let page2 = await waitForPlaywrightPage(browser2, { preferUrl: /tiktok\.com/i })
-        || context2.pages().find((p) => /tiktok\.com/i.test(p.url() || ''))
-        || context2.pages()[0]
-        || await context2.newPage();
+      const page2 = await ensurePlaywrightPage(browser2, {
+        preferUrl: /tiktok\.com/i,
+        allowNewPage: String(options.browserBackend || '').toLowerCase() !== 'linux',
+      });
+      const context2 = page2.context?.() || browser2.contexts()[0];
       await page2.bringToFront().catch(() => {});
       await page2.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
       netErr = await detectBrowserNetworkError(page2).catch(() => null);

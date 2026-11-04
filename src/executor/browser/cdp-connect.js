@@ -13,6 +13,11 @@ function isRetryableCdpError(err) {
   return /timeout|Timeout|ECONNREFUSED|ECONNRESET|closed|Target closed|WebSocket|CDP|browser has been closed/i.test(msg);
 }
 
+function isCreateTargetUnsupported(err) {
+  const msg = String(err?.message || err || '');
+  return /Not supported|createTarget|Target\.createTarget/i.test(msg);
+}
+
 /**
  * 连接本地浏览器 CDP（比特 / 自研 Electron）。
  * - 优先 http://host:port（Playwright 官方推荐），失败再回退 ws
@@ -73,11 +78,19 @@ async function connectPlaywrightOverCDP(opened, {
   throw lastErr || new Error('连接浏览器 CDP 失败');
 }
 
+function listOpenPages(browser) {
+  try {
+    return browser.contexts().flatMap((ctx) => ctx.pages()).filter((p) => !p.isClosed?.());
+  } catch {
+    return [];
+  }
+}
+
 /** 等待 CDP 上的可见 page（自研 Electron attach 可能晚于 browser 连接） */
 async function waitForPlaywrightPage(browser, { timeoutMs = 30000, preferUrl = /tiktok\.com/i } = {}) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + Math.max(3000, Number(timeoutMs) || 30000);
   while (Date.now() < deadline) {
-    const pages = browser.contexts().flatMap((ctx) => ctx.pages()).filter((p) => !p.isClosed());
+    const pages = listOpenPages(browser);
     const preferred = pages.find((p) => preferUrl.test(String(p.url() || '')));
     const visible = pages.find((p) => {
       const url = String(p.url() || '');
@@ -89,4 +102,64 @@ async function waitForPlaywrightPage(browser, { timeoutMs = 30000, preferUrl = /
   return null;
 }
 
-module.exports = { connectPlaywrightOverCDP, waitForPlaywrightPage, wsToHttpBase };
+/**
+ * 取得可用 Page。Electron CDP 不支持 Target.createTarget，禁止依赖 newPage()。
+ * 比特等 Chromium 在无页时可回退 newPage。
+ */
+async function ensurePlaywrightPage(browser, {
+  timeoutMs = 45000,
+  preferUrl = /tiktok\.com/i,
+  allowNewPage = true,
+} = {}) {
+  let page = await waitForPlaywrightPage(browser, { timeoutMs, preferUrl });
+  if (page && !page.isClosed?.()) return page;
+
+  page = listOpenPages(browser)[0] || null;
+  if (page && !page.isClosed?.()) return page;
+
+  if (!allowNewPage) {
+    throw Object.assign(
+      new Error('Electron 环境未出现可用页面（不支持 CDP 新建页）。请确认有头窗口已启动且未立刻退出'),
+      { code: 'NO_PAGE_ELECTRON' }
+    );
+  }
+
+  const context = browser.contexts()[0] || null;
+  if (!context) {
+    try {
+      const ctx = await browser.newContext();
+      return await ctx.newPage();
+    } catch (e) {
+      if (isCreateTargetUnsupported(e)) {
+        throw Object.assign(
+          new Error(`Electron 不支持新建上下文/页面：${e.message || e}`),
+          { code: 'CREATE_TARGET_UNSUPPORTED' }
+        );
+      }
+      throw e;
+    }
+  }
+  try {
+    return await context.newPage();
+  } catch (e) {
+    if (isCreateTargetUnsupported(e)) {
+      // 再等一轮已有页（窗口可能刚挂上）
+      page = await waitForPlaywrightPage(browser, { timeoutMs: 15000, preferUrl });
+      if (page) return page;
+      throw Object.assign(
+        new Error(`Electron 不支持 CDP newPage（Target.createTarget Not supported），且未找到已有页面`),
+        { code: 'CREATE_TARGET_UNSUPPORTED' }
+      );
+    }
+    throw e;
+  }
+}
+
+module.exports = {
+  connectPlaywrightOverCDP,
+  waitForPlaywrightPage,
+  ensurePlaywrightPage,
+  listOpenPages,
+  wsToHttpBase,
+  isCreateTargetUnsupported,
+};

@@ -129,11 +129,13 @@
     } else {
       try {
         let RFB;
+        // npm 包 lib/rfb.js 是 CommonJS（exports），浏览器直接 import 会报 exports is not defined。
+        // 优先用本仓库 esbuild 打好的 ESM：/vendor/novnc-rfb.js
         try {
-          ({ default: RFB } = await import('/vendor/novnc/lib/rfb.js'));
+          ({ default: RFB } = await import('/vendor/novnc-rfb.js'));
           status.textContent = '本地 noVNC…';
         } catch {
-          ({ default: RFB } = await import('https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/lib/rfb.js'));
+          ({ default: RFB } = await import('https://cdn.jsdelivr.net/npm/@novnc/novnc@1.5.0/+esm'));
           status.textContent = 'CDN noVNC…';
         }
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';

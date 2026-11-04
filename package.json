@@ -20,7 +20,8 @@
     "smoke:vnc": "node scripts/smoke-vnc.js",
     "smoke:ops": "node scripts/smoke-ops.js",
     "smoke:all": "node scripts/smoke-health.js && node scripts/smoke-lifecycle.js && node scripts/smoke-cdp.js && node scripts/smoke-vnc.js && node scripts/smoke-ops.js",
-    "pilot:snapshot": "node scripts/pilot-snapshot.js"
+    "pilot:snapshot": "node scripts/pilot-snapshot.js",
+    "bundle:novnc": "esbuild node_modules/@novnc/novnc/lib/rfb.js --bundle --format=esm --outfile=ui/vendor/novnc-rfb.js"
   },
   "dependencies": {
     "@novnc/novnc": "^1.5.0",
