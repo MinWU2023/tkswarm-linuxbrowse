@@ -284,10 +284,79 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
     // open 可能挂到正在退出的僵尸进程 → newPage/waitForTimeout 报「has been closed」
     forceRelaunch = true;
   }
-  const opened = await synced.provider.open(synced.profileId, {
-    headless: isHeadless(action),
-    forceRelaunch,
-  });
+  async function openAndAttach(force) {
+    if (force) {
+      // 关窗写代理 / 杀僵尸后稍等刷盘，避免连上半死进程
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    const openedInner = await synced.provider.open(synced.profileId, {
+      headless: isHeadless(action),
+      forceRelaunch: force,
+    });
+    if (!openedInner?.ws && !openedInner?.http) {
+      throw new Error(`${synced.provider.backendLabel || '本地浏览器'}未返回 CDP 地址`);
+    }
+    await synced.provider.heartbeat?.(synced.profileId)?.catch?.(() => {});
+    const browserInner = await connectPlaywrightOverCDP(openedInner, {
+      timeoutMs: 60000,
+      retries: 3,
+      settleMs: force ? 1200 : 800,
+    });
+    if (!browserInner?.isConnected?.()) {
+      throw new Error(`${synced.provider.backendLabel || '本地浏览器'} CDP 已断开（环境可能刚被关窗写代理，请重试）`);
+    }
+    let contextInner = browserInner.contexts()[0] || null;
+    if (!contextInner) {
+      try {
+        contextInner = await browserInner.newContext();
+      } catch (e) {
+        throw new Error(
+          `${synced.provider.backendLabel || '本地浏览器'} 上下文不可用：${e.message || e}`
+          + '（常见于关窗写代理后未强制重开）'
+        );
+      }
+    }
+    let pageInner = await waitForPlaywrightPage(browserInner, { preferUrl: /tiktokstudio\/upload|tiktok\.com/i })
+      || contextInner.pages().find((p) => /tiktokstudio\/upload/i.test(p.url() || ''))
+      || contextInner.pages().find((p) => /tiktok\.com/i.test(p.url() || ''))
+      || contextInner.pages()[0]
+      || null;
+    if (!pageInner || pageInner.isClosed?.()) {
+      try {
+        pageInner = await contextInner.newPage();
+      } catch (e) {
+        const err = new Error(
+          `${synced.provider.backendLabel || '本地浏览器'} 无法新建页面：${e.message || e}`
+          + '（浏览器已关闭，请确认未并发关窗/推环境包）'
+        );
+        err.code = 'PAGE_CONTEXT_CLOSED';
+        throw err;
+      }
+    }
+    return { opened: openedInner, browser: browserInner, context: contextInner, page: pageInner };
+  }
+
+  let opened;
+  let browser;
+  let context;
+  let page;
+  try {
+    ({ opened, browser, context, page } = await openAndAttach(forceRelaunch));
+  } catch (e) {
+    // 僵尸/半关进程：强制关窗后整窗重开一次
+    if (/PAGE_CONTEXT_CLOSED|has been closed|Target closed|Target page|context or browser/i.test(String(e?.message || e))) {
+      const { publish: liveLog } = require('../live-log');
+      liveLog(
+        `账号 #${accountId}：开页失败（${String(e.message || e).slice(0, 120)}），强制重开环境再试`,
+        'warn',
+        { accountId },
+      );
+      await synced.provider.close(synced.profileId).catch(() => {});
+      ({ opened, browser, context, page } = await openAndAttach(true));
+    } else {
+      throw e;
+    }
+  }
   profileId = synced.profileId;
   account.browser_profile_id = profileId;
   try {
@@ -295,39 +364,6 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
     setSessionProfileId(profileId);
   } catch { /* ignore */ }
   const activeProvider = synced.provider;
-  if (!opened?.ws && !opened?.http) throw new Error(`${activeProvider.backendLabel || '本地浏览器'}未返回 CDP 地址`);
-  await activeProvider.heartbeat?.(profileId)?.catch?.(() => {});
-  // 与登录路径一致：HTTP 优先 + 超时重试，避免「ws connected 但 30s 协议超时」
-  let browser = await connectPlaywrightOverCDP(opened, { timeoutMs: 60000, retries: 3, settleMs: 800 });
-  if (!browser?.isConnected?.()) {
-    throw new Error(`${activeProvider.backendLabel || '本地浏览器'} CDP 已断开（环境可能刚被关窗写代理，请重试）`);
-  }
-  let context = browser.contexts()[0] || null;
-  if (!context) {
-    try {
-      context = await browser.newContext();
-    } catch (e) {
-      throw new Error(
-        `${activeProvider.backendLabel || '本地浏览器'} 上下文不可用：${e.message || e}`
-        + '（常见于关窗写代理后未强制重开）'
-      );
-    }
-  }
-  let page = await waitForPlaywrightPage(browser, { preferUrl: /tiktokstudio\/upload|tiktok\.com/i })
-    || context.pages().find((p) => /tiktokstudio\/upload/i.test(p.url() || ''))
-    || context.pages().find((p) => /tiktok\.com/i.test(p.url() || ''))
-    || context.pages()[0]
-    || null;
-  if (!page || page.isClosed?.()) {
-    try {
-      page = await context.newPage();
-    } catch (e) {
-      throw new Error(
-        `${activeProvider.backendLabel || '本地浏览器'} 无法新建页面：${e.message || e}`
-        + '（浏览器已关闭，请确认未并发关窗/推环境包）'
-      );
-    }
-  }
   await page.bringToFront().catch(() => {});
   if (url) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});

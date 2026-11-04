@@ -18,10 +18,12 @@ const { getProvider } = require('./providers');
 
 async function openSeatBrowser(accountId, startUrl = 'https://www.tiktok.com/') {
   const profileId = await ensureServerBrowserEnv(accountId);
+  // 坐席分任务各自开窗：必须 forceRelaunch。
+  // 若为 false，代理同步 close 后常挂到正在退出的僵尸进程 → newPage「has been closed」。
   const connection = await connectAccount(accountId, startUrl, 'message', {
     browserProfileId: profileId,
     browserBackend: 'linux',
-    forceRelaunch: false,
+    forceRelaunch: true,
     saveTraffic: false,
   });
   return { connection, profileId };
