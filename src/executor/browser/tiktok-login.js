@@ -77,6 +77,16 @@ async function callbackLoginStatus(accountId, result, options = {}) {
       'info',
       { accountId },
     );
+    // 仍释放跨机租约：会话日志已入库，另一端可结束等待并用会话凭证自动登录
+    if (ok) {
+      try {
+        const phpApi = require('../php-api');
+        const { hostId } = require('./env-pack-sync');
+        await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
+          hostId: hostId(),
+        });
+      } catch { /* ignore */ }
+    }
   }
   return { ...(result || {}), loginStatus: status, loginOk: ok, profileId: pid || undefined, skipEnvPackPush: skipPush };
 }

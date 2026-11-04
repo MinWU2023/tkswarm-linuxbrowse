@@ -71,6 +71,104 @@ async function detailLocal(provider, profileId) {
   }
 }
 
+function isPackLeaseBusyError(err) {
+  const payload = err?.payload || {};
+  const data = payload.data && typeof payload.data === 'object' ? payload.data : {};
+  const code = String(data.code || payload.code || '');
+  const msg = String(err?.message || err || '');
+  return code === 'PACK_LEASE_BUSY' || /其它主机|PACK_LEASE_BUSY/i.test(msg);
+}
+
+function packLeaseBusyInfo(err) {
+  const payload = err?.payload || {};
+  const data = payload.data && typeof payload.data === 'object' ? payload.data : {};
+  return {
+    holderHost: String(data.holderHost || ''),
+    leaseUntil: String(data.leaseUntil || ''),
+    lockedBy: String(data.lockedBy || ''),
+  };
+}
+
+function packLeaseWaitMs() {
+  const n = Number(process.env.TKSWARM_PACK_LEASE_WAIT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+}
+
+function packLeasePollMs() {
+  const n = Number(process.env.TKSWARM_PACK_LEASE_POLL_MS);
+  return Number.isFinite(n) && n > 0 ? n : 3000;
+}
+
+/**
+ * 占用跨机租约；若对方占用则轮询等待其登录完成并释放，再自动取得锁。
+ * @returns {Promise<{ ok: boolean, waited?: boolean, reason?: string, meta?: any, error?: Error }>}
+ */
+async function acquirePackLeaseWithWait(profileId, {
+  accountId = 0,
+  hostId: hostOverride = '',
+  leaseSeconds = 7200,
+  waitMs = packLeaseWaitMs(),
+  pollMs = packLeasePollMs(),
+} = {}) {
+  const pid = String(profileId || '').trim();
+  const hid = String(hostOverride || hostId());
+  if (!pid || !hid) return { ok: false, reason: 'missing-args' };
+
+  const deadline = Date.now() + Math.max(30_000, waitMs);
+  let announced = false;
+  let lastHint = '';
+
+  while (true) {
+    try {
+      const meta = await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease`, {
+        hostId: hid,
+        leaseSeconds: Math.max(120, leaseSeconds),
+      });
+      if (announced) {
+        liveLog(
+          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 对方已释放占用，本端已取得锁，开始同步登录凭证`,
+          'info',
+          { accountId },
+        );
+      }
+      return { ok: true, waited: announced, meta };
+    } catch (e) {
+      const msg = String(e.message || e);
+      if (/不存在|404/i.test(msg) && !isPackLeaseBusyError(e)) {
+        return { ok: false, reason: 'not-found', error: e };
+      }
+      if (!isPackLeaseBusyError(e)) {
+        liveLog(
+          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 无法占用跨机租约：${msg}`,
+          'error',
+          { accountId },
+        );
+        throw new Error(`跨机环境租约失败：${msg}`);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          msg.includes('其它主机')
+            ? `${msg}（已等待超时）`
+            : `等待环境释放超时：${msg}`,
+        );
+      }
+      const info = packLeaseBusyInfo(e);
+      const hint = info.holderHost || '其它主机';
+      if (!announced || hint !== lastHint) {
+        announced = true;
+        lastHint = hint;
+        const until = info.leaseUntil ? `，租约至 ${info.leaseUntil}` : '';
+        liveLog(
+          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 正被 ${hint} 占用${until}，本端锁定等待对方登录完成并上传凭证后自动登录…`,
+          'warn',
+          { accountId },
+        );
+      }
+      await new Promise((r) => setTimeout(r, Math.max(1000, pollMs)));
+    }
+  }
+}
+
 /**
  * 中心库有包：租约 → 下载（10% 进度）→ import keepId。
  */
@@ -79,6 +177,7 @@ async function pullRemotePack(profileId, {
   provider,
   meta,
   hostId: hostOverride = '',
+  skipLease = false,
 } = {}) {
   const pid = String(profileId || '').trim();
   const hid = String(hostOverride || hostId());
@@ -86,19 +185,18 @@ async function pullRemotePack(profileId, {
   const sizeHint = formatPackBytes(packBytes);
   const rev = meta?.packRevision || '?';
 
-  try {
-    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease`, {
+  let acquiredHere = false;
+  if (!skipLease) {
+    const lease = await acquirePackLeaseWithWait(pid, {
+      accountId,
       hostId: hid,
       leaseSeconds: 7200,
     });
-  } catch (e) {
-    const msg = String(e.message || e);
-    liveLog(
-      `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 无法占用跨机租约：${msg}`,
-      'error',
-      { accountId },
-    );
-    throw new Error(msg.includes('其它主机') ? msg : `跨机环境租约失败：${msg}`);
+    if (!lease.ok) {
+      const msg = String(lease.error?.message || lease.reason || '跨机环境租约失败');
+      throw new Error(msg.includes('其它主机') ? msg : `跨机环境租约失败：${msg}`);
+    }
+    acquiredHere = true;
   }
 
   const tmp = path.join(os.tmpdir(), `tk-env-pack-${pid.slice(0, 12)}-${Date.now()}.tgz`);
@@ -164,9 +262,11 @@ async function pullRemotePack(profileId, {
     );
     return { hydrated: true, profileId: pid, source: 'remote-pack' };
   } catch (e) {
-    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
-      hostId: hid,
-    }).catch(() => {});
+    if (acquiredHere) {
+      await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
+        hostId: hid,
+      }).catch(() => {});
+    }
     throw e;
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* */ }
@@ -545,6 +645,7 @@ async function pushLocalEnvPack(profileId, {
 
 /**
  * 打开前：按策略就绪环境；本机可用时再占租约（防双机）。
+ * 若对方占用：等待其登录完成并释放 → 强制拉最新包（含登录凭证）→ 本端继续开窗/自动登录。
  * 可能返回新的 profileId（代建替换时）。
  */
 async function prepareEnvForOpen(profileId, opts = {}) {
@@ -552,7 +653,7 @@ async function prepareEnvForOpen(profileId, opts = {}) {
   const { accountId = 0, provider } = opts;
   if (!pid || !provider) return { profileId: pid, hydrated: false };
 
-  const result = await ensureEnvReady(pid, opts);
+  let result = await ensureEnvReady(pid, opts);
   const readyId = String(result.profileId || pid).trim();
   if (!supportsPackSync(provider)) return { ...result, profileId: readyId };
 
@@ -561,27 +662,74 @@ async function prepareEnvForOpen(profileId, opts = {}) {
     return { ...result, profileId: readyId, lease: false };
   }
 
-  // 本机可用：占租约，避免另一台同时开
+  // 本机可用：占租约；对方占用则等待（勿直接抛错打断登录）
   const hid = String(opts.hostId || hostId());
+  let lease;
   try {
-    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(readyId)}/pack-lease`, {
+    lease = await acquirePackLeaseWithWait(readyId, {
+      accountId,
       hostId: hid,
       leaseSeconds: 7200,
     });
   } catch (e) {
     const msg = String(e.message || e);
-    // 无绑定行时 pack-lease 404 — 忽略，交给后续创建
-    if (/不存在|404/i.test(msg) && !/其它主机/i.test(msg)) {
-      return { ...result, profileId: readyId, lease: false };
+    if (isPackLeaseBusyError(e) || /等待环境释放超时|其它主机/i.test(msg)) {
+      throw new Error(msg);
     }
-    if (/其它主机/i.test(msg)) throw new Error(msg);
     liveLog(
       `账号 #${accountId || '-'}：占用环境租约告警：${msg}`,
       'warn',
       { accountId },
     );
+    return { ...result, profileId: readyId, lease: false };
   }
-  return { ...result, profileId: readyId, lease: true };
+
+  if (!lease?.ok) {
+    // 无绑定行时 pack-lease 404 — 忽略，交给后续创建
+    return { ...result, profileId: readyId, lease: false };
+  }
+
+  // 等过对方：强制覆盖拉包，拿到其刚上传的登录 Cookie/环境
+  if (lease.waited) {
+    let meta = null;
+    try {
+      meta = await fetchPackMeta(readyId);
+    } catch {
+      meta = null;
+    }
+    const hasPack = !!(meta?.hasPack || (meta?.packFileExists && Number(meta?.packBytes || 0) > 0));
+    if (hasPack) {
+      try {
+        liveLog(
+          `账号 #${accountId || '-'}：环境 ${readyId.slice(0, 8)}… 正在拉取对方上传的最新登录凭证…`,
+          'info',
+          { accountId },
+        );
+        const pulled = await pullRemotePack(readyId, {
+          accountId,
+          provider,
+          meta,
+          hostId: hid,
+          skipLease: true,
+        });
+        result = { ...result, ...pulled, waitedForLease: true };
+      } catch (e) {
+        liveLog(
+          `账号 #${accountId || '-'}：等待后拉取最新环境包失败：${e.message || e}（将尝试用本机会话/会话日志继续）`,
+          'warn',
+          { accountId },
+        );
+      }
+    } else {
+      liveLog(
+        `账号 #${accountId || '-'}：对方已释放占用，但中心库暂无环境包；将依赖会话日志免表单登录`,
+        'warn',
+        { accountId },
+      );
+    }
+  }
+
+  return { ...result, profileId: readyId, lease: true, waitedForLease: !!lease.waited };
 }
 
 /**
@@ -695,4 +843,6 @@ module.exports = {
   pushLocalEnvPack,
   prepareEnvForOpen,
   healPushOrRegenerate,
+  acquirePackLeaseWithWait,
+  isPackLeaseBusyError,
 };
