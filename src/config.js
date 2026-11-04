@@ -52,8 +52,8 @@ module.exports = {
   CAPACITY,
   DEFAULT_API_TOKEN: process.env.TKSWARM_BROWSER_TOKEN || '',
   TKSWARM_API_BASE: process.env.TKSWARM_API_BASE || 'http://127.0.0.1:8080/api',
-  /** 同机 Node 地址：任务重试后通知 Node 立刻领取执行（默认 8999） */
-  TKSWARM_NODE_BASE: String(process.env.TKSWARM_NODE_BASE || 'http://127.0.0.1:8999').replace(/\/+$/, ''),
+  /** @deprecated 任务已内置 src/executor，不再转发 Node */
+  TKSWARM_NODE_BASE: String(process.env.TKSWARM_NODE_BASE || '').replace(/\/+$/, ''),
   /** 有头模式是否依赖 Xvfb（无物理显示器的服务器建议 1） */
   USE_XVFB: String(process.env.TKSWARM_BROWSER_XVFB || '1') !== '0',
   /** Docker / root 下 Chrome 需要 --no-sandbox */

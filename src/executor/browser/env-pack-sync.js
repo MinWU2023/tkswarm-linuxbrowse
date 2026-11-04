@@ -1,0 +1,683 @@
+/**
+ * 跨机环境包同步策略（自研桌面 / Linux）：
+ * 1) 本机已有目标环境 → 直接使用
+ * 2) 中心库有环境包文件 → 日志「已找到」后拉取，每增 10% 打一次进度，再 import keepId
+ * 3) 中心库也无包 → 当前登录用户代原账号归属用户，在本机创建同名同配置环境，上传中心库并绑定原账号
+ */
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const phpApi = require('../php-api');
+const { publish: liveLog } = require('../live-log');
+
+function hostId() {
+  try {
+    return String(process.env.TKSWARM_HOST_ID || os.hostname() || 'node').slice(0, 120);
+  } catch {
+    return 'node';
+  }
+}
+
+function supportsPackSync(provider) {
+  const id = String(provider?.backendId || '').toLowerCase();
+  const env = String(provider?.envType || '').toLowerCase();
+  // linux Provider 的 backendId 常映射为 tkswarm，故同时认 envType
+  return id === 'tkswarm' || id === 'linux' || env === 'tkswarm' || env === 'linux';
+}
+
+function isMissingLocal(error) {
+  return /不存在|已删除|not\s*found/i.test(String(error?.message || error || ''));
+}
+
+function formatPackBytes(n) {
+  const v = Number(n) || 0;
+  if (v <= 0) return '';
+  if (v < 1024) return `${v}B`;
+  if (v < 1024 * 1024) return `${Math.round(v / 1024)}KB`;
+  return `${(v / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function formatSpeed(bps) {
+  const v = Number(bps) || 0;
+  if (v <= 0) return '0KB/s';
+  if (v < 1024 * 1024) return `${Math.max(1, Math.round(v / 1024))}KB/s`;
+  return `${(v / (1024 * 1024)).toFixed(1)}MB/s`;
+}
+
+async function fetchPackMeta(profileId) {
+  const pid = String(profileId || '').trim();
+  if (!pid) return { exists: false, hasPack: false, profileId: '' };
+  try {
+    return await phpApi.get(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-meta`);
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (/404|不存在/i.test(msg)) {
+      return { exists: false, hasPack: false, profileId: pid, reason: msg };
+    }
+    throw e;
+  }
+}
+
+async function detailLocal(provider, profileId) {
+  const pid = String(profileId || '').trim();
+  if (!pid || !provider) return null;
+  try {
+    const detail = await provider.detail(pid);
+    if (detail && (detail.id || detail.name)) return detail;
+    return null;
+  } catch (e) {
+    if (isMissingLocal(e)) return null;
+    throw e;
+  }
+}
+
+/**
+ * 中心库有包：租约 → 下载（10% 进度）→ import keepId。
+ */
+async function pullRemotePack(profileId, {
+  accountId = 0,
+  provider,
+  meta,
+  hostId: hostOverride = '',
+} = {}) {
+  const pid = String(profileId || '').trim();
+  const hid = String(hostOverride || hostId());
+  const packBytes = Number(meta?.packBytes || 0) || 0;
+  const sizeHint = formatPackBytes(packBytes);
+  const rev = meta?.packRevision || '?';
+
+  try {
+    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease`, {
+      hostId: hid,
+      leaseSeconds: 7200,
+    });
+  } catch (e) {
+    const msg = String(e.message || e);
+    liveLog(
+      `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 无法占用跨机租约：${msg}`,
+      'error',
+      { accountId },
+    );
+    throw new Error(msg.includes('其它主机') ? msg : `跨机环境租约失败：${msg}`);
+  }
+
+  const tmp = path.join(os.tmpdir(), `tk-env-pack-${pid.slice(0, 12)}-${Date.now()}.tgz`);
+  try {
+    liveLog(
+      `账号 #${accountId || '-'}：中心库已找到环境包 ${pid.slice(0, 8)}…（rev ${rev}${sizeHint ? `，${sizeHint}` : ''}），开始拉取`,
+      'info',
+      { accountId },
+    );
+
+    const timeoutMs = Math.max(
+      10 * 60 * 1000,
+      packBytes > 0 ? Math.ceil((packBytes / (50 * 1024)) * 1000) + 120000 : 10 * 60 * 1000,
+    );
+    let lastLoggedPct = -1;
+    await phpApi.download(`/node/browser-profiles/${encodeURIComponent(pid)}/pack`, tmp, {
+      totalBytes: packBytes,
+      timeoutMs,
+      progressPctStep: 10,
+      progressIntervalMs: 8000,
+      onProgress: ({ loaded, total, pct, speed }) => {
+        const totalLabel = formatPackBytes(total || packBytes) || '?';
+        const loadedLabel = formatPackBytes(loaded) || '0B';
+        if (pct >= 0) {
+          const bucket = Math.floor(pct / 10) * 10;
+          if (bucket === lastLoggedPct && pct < 100) return;
+          lastLoggedPct = bucket;
+          liveLog(
+            `账号 #${accountId || '-'}：拉取环境包 ${pid.slice(0, 8)}… ${bucket}%（${loadedLabel}/${totalLabel}，${formatSpeed(speed)}）`,
+            'info',
+            { accountId },
+          );
+          return;
+        }
+        liveLog(
+          `账号 #${accountId || '-'}：拉取环境包 ${pid.slice(0, 8)}… 已下 ${loadedLabel}（${formatSpeed(speed)}）`,
+          'info',
+          { accountId },
+        );
+      },
+    });
+
+    const downloaded = fs.existsSync(tmp) ? fs.statSync(tmp).size : 0;
+    liveLog(
+      `账号 #${accountId || '-'}：环境包 ${pid.slice(0, 8)}… 下载完成（${formatPackBytes(downloaded) || '0B'}），正在导入本机…`,
+      'info',
+      { accountId },
+    );
+    await provider.importPack({
+      filePath: tmp,
+      id: pid,
+      keepId: true,
+      forceOverwrite: true,
+    });
+    const again = await detailLocal(provider, pid);
+    if (!again) {
+      throw new Error('环境包已下载但本地导入后仍查不到环境');
+    }
+    liveLog(
+      `账号 #${accountId || '-'}：已从中心库还原环境 ${pid.slice(0, 8)}…（含登录态数据）`,
+      'info',
+      { accountId },
+    );
+    return { hydrated: true, profileId: pid, source: 'remote-pack' };
+  } catch (e) {
+    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
+      hostId: hid,
+    }).catch(() => {});
+    throw e;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* */ }
+  }
+}
+
+/** 本机已有同账号环境（按 remark / 同名），优先复用，避免反复代建堆窗 */
+async function findLocalAccountEnv(provider, accountId, preferredName = '') {
+  const aid = Number(accountId) || 0;
+  if (!aid || !provider?.profiles) return '';
+  const remarkNeedle = `account #${aid}`;
+  const nameNeedle = String(preferredName || '').trim().toLowerCase();
+  try {
+    const raw = await provider.profiles(0, 100, '');
+    const list = raw?.data?.list || raw?.list || (Array.isArray(raw?.data) ? raw.data : []);
+    if (!Array.isArray(list) || !list.length) return '';
+    const scored = [];
+    for (const p of list) {
+      const id = String(p?.id || '').trim();
+      if (!id) continue;
+      const name = String(p.name || '').trim();
+      const remark = String(p.remark || '').trim();
+      const hitRemark = remark.toLowerCase().includes(remarkNeedle);
+      const hitName = nameNeedle && name.toLowerCase() === nameNeedle;
+      if (!hitRemark && !hitName) continue;
+      scored.push({
+        id,
+        // 优先：同名且 remark 命中 > 仅 remark > 仅同名；同档取列表靠后（更新）
+        score: (hitRemark && hitName ? 300 : hitRemark ? 200 : 100) + Number(p.seq || 0),
+      });
+    }
+    if (!scored.length) return '';
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0].id;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 中心库无包：当前操作员在本机代建同名同配置环境 → 绑定原账号/原归属用户 → 上传中心库。
+ * 若本机已有同账号同名窗，直接复用并提升主绑，不再新建。
+ */
+async function provisionReplacementEnv(targetProfileId, {
+  accountId = 0,
+  provider,
+  bundle = null,
+  backend = 'tkswarm',
+  meta = null,
+} = {}) {
+  const aid = Number(accountId) || Number(bundle?.id) || 0;
+  if (!aid || !provider) {
+    return { hydrated: false, profileId: String(targetProfileId || ''), reason: 'no-account-for-provision' };
+  }
+
+  let account = bundle;
+  if (!account) {
+    const dataStore = require('../data-store');
+    account = await dataStore.getAccountBundle(aid);
+  }
+  if (!account) {
+    throw new Error(`账号 #${aid} 不存在，无法代建环境`);
+  }
+
+  const ownerUserId = Number(
+    meta?.ownerUserId
+    || account.owner_user_id
+    || account.owner_id
+    || 0,
+  ) || 0;
+
+  const username = String(account.username || '').replace(/^@+/, '').trim() || String(aid);
+  const sameName = String(meta?.label || '').trim() || `TK-${username}`;
+  const remark = `TkSwarm account #${aid}`;
+  const be = backend || meta?.browserBackend || 'tkswarm';
+  const { persistBrowserBinding, provisionProfileForAccount } = require('./profile-provision');
+
+  const reusedId = await findLocalAccountEnv(provider, aid, sameName);
+  if (reusedId && reusedId !== String(targetProfileId || '').trim()) {
+    liveLog(
+      `账号 #${aid}：目标 ${String(targetProfileId || '').slice(0, 8) || '—'}… 本机/中心均无包，复用本机同名环境 ${reusedId.slice(0, 8)}…「${sameName}」并关联账号`,
+      'warn',
+      { accountId: aid },
+    );
+    await persistBrowserBinding(aid, reusedId, true, be, ownerUserId);
+    const pushed = await pushLocalEnvPack(reusedId, { accountId: aid, provider });
+    if (!pushed?.pushed && pushed?.reason !== 'not-local') {
+      liveLog(
+        `账号 #${aid}：复用环境已绑定，上传中心库未完成：${pushed?.reason || 'unknown'}`,
+        'warn',
+        { accountId: aid },
+      );
+    }
+    return {
+      hydrated: true,
+      provisioned: true,
+      reused: true,
+      profileId: reusedId,
+      previousProfileId: String(targetProfileId || ''),
+      source: 'provisioned-reuse',
+      ownerUserId,
+    };
+  }
+
+  liveLog(
+    `账号 #${aid}：本机与中心库均无环境包 ${String(targetProfileId || '').slice(0, 8) || '—'}…，由当前登录用户代原归属用户#${ownerUserId || '-'} 创建同名同配置环境「${sameName}」`,
+    'warn',
+    { accountId: aid },
+  );
+
+  const created = await provisionProfileForAccount(account, provider, {
+    asPrimary: true,
+    browserBackend: be,
+    ownerUserId,
+    name: sameName,
+    remark,
+    suffix: '',
+  });
+
+  const newPid = String(created.profileId || '').trim();
+  if (!newPid) throw new Error('代建环境未返回 ID');
+
+  liveLog(
+    `账号 #${aid}：已代建本地环境 ${newPid.slice(0, 8)}…（同名「${sameName}」，归属用户#${ownerUserId || '-'}），正在同步上线…`,
+    'info',
+    { accountId: aid },
+  );
+
+  const pushed = await pushLocalEnvPack(newPid, {
+    accountId: aid,
+    provider,
+  });
+  if (!pushed?.pushed) {
+    liveLog(
+      `账号 #${aid}：代建环境已绑定，但上传中心库失败：${pushed?.reason || 'unknown'}（本机仍可继续使用）`,
+      'warn',
+      { accountId: aid },
+    );
+  }
+
+  return {
+    hydrated: true,
+    provisioned: true,
+    profileId: newPid,
+    previousProfileId: String(targetProfileId || ''),
+    source: 'provisioned',
+    ownerUserId,
+  };
+}
+
+/**
+ * 目标环境就绪策略：本机 → 远程包 → 代建。
+ * @returns {Promise<{ hydrated: boolean, profileId: string, source?: string, reason?: string, provisioned?: boolean }>}
+ */
+async function ensureEnvReady(profileId, {
+  accountId = 0,
+  provider,
+  hostId: hostOverride = '',
+  bundle = null,
+  backend = '',
+  autoProvision = true,
+} = {}) {
+  const pid = String(profileId || '').trim();
+  if (!provider) return { hydrated: false, profileId: pid, reason: 'missing-provider' };
+  if (!supportsPackSync(provider)) {
+    const localOnly = await detailLocal(provider, pid);
+    if (localOnly) return { hydrated: false, profileId: pid, source: 'local', reason: 'already-local' };
+    if (autoProvision && accountId) {
+      return provisionReplacementEnv(pid, {
+        accountId,
+        provider,
+        bundle,
+        backend: backend || provider.backendId || 'tkswarm',
+      });
+    }
+    return { hydrated: false, profileId: pid, reason: 'backend-unsupported' };
+  }
+
+  // ① 本机已有 → 直接用
+  const local = await detailLocal(provider, pid);
+  if (local) {
+    return { hydrated: false, profileId: pid, source: 'local', reason: 'already-local' };
+  }
+
+  // ② 接口查远程包文件
+  let meta = null;
+  try {
+    meta = await fetchPackMeta(pid);
+  } catch (e) {
+    liveLog(
+      `账号 #${accountId || '-'}：查询环境包元数据失败：${e.message || e}`,
+      'warn',
+      { accountId },
+    );
+    meta = { exists: false, hasPack: false, profileId: pid };
+  }
+
+  // 有效包，或仅有包文件：优先拉包还原，避免误代建把绑定搅乱
+  if (meta?.hasPack || (meta?.packFileExists && Number(meta?.packBytes || 0) > 0)) {
+    try {
+      return await pullRemotePack(pid, {
+        accountId,
+        provider,
+        meta,
+        hostId: hostOverride,
+      });
+    } catch (e) {
+      liveLog(
+        `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8) || '—'}… 中心库有包但拉取失败（${e.message || e}），将尝试代建恢复`,
+        'warn',
+        { accountId },
+      );
+    }
+  }
+
+  liveLog(
+    `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8) || '—'}… 本机不存在，中心库也无可用环境包`,
+    'warn',
+    { accountId },
+  );
+
+  // ③ 无远程包 → 代建同名同配置并上线关联
+  if (!autoProvision) {
+    return { hydrated: false, profileId: pid, reason: 'no-cloud-pack' };
+  }
+  if (!accountId && !bundle?.id) {
+    return { hydrated: false, profileId: pid, reason: 'no-cloud-pack' };
+  }
+
+  return provisionReplacementEnv(pid, {
+    accountId: accountId || bundle.id,
+    provider,
+    bundle,
+    backend: backend || meta?.browserBackend || provider.backendId || 'tkswarm',
+    meta,
+  });
+}
+
+/**
+ * 兼容旧调用：仅做「本机缺失时 hydrate / 代建」。
+ */
+async function ensureLocalEnvHydrated(profileId, opts = {}) {
+  return ensureEnvReady(profileId, opts);
+}
+
+/**
+ * 含 Cookie 的会话包通常远大于此；过小多为关窗过早 / 空目录，禁止覆盖中心库好包。
+ * 可用 TKSWARM_ENV_PACK_MIN_BYTES 覆盖（默认 8KB）。
+ */
+function minEnvPackBytes() {
+  const n = Number(process.env.TKSWARM_ENV_PACK_MIN_BYTES);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return 8 * 1024;
+}
+
+/**
+ * 关闭后导出并上传中心库，然后释放租约。
+ * 失败只打日志，不抛（避免阻断关闭）。
+ * options.skipClose：勿关窗（调用方已关或窗口仍在任务中）；仍会尝试导出，失败则返回。
+ * options.forceTiny：允许上传小于 minEnvPackBytes 的包（默认拒绝，防 1KB 空包盖掉登录态）。
+ */
+async function pushLocalEnvPack(profileId, {
+  accountId = 0,
+  provider,
+  hostId: hostOverride = '',
+  skipClose = false,
+  forceTiny = false,
+} = {}) {
+  const pid = String(profileId || '').trim();
+  if (!pid || !provider || !supportsPackSync(provider)) {
+    return { pushed: false, reason: 'skip' };
+  }
+  // 本机无实体时不要去 export/upload，避免刷「环境不存在」误报（常见于批次仍记着旧 ID）
+  const local = await detailLocal(provider, pid).catch(() => null);
+  if (!local) {
+    liveLog(
+      `账号 #${accountId || '-'}：跳过环境包上传（本机无环境 ${pid.slice(0, 8)}…）`,
+      'info',
+      { accountId },
+    );
+    return { pushed: false, reason: 'not-local' };
+  }
+  const hid = String(hostOverride || hostId());
+  let exportPath = '';
+  let handoffPath = '';
+  try {
+    if (!skipClose) {
+      await provider.close(pid).catch(() => {});
+      // Cookie/SQLite 刷盘需要比「强杀进程」更长的时间；过短会打出 1KB 空包被中心库 422
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+    const exported = await provider.exportPack(pid);
+    exportPath = String(exported?.filePath || '').trim();
+    handoffPath = exportPath;
+    if (!exportPath || !fs.existsSync(exportPath)) {
+      throw new Error('本地导出未返回有效 filePath');
+    }
+    const kind = String(exported?.kind || '');
+    // 旧版自研浏览器可能回退成目录包；或路径落在中文目录导致 tar 失败。
+    // 同步只接受 .tgz：必要时在 ASCII 临时目录再打一包。
+    if (kind === 'tkpack' || fs.statSync(exportPath).isDirectory()) {
+      throw new Error(
+        '本地导出的是目录包(.tkpack)而非 .tgz。请升级/重启「第一页自研浏览器」到 1.0.41+（会话白名单打包）后再同步',
+      );
+    }
+    if (!/\.tgz$/i.test(exportPath)) {
+      throw new Error(`本地导出文件不是 .tgz：${path.basename(exportPath)}`);
+    }
+    // 必须以磁盘真实体积为准（exported.bytes 偶发虚高会漏过空包）
+    const localBytes = fs.statSync(exportPath).size;
+    const minBytes = minEnvPackBytes();
+    if (!forceTiny && minBytes > 0 && localBytes < minBytes) {
+      liveLog(
+        `账号 #${accountId || '-'}：环境包过小（${formatPackBytes(localBytes) || localBytes + 'B'} < ${formatPackBytes(minBytes)}），`
+        + `登录 Cookie 可能尚未刷到磁盘，已拒绝覆盖中心库（本机会话日志仍可用）`,
+        'warn',
+        { accountId },
+      );
+      return { pushed: false, reason: 'pack-too-small', bytes: localBytes };
+    }
+    // 若浏览器仍返回中文安装目录下的路径，说明客户端过旧；上传前必须拷到 ASCII Temp
+    const uploadTmp = path.join(os.tmpdir(), `tk-env-upload-${pid.slice(0, 12)}-${Date.now()}.tgz`);
+    fs.copyFileSync(exportPath, uploadTmp);
+    exportPath = uploadTmp;
+    const meta = await phpApi.uploadMultipart(
+      `/node/browser-profiles/${encodeURIComponent(pid)}/pack`,
+      exportPath,
+      { fields: { hostId: hid }, fileName: path.basename(exportPath) },
+    );
+    const bytes = Number(meta?.packBytes || exported.bytes || localBytes || 0) || 0;
+    liveLog(
+      `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 已原名替换中心库包 ${pid.replace(/[^a-zA-Z0-9_-]/g, '') || pid.slice(0, 12)}.tgz`
+      + `（rev ${meta?.packRevision || '?'}，${formatPackBytes(bytes) || `${Math.round(bytes / 1024)}KB`}）`,
+      'info',
+      { accountId },
+    );
+    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
+      hostId: hid,
+    }).catch(() => {});
+    return { pushed: true, meta };
+  } catch (e) {
+    let msg = String(e.message || e);
+    // 旧客户端把含中文的绝对路径喂给 tar.exe 时的典型乱码
+    if (/Failed to open|datalexports|tar\.?exe/i.test(msg) && /[^\x00-\x7F]|\?\?/.test(msg)) {
+      msg = `${msg}（安装目录含中文/空格时 Windows tar 会失败：请升级「第一页自研浏览器」到 1.0.36+，将改用 Node 打包并走 Temp 纯英文路径）`;
+    }
+    liveLog(
+      `账号 #${accountId || '-'}：环境包上传失败：${msg}`,
+      'warn',
+      { accountId },
+    );
+    return { pushed: false, reason: msg };
+  } finally {
+    for (const p of [exportPath, handoffPath]) {
+      if (p && /[\\/](tk-env-upload-|tk-pack-out-)/.test(p)) {
+        try { fs.unlinkSync(p); } catch { /* */ }
+      }
+    }
+  }
+}
+
+/**
+ * 打开前：按策略就绪环境；本机可用时再占租约（防双机）。
+ * 可能返回新的 profileId（代建替换时）。
+ */
+async function prepareEnvForOpen(profileId, opts = {}) {
+  const pid = String(profileId || '').trim();
+  const { accountId = 0, provider } = opts;
+  if (!pid || !provider) return { profileId: pid, hydrated: false };
+
+  const result = await ensureEnvReady(pid, opts);
+  const readyId = String(result.profileId || pid).trim();
+  if (!supportsPackSync(provider)) return { ...result, profileId: readyId };
+
+  const local = await detailLocal(provider, readyId);
+  if (!local) {
+    return { ...result, profileId: readyId, lease: false };
+  }
+
+  // 本机可用：占租约，避免另一台同时开
+  const hid = String(opts.hostId || hostId());
+  try {
+    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(readyId)}/pack-lease`, {
+      hostId: hid,
+      leaseSeconds: 7200,
+    });
+  } catch (e) {
+    const msg = String(e.message || e);
+    // 无绑定行时 pack-lease 404 — 忽略，交给后续创建
+    if (/不存在|404/i.test(msg) && !/其它主机/i.test(msg)) {
+      return { ...result, profileId: readyId, lease: false };
+    }
+    if (/其它主机/i.test(msg)) throw new Error(msg);
+    liveLog(
+      `账号 #${accountId || '-'}：占用环境租约告警：${msg}`,
+      'warn',
+      { accountId },
+    );
+  }
+  return { ...result, profileId: readyId, lease: true };
+}
+
+/**
+ * 缺包自愈：本机有环境 → 静默导出上传；本机无 → 代建同名同配置后上传。
+ * 不打开 TikTok 页面，仅操作本地浏览器环境实体。
+ */
+async function healPushOrRegenerate(profileId, {
+  accountId = 0,
+  provider,
+  backend = 'tkswarm',
+  bundle = null,
+  meta = null,
+} = {}) {
+  const pid = String(profileId || '').trim();
+  if (!pid || !provider) {
+    return { ok: false, reason: 'missing-profile-or-provider', profileId: pid };
+  }
+  if (!supportsPackSync(provider)) {
+    return { ok: false, reason: 'backend-unsupported', profileId: pid };
+  }
+
+  const local = await detailLocal(provider, pid);
+  if (local) {
+    liveLog(
+      `账号 #${accountId || '-'}：缺包补齐 · 本机已有环境 ${pid.slice(0, 8)}…，静默上传中心库`,
+      'info',
+      { accountId },
+    );
+    const pushed = await pushLocalEnvPack(pid, { accountId, provider });
+    if (!pushed?.pushed) {
+      return {
+        ok: false,
+        reason: pushed?.reason || 'upload-failed',
+        profileId: pid,
+        source: 'local-upload',
+      };
+    }
+    return {
+      ok: true,
+      pushed: true,
+      profileId: pid,
+      previousProfileId: pid,
+      source: 'local-upload',
+      meta: pushed.meta || null,
+    };
+  }
+
+  liveLog(
+    `账号 #${accountId || '-'}：缺包补齐 · 本机无环境 ${pid.slice(0, 8)}…，将重建后上传`,
+    'warn',
+    { accountId },
+  );
+
+  let remoteMeta = meta;
+  if (!remoteMeta) {
+    try {
+      remoteMeta = await fetchPackMeta(pid);
+    } catch {
+      remoteMeta = { exists: true, hasPack: false, profileId: pid };
+    }
+  }
+
+  const provisioned = await provisionReplacementEnv(pid, {
+    accountId,
+    provider,
+    bundle,
+    backend: backend || provider.backendId || 'tkswarm',
+    meta: remoteMeta,
+  });
+  const readyId = String(provisioned.profileId || '').trim();
+  if (!readyId) {
+    return { ok: false, reason: 'provision-failed', profileId: pid, previousProfileId: pid };
+  }
+  // provision 内已尝试 push；再补一次确保中心库有文件（已有则覆盖 revision）
+  const again = await pushLocalEnvPack(readyId, { accountId, provider });
+  if (!again?.pushed && again?.reason !== 'not-local') {
+    // 若第一次 push 已成功、第二次因瞬时失败，仍以 meta 为准
+    let hasPack = false;
+    try {
+      const m = await fetchPackMeta(readyId);
+      hasPack = !!m?.hasPack;
+    } catch { /* ignore */ }
+    if (!hasPack) {
+      return {
+        ok: false,
+        reason: again?.reason || 'upload-failed-after-provision',
+        profileId: readyId,
+        previousProfileId: pid,
+        source: provisioned.source || 'provisioned',
+        provisioned: true,
+      };
+    }
+  }
+  return {
+    ok: true,
+    pushed: true,
+    profileId: readyId,
+    previousProfileId: pid,
+    source: provisioned.source || 'provisioned',
+    provisioned: true,
+    reused: !!provisioned.reused,
+  };
+}
+
+module.exports = {
+  hostId,
+  supportsPackSync,
+  fetchPackMeta,
+  ensureEnvReady,
+  ensureLocalEnvHydrated,
+  pushLocalEnvPack,
+  prepareEnvForOpen,
+  healPushOrRegenerate,
+};

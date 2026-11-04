@@ -642,10 +642,9 @@ else
 fi
 echo
 echo "  下一步:"
-echo "    1. 浏览器打开 Web 控制台，用 TkSwarm 账号登录"
-echo "    2. 复制页面上的 API Token"
-echo "    3. 在 tkswarm-node 设置 browserApiUrl=http://${SERVER_IP:-LinuxIP}:${TKSWARM_BROWSER_PORT}"
-echo "       browserApiToken=<Token>，browserBackend=tkswarm 或 auto"
+echo "    1. 浏览器打开 Web 控制台，用 TkSwarm 账号登录（内置执行器用该会话调中心 API）"
+echo "    2. 打开 /tasks：「执行队列」应显示空闲 0/3；待执行会自动领取（最多 3 路，核心在 src/executor）"
+echo "    3. 无需另起 tkswarm-node；桌面员工机 Node 只跑桌面任务"
 echo "  日常更新: sudo bash ${TKSWARM_APP_DIR}/deploy/update-ubuntu.sh"
 echo "  查看日志: journalctl -u ${TKSWARM_SERVICE_NAME} -f"
 echo

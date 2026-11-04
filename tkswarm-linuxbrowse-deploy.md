@@ -183,11 +183,10 @@ journalctl -u tkswarm-linuxbrowse -f
 
 1. 用 **tkswarm-api 同一套账号密码** 登录  
 2. 复制页面上的 **API Token**  
-3. Node 设置：
-   - `browserApiUrl` = `http://<Linux主机>:54345`
-   - `browserApiToken` = 上一步 Token  
-   - `browserBackend` = `tkswarm` 或 `auto`  
-4. Node「检测」应显示 **第一页自研浏览器 Linux**（及 hostId）
+3. **任务执行（已内置在 `src/executor`，无需旁路 tkswarm-node）**  
+   - 本服务启动后自动跑最多 3 路队列：从中心 API 领取 `cs_seat` / linux 拓客并本机开窗执行  
+   - 控制台登录后打开 `/tasks`，横幅应显示「执行队列：空闲 0/3」  
+4. 桌面员工机上的 tkswarm-node 仍只跑桌面任务；服务器浏览器任务由本机 linuxbrowse 独占领取
 
 冒烟（服务已起）：
 

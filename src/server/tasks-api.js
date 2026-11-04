@@ -4,10 +4,11 @@
  * - 中心库 /api/tasks：仅 ai_lead / ai_lead_dm（禁止 publish / warm 等）
  */
 const express = require('express');
-const { TKSWARM_API_BASE, TKSWARM_NODE_BASE } = require('../config');
+const { TKSWARM_API_BASE } = require('../config');
 const { readSettings, resolveRequestUser, extractBearer } = require('../settings');
 const { assertTokenAlive } = require('../auth/token-guard');
 const db = require('../db');
+const worker = require('../worker');
 
 const router = express.Router();
 
@@ -501,75 +502,47 @@ router.post('/api/tasks/:id/action', async (req, res) => {
       });
     }
 
-    // 与同机 Node 服务器浏览器队列联动：重试入队 / 强制关停打断
-    let nodeKick = null;
-    if (!useCenter && TKSWARM_NODE_BASE) {
+    // 本进程内置队列：重试入队 / 强制关停（不再转发同机 tkswarm-node）
+    let workerKick = null;
+    if (!useCenter) {
       const batchId = /^awb-/i.test(raw)
         ? (Number(String(raw).replace(/^awb-/i, '')) || 0)
         : (target.batchId || Number(raw) || 0);
       if (batchId > 0) {
-        const headers = {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        };
         try {
           if (action === 'reset' || action === 'retry' || action === 'resume') {
-            const nr = await fetch(`${TKSWARM_NODE_BASE}/api/executor/run-batch`, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({ batchId }),
-            });
-            const nj = await nr.json().catch(() => ({}));
-            // 再踢一次补位，确保其它 pending 也进入最多 3 路队列
-            await fetch(`${TKSWARM_NODE_BASE}/api/executor/server-browser-tick`, {
-              method: 'POST',
-              headers,
-              body: '{}',
-            }).catch(() => null);
-            nodeKick = {
-              ok: nr.ok && (nj.success === true || nj.ok === true || nj.code === 0 || nj.code === 200),
-              status: nr.status,
-              message: nj.message || nj.msg || '',
-              data: nj.data || nj,
-            };
+            if (token) process.env.TKSWARM_API_TOKEN = token;
+            const out = await worker.kickBatch(batchId);
+            await worker.fillSlots().catch(() => {});
+            workerKick = { ok: true, data: out };
           } else if (action === 'fail' || action === 'force-fail') {
-            const nr = await fetch(`${TKSWARM_NODE_BASE}/api/executor/server-browser-stop`, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                batchId,
-                reason: body.errorMessage || '服务器浏览器手动强制失败',
-              }),
-            });
-            const nj = await nr.json().catch(() => ({}));
-            nodeKick = {
-              ok: nr.ok && (nj.success === true || nj.ok === true || nj.code === 0 || nj.code === 200),
-              status: nr.status,
-              message: nj.message || nj.msg || '',
-            };
+            const out = await worker.forceStop(
+              batchId,
+              body.errorMessage || '服务器浏览器手动强制失败',
+            );
+            workerKick = { ok: true, data: out };
           }
         } catch (e) {
-          nodeKick = { ok: false, message: e.message || '无法连接 Node' };
+          workerKick = { ok: false, message: e.message || '本机执行器失败' };
         }
       }
     }
 
-    const kicked = nodeKick?.ok;
+    const kicked = workerKick?.ok;
     let message = r.json?.message || '操作成功';
     if (kicked && (action === 'reset' || action === 'retry' || action === 'resume')) {
-      message = `${message}，已进入服务器浏览器执行队列（最多 3 路）`;
+      message = `${message}，已进入本机执行队列（最多 3 路）`;
     } else if (kicked && (action === 'fail' || action === 'force-fail')) {
-      message = `${message}，已通知 Node 强制关停`;
-    } else if (nodeKick && !kicked && nodeKick.message) {
-      message = `${message}（Node：${nodeKick.message}）`;
+      message = `${message}，已强制关停`;
+    } else if (workerKick && !kicked && workerKick.message) {
+      message = `${message}（执行器：${workerKick.message}）`;
     }
     return res.json({
       ok: true,
       action,
       message,
       data: r.data,
-      nodeKick,
+      workerKick,
     });
   } catch (e) {
     return res.status(502).json({ ok: false, message: e.message || '无法连接中心 API' });
@@ -578,31 +551,22 @@ router.post('/api/tasks/:id/action', async (req, res) => {
 
 /**
  * GET /api/executor-queue
- * 服务器浏览器执行队列状态（转发同机 Node）
+ * 本机内置执行队列状态（最多 3 路）
  */
 router.get('/api/executor-queue', async (req, res) => {
   const user = await requireUser(req, res);
   if (!user) return;
-  if (!TKSWARM_NODE_BASE) {
-    return res.json({ ok: false, message: '未配置 TKSWARM_NODE_BASE' });
-  }
   try {
     const token = authToken(req, user);
-    const nr = await fetch(`${TKSWARM_NODE_BASE}/api/executor/server-browser-queue`, {
-      headers: {
-        Accept: 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-    });
-    const nj = await nr.json().catch(() => ({}));
-    const data = nj.data || nj;
+    if (token) process.env.TKSWARM_API_TOKEN = token;
+    const data = worker.stats();
     return res.json({
-      ok: nr.ok,
-      message: nj.message || '',
+      ok: data.ok !== false,
+      message: data.message || '',
       ...data,
     });
   } catch (e) {
-    return res.json({ ok: false, message: e.message || '无法连接 Node 队列' });
+    return res.json({ ok: false, message: e.message || '执行队列不可用' });
   }
 });
 

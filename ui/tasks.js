@@ -358,7 +358,7 @@ async function refreshQueueBanner() {
     const j = await json('GET', '/api/executor-queue');
     if (!j.ok && j.message) {
       el.className = 'panel-desc queue-banner is-err';
-      el.textContent = `执行队列离线：${j.message}（请确认同机 Node 已启动，且 TKSWARM_NODE_BASE 正确）`;
+      el.textContent = `执行队列离线：${j.message}（请查看 journalctl 中 [worker]/[executor] 日志）`;
       return;
     }
     const max = Number(j.maxConcurrent || 3);
