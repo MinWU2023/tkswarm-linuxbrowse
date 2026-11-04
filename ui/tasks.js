@@ -344,9 +344,34 @@ function updateLogDrawerSub(taskKey, extra = '') {
 function resolveLogPollMs() {
   const row = state.items.find((x) => taskKeyOf(x) === logViewer.taskKey);
   const st = String(row?.status || '');
-  if (['running', 'queued', 'pending'].includes(st)) return 800;
+  // 运行中接近实时；待执行也要较快，便于看到「队列启动」日志
+  if (st === 'running') return 500;
+  if (['queued', 'pending'].includes(st)) return 800;
   if (st === 'paused') return 2000;
   return 2500;
+}
+
+async function refreshQueueBanner() {
+  const el = document.getElementById('queue-banner');
+  if (!el) return;
+  try {
+    const j = await json('GET', '/api/executor-queue');
+    if (!j.ok && j.message) {
+      el.className = 'panel-desc queue-banner is-err';
+      el.textContent = `执行队列离线：${j.message}（请确认同机 Node 已启动，且 TKSWARM_NODE_BASE 正确）`;
+      return;
+    }
+    const max = Number(j.maxConcurrent || 3);
+    const run = Number(j.running || 0);
+    const ids = Array.isArray(j.runningBatchIds) ? j.runningBatchIds : [];
+    el.className = 'panel-desc queue-banner' + (run > 0 ? ' is-live' : '');
+    el.textContent = run > 0
+      ? `执行队列：运行中 ${run}/${max}${ids.length ? ` · #${ids.join(', #')}` : ''} · 跑完自动补位 · 每任务实时写日志`
+      : `执行队列：空闲 0/${max} · 待执行任务会自动领取（最多 ${max} 路并发）· 支持重试 / 强制关停`;
+  } catch (e) {
+    el.className = 'panel-desc queue-banner is-err';
+    el.textContent = `执行队列不可用：${e.message || e}`;
+  }
 }
 
 function startLogPoll(taskKey, { fast = false } = {}) {
@@ -461,6 +486,7 @@ async function loadTasks() {
     state.pageSize = Number(j.pageSize || state.pageSize);
     renderRows(j.items || []);
     renderPager();
+    refreshQueueBanner();
   } catch (e) {
     body.innerHTML = `<tr><td colspan="8" class="empty">${esc(e.message || '网络错误')}</td></tr>`;
     toast(e.message || '网络错误', 'err');
@@ -611,7 +637,10 @@ async function boot() {
 
   setInterval(() => {
     if (!document.getElementById('tasks-panel')?.classList.contains('hidden')) loadTasks();
-  }, 15000);
+  }, 8000);
+  setInterval(() => {
+    if (!document.getElementById('tasks-panel')?.classList.contains('hidden')) refreshQueueBanner();
+  }, 3000);
 }
 
 boot().catch((e) => {
