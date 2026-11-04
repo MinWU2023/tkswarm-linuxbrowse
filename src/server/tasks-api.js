@@ -647,6 +647,52 @@ router.get('/api/debug/env-packs', async (req, res) => {
 });
 
 /**
+ * POST /api/tasks/:id/logs/clear
+ * 清空中心库该总任务（或指定分任务）的执行日志
+ */
+router.post('/api/tasks/:id/logs/clear', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+
+  const raw = String(req.params.id || '').trim();
+  const base = apiBase();
+  if (!base) {
+    return res.json({ ok: false, message: '未配置中心 API 地址（TKSWARM_API_BASE）' });
+  }
+  const token = authToken(req, user);
+  let batchId = 0;
+  if (/^awb-/i.test(raw)) {
+    batchId = Number(String(raw).replace(/^awb-/i, '')) || 0;
+  } else if (/^\d+$/.test(raw)) {
+    batchId = Number(raw) || 0;
+  }
+  if (batchId < 1) {
+    return res.status(400).json({ ok: false, message: '无效总任务 ID（仅支持矩阵任务清空日志）' });
+  }
+  const itemId = Number(req.body?.itemId || req.query?.itemId || 0) || 0;
+  try {
+    const r = await upstreamPost(base, `/account-work-batches/${batchId}/logs/clear`, token, {
+      itemId,
+    });
+    if (!r.ok) {
+      return res.status(r.upstream?.status >= 400 ? r.upstream.status : 502).json({
+        ok: false,
+        message: r.json?.message || r.json?.msg || '清空日志失败',
+      });
+    }
+    return res.json({
+      ok: true,
+      message: r.json?.message || '日志已清空',
+      batchId,
+      itemId,
+      deleted: Number(r.data?.deleted || 0),
+    });
+  } catch (e) {
+    return res.status(502).json({ ok: false, message: e.message || '清空日志失败' });
+  }
+});
+
+/**
  * GET /api/tasks/:id/logs
  * id: awb-123 | 123（矩阵总任务）或中心库任务数字 ID
  * 实时日志来自中心库 account_work_logs / 任务事件；本服务不做落库。

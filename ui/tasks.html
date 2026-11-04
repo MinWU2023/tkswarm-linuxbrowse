@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=4.4" />
+  <link rel="stylesheet" href="style.css?v=4.5" />
   <link rel="stylesheet" href="theme-premium.css?v=1.0" />
   <style>
     body.booting #login-panel,
@@ -145,7 +145,8 @@
         <p id="log-drawer-sub" class="panel-desc">实时拉取中心库日志（与 Node 同源）</p>
       </div>
       <div class="panel-actions">
-        <button type="button" class="btn ghost" id="btn-log-refresh">刷新日志</button>
+        <button type="button" class="btn ghost" id="btn-log-refresh">刷新</button>
+        <button type="button" class="btn ghost" id="btn-log-clear">清空日志</button>
         <button type="button" class="btn ghost" id="btn-log-close">关闭</button>
       </div>
     </div>
@@ -154,6 +155,6 @@
     </div>
   </aside>
   <div id="toast-host" aria-live="polite"></div>
-  <script src="tasks.js?v=10"></script>
+  <script src="tasks.js?v=11"></script>
 </body>
 </html>

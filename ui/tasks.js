@@ -634,6 +634,25 @@ async function boot() {
       toast(e.message || '刷新失败', 'err');
     }
   };
+  document.getElementById('btn-log-clear').onclick = async () => {
+    const taskKey = logViewer.taskKey;
+    if (!taskKey) return;
+    if (!window.confirm('确认清空该任务在中心库的执行日志？此操作不可恢复。')) return;
+    try {
+      const j = await json('POST', `/api/tasks/${encodeURIComponent(taskKey)}/logs/clear`, {});
+      if (!j.ok) {
+        toast(j.message || '清空失败', 'err');
+        return;
+      }
+      logCache.delete(taskKey);
+      logViewer.lastFingerprint = '';
+      renderLogBody([], { force: true });
+      updateLogDrawerSub(taskKey, j.deleted ? `已删 ${j.deleted} 条` : '已清空');
+      toast(j.message || '日志已清空', 'ok');
+    } catch (e) {
+      toast(e.message || '清空失败', 'err');
+    }
+  };
 
   setInterval(() => {
     if (!document.getElementById('tasks-panel')?.classList.contains('hidden')) loadTasks();

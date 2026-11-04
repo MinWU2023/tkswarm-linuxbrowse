@@ -756,7 +756,7 @@ code {
   position: fixed;
   top: 0;
   right: 0;
-  width: min(440px, 100vw);
+  width: min(800px, 100vw);
   height: 100vh;
   z-index: 80;
   display: flex;
