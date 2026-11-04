@@ -4,7 +4,7 @@
  * - 中心库 /api/tasks：仅 ai_lead / ai_lead_dm（禁止 publish / warm 等）
  */
 const express = require('express');
-const { TKSWARM_API_BASE } = require('../config');
+const { TKSWARM_API_BASE, TKSWARM_NODE_BASE } = require('../config');
 const { readSettings, resolveRequestUser, extractBearer } = require('../settings');
 const { assertTokenAlive } = require('../auth/token-guard');
 const db = require('../db');
@@ -500,11 +500,45 @@ router.post('/api/tasks/:id/action', async (req, res) => {
         message: r.json?.message || r.json?.msg || '操作失败',
       });
     }
+
+    // 重试/恢复后立刻通知同机 Node 领取执行（不等 5s tick，也不依赖前台「任务执行」开关）
+    let nodeKick = null;
+    if ((action === 'reset' || action === 'retry' || action === 'resume') && !useCenter) {
+      const batchId = /^awb-/i.test(raw)
+        ? (Number(String(raw).replace(/^awb-/i, '')) || 0)
+        : (target.batchId || Number(raw) || 0);
+      if (batchId > 0 && TKSWARM_NODE_BASE) {
+        try {
+          const nr = await fetch(`${TKSWARM_NODE_BASE}/api/executor/run-batch`, {
+            method: 'POST',
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ batchId }),
+          });
+          const nj = await nr.json().catch(() => ({}));
+          nodeKick = {
+            ok: nr.ok && (nj.success === true || nj.ok === true || nj.code === 0 || nj.code === 200),
+            status: nr.status,
+            message: nj.message || nj.msg || '',
+          };
+        } catch (e) {
+          nodeKick = { ok: false, message: e.message || '无法连接 Node' };
+        }
+      }
+    }
+
+    const kicked = nodeKick?.ok;
     return res.json({
       ok: true,
       action,
-      message: r.json?.message || '操作成功',
+      message: kicked
+        ? `${r.json?.message || '操作成功'}，已通知 Node 开始执行`
+        : (r.json?.message || '操作成功'),
       data: r.data,
+      nodeKick,
     });
   } catch (e) {
     return res.status(502).json({ ok: false, message: e.message || '无法连接中心 API' });

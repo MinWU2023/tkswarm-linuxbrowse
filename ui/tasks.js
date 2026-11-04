@@ -13,14 +13,18 @@ let state = {
   items: [],
 };
 
-/** 仅内存：刷新页面即清空 */
+/** 仅内存：加速首屏展示；真正数据以中心库轮询为准 */
 const logCache = new Map();
 let logViewer = {
   open: false,
   taskKey: '',
   title: '',
   itemId: 0,
+  /** 矩阵总任务看整批日志（含登录准备）；itemId 仅作高亮提示 */
+  pollBatch: true,
+  lastFingerprint: '',
   pollTimer: null,
+  pollMs: 1000,
 };
 
 function getToken() {
@@ -253,6 +257,27 @@ async function runTaskAction(action, taskKey, kind, row) {
       return;
     }
     toast(j.message || `已${label}`, 'ok');
+    // 重试/恢复后立刻清缓存并拉新日志（抽屉开着时不能继续只显示失败前的老记录）
+    if (action === 'retry' || action === 'resume') {
+      logCache.delete(taskKey);
+      if (logViewer.open && logViewer.taskKey === taskKey) {
+        logViewer.lastFingerprint = '';
+        const host = document.getElementById('log-drawer-body');
+        if (host) {
+          const mark = document.createElement('div');
+          mark.className = 'log-line log-mark';
+          mark.innerHTML = `<span class="t">${esc(formatLogTime(new Date().toISOString().replace('T', ' ').slice(0, 19)))}</span>`
+            + `<span class="lv info">info</span>`
+            + `<span class="msg">—— 已${label}，正在拉取最新执行日志 ——</span>`;
+          host.appendChild(mark);
+          host.scrollTop = host.scrollHeight;
+        }
+        startLogPoll(taskKey, { fast: true });
+        fetchTaskLogs(taskKey, 0, { silent: true }).then((lines) => {
+          if (logViewer.taskKey === taskKey) renderLogBody(lines, { force: true });
+        }).catch(() => {});
+      }
+    }
     await loadTasks();
   } catch (e) {
     toast(e.message || `${label}失败`, 'err');
@@ -273,10 +298,21 @@ function formatLogTime(s) {
   return t || '--:--:--';
 }
 
-function renderLogBody(lines) {
+function logFingerprint(lines) {
+  if (!lines?.length) return '0';
+  const last = lines[lines.length - 1] || {};
+  return `${lines.length}:${last.id || ''}:${last.created_at || ''}:${String(last.message || '').slice(0, 40)}`;
+}
+
+function renderLogBody(lines, { force = false } = {}) {
   const host = document.getElementById('log-drawer-body');
+  if (!host) return;
+  const fp = logFingerprint(lines);
+  if (!force && fp === logViewer.lastFingerprint) return;
+  logViewer.lastFingerprint = fp;
+  const nearBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 80;
   if (!lines.length) {
-    host.innerHTML = `<p class="log-empty">暂无日志（入队后会出现；执行过程中自动刷新）</p>`;
+    host.innerHTML = `<p class="log-empty">暂无日志（入队/重试后会出现；执行中约每秒自动刷新）</p>`;
     return;
   }
   host.innerHTML = lines.map((row) => {
@@ -287,30 +323,69 @@ function renderLogBody(lines) {
       <span class="msg">${esc(row.message || '')}</span>
     </div>`;
   }).join('');
-  host.scrollTop = host.scrollHeight;
+  if (nearBottom || force) host.scrollTop = host.scrollHeight;
 }
 
 function stopLogPoll() {
   if (logViewer.pollTimer) {
+    clearTimeout(logViewer.pollTimer);
     clearInterval(logViewer.pollTimer);
     logViewer.pollTimer = null;
   }
+}
+
+function updateLogDrawerSub(taskKey, extra = '') {
+  const el = document.getElementById('log-drawer-sub');
+  if (!el) return;
+  const live = logViewer.pollTimer ? '实时刷新中' : '已暂停刷新';
+  el.textContent = `${taskKey} · ${live}（中心库日志，与 Node 同源）${extra ? ` · ${extra}` : ''}`;
+}
+
+function resolveLogPollMs() {
+  const row = state.items.find((x) => taskKeyOf(x) === logViewer.taskKey);
+  const st = String(row?.status || '');
+  if (['running', 'queued', 'pending'].includes(st)) return 800;
+  if (st === 'paused') return 2000;
+  return 2500;
+}
+
+function startLogPoll(taskKey, { fast = false } = {}) {
+  stopLogPoll();
+  const tick = async () => {
+    if (!logViewer.open || logViewer.taskKey !== taskKey) return;
+    try {
+      // 矩阵总任务：始终拉整批，避免「登录准备」等 itemId=0 的日志被过滤掉，重试后看起来像老日志
+      const lines = await fetchTaskLogs(taskKey, 0, { silent: true });
+      if (logViewer.taskKey === taskKey) {
+        renderLogBody(lines);
+        updateLogDrawerSub(taskKey);
+      }
+    } catch { /* ignore */ }
+    if (!logViewer.open || logViewer.taskKey !== taskKey) return;
+    const ms = fast ? 800 : resolveLogPollMs();
+    logViewer.pollMs = ms;
+    logViewer.pollTimer = setTimeout(tick, ms);
+  };
+  logViewer.pollTimer = setTimeout(tick, fast ? 200 : 0);
 }
 
 function closeLogDrawer() {
   stopLogPoll();
   logViewer.open = false;
   logViewer.taskKey = '';
+  logViewer.lastFingerprint = '';
   show('#log-drawer', false);
   document.getElementById('log-drawer')?.setAttribute('aria-hidden', 'true');
   document.querySelectorAll('tr.task-row.is-active').forEach((el) => el.classList.remove('is-active'));
 }
 
 async function fetchTaskLogs(taskKey, itemId = 0, { silent = false } = {}) {
-  const qs = new URLSearchParams({ limit: '300' });
+  const qs = new URLSearchParams({ limit: '400' });
+  // 默认不带 itemId：与 Node 任务日志一致看整批；仅显式 >0 时过滤
   if (itemId > 0) qs.set('itemId', String(itemId));
   const res = await fetch(`${API}/api/tasks/${encodeURIComponent(taskKey)}/logs?${qs}`, {
     headers: authHeaders(),
+    cache: 'no-store',
   });
   const j = await res.json();
   if (!j.ok) {
@@ -318,7 +393,7 @@ async function fetchTaskLogs(taskKey, itemId = 0, { silent = false } = {}) {
     return [];
   }
   const lines = Array.isArray(j.items) ? j.items : [];
-  logCache.set(taskKey, { lines, at: Date.now(), itemId });
+  logCache.set(taskKey, { lines, at: Date.now(), itemId: 0 });
   return lines;
 }
 
@@ -329,9 +404,11 @@ async function openLogDrawer(row, itemId = 0) {
   logViewer.taskKey = key;
   logViewer.title = title;
   logViewer.itemId = itemId || Number(row.workItemId || 0) || 0;
+  logViewer.pollBatch = true;
+  logViewer.lastFingerprint = '';
 
   document.getElementById('log-drawer-title').textContent = title;
-  document.getElementById('log-drawer-sub').textContent = `${key} · 内存缓存 · 刷新页面后清空`;
+  updateLogDrawerSub(key, '加载中');
   show('#log-drawer', true);
   document.getElementById('log-drawer')?.setAttribute('aria-hidden', 'false');
   document.querySelectorAll('tr.task-row').forEach((el) => {
@@ -339,26 +416,20 @@ async function openLogDrawer(row, itemId = 0) {
   });
 
   const cached = logCache.get(key);
-  if (cached?.lines?.length) renderLogBody(cached.lines);
+  if (cached?.lines?.length) renderLogBody(cached.lines, { force: true });
   else document.getElementById('log-drawer-body').innerHTML = `<p class="log-empty">加载日志中…</p>`;
 
   try {
-    const lines = await fetchTaskLogs(key, logViewer.itemId);
-    if (logViewer.taskKey === key) renderLogBody(lines);
+    const lines = await fetchTaskLogs(key, 0);
+    if (logViewer.taskKey === key) renderLogBody(lines, { force: true });
   } catch (e) {
     if (logViewer.taskKey === key) {
       document.getElementById('log-drawer-body').innerHTML = `<p class="log-empty">${esc(e.message || '加载失败')}</p>`;
     }
   }
 
-  stopLogPoll();
-  logViewer.pollTimer = setInterval(async () => {
-    if (!logViewer.open || logViewer.taskKey !== key) return;
-    try {
-      const lines = await fetchTaskLogs(key, logViewer.itemId, { silent: true });
-      if (logViewer.taskKey === key) renderLogBody(lines);
-    } catch { /* ignore poll errors */ }
-  }, 2500);
+  startLogPoll(key, { fast: true });
+  updateLogDrawerSub(key);
 }
 
 async function loadTasks() {
@@ -526,8 +597,12 @@ async function boot() {
   document.getElementById('btn-log-refresh').onclick = async () => {
     if (!logViewer.taskKey) return;
     try {
-      const lines = await fetchTaskLogs(logViewer.taskKey, logViewer.itemId);
-      renderLogBody(lines);
+      logCache.delete(logViewer.taskKey);
+      logViewer.lastFingerprint = '';
+      const lines = await fetchTaskLogs(logViewer.taskKey, 0);
+      renderLogBody(lines, { force: true });
+      startLogPoll(logViewer.taskKey, { fast: true });
+      updateLogDrawerSub(logViewer.taskKey);
       toast('日志已刷新', 'ok');
     } catch (e) {
       toast(e.message || '刷新失败', 'err');
