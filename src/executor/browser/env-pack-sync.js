@@ -413,8 +413,9 @@ async function ensureLocalEnvHydrated(profileId, opts = {}) {
 }
 
 /**
- * 含 Cookie 的会话包通常远大于此；过小多为关窗过早 / 空目录，禁止覆盖中心库好包。
- * 可用 TKSWARM_ENV_PACK_MIN_BYTES 覆盖（默认 8KB）。
+ * 含 Cookie 的会话包通常远大于此；过小仅打警告，默认仍上传（产品要求：过小也要传）。
+ * 设 TKSWARM_ENV_PACK_REJECT_TINY=1 可恢复「过小拒传」；
+ * TKSWARM_ENV_PACK_MIN_BYTES 控制告警阈值（默认 8KB）。
  */
 function minEnvPackBytes() {
   const n = Number(process.env.TKSWARM_ENV_PACK_MIN_BYTES);
@@ -422,11 +423,16 @@ function minEnvPackBytes() {
   return 8 * 1024;
 }
 
+function rejectTinyEnvPack() {
+  const v = String(process.env.TKSWARM_ENV_PACK_REJECT_TINY || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on';
+}
+
 /**
  * 关闭后导出并上传中心库，然后释放租约。
  * 失败只打日志，不抛（避免阻断关闭）。
  * options.skipClose：勿关窗（调用方已关或窗口仍在任务中）；仍会尝试导出，失败则返回。
- * options.forceTiny：允许上传小于 minEnvPackBytes 的包（默认拒绝，防 1KB 空包盖掉登录态）。
+ * options.forceTiny：兼容旧参数（现默认过小也会传；仅 REJECT_TINY=1 时有用）。
  */
 async function pushLocalEnvPack(profileId, {
   accountId = 0,
@@ -478,14 +484,23 @@ async function pushLocalEnvPack(profileId, {
     // 必须以磁盘真实体积为准（exported.bytes 偶发虚高会漏过空包）
     const localBytes = fs.statSync(exportPath).size;
     const minBytes = minEnvPackBytes();
-    if (!forceTiny && minBytes > 0 && localBytes < minBytes) {
+    const tooSmall = minBytes > 0 && localBytes < minBytes;
+    if (tooSmall && rejectTinyEnvPack() && !forceTiny) {
       liveLog(
         `账号 #${accountId || '-'}：环境包过小（${formatPackBytes(localBytes) || localBytes + 'B'} < ${formatPackBytes(minBytes)}），`
-        + `登录 Cookie 可能尚未刷到磁盘，已拒绝覆盖中心库（本机会话日志仍可用）`,
+        + `已拒绝覆盖中心库（TKSWARM_ENV_PACK_REJECT_TINY=1）`,
         'warn',
         { accountId },
       );
       return { pushed: false, reason: 'pack-too-small', bytes: localBytes };
+    }
+    if (tooSmall) {
+      liveLog(
+        `账号 #${accountId || '-'}：环境包过小（${formatPackBytes(localBytes) || localBytes + 'B'} < ${formatPackBytes(minBytes)}），`
+        + `仍上传覆盖中心库（Cookie 可能未刷全，以本机会话日志为准）`,
+        'warn',
+        { accountId },
+      );
     }
     // 若浏览器仍返回中文安装目录下的路径，说明客户端过旧；上传前必须拷到 ASCII Temp
     const uploadTmp = path.join(os.tmpdir(), `tk-env-upload-${pid.slice(0, 12)}-${Date.now()}.tgz`);
