@@ -94,13 +94,9 @@ function packLeaseWaitMs() {
   return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
 }
 
-function packLeasePollMs() {
-  const n = Number(process.env.TKSWARM_PACK_LEASE_POLL_MS);
-  return Number.isFinite(n) && n > 0 ? n : 3000;
-}
-
 /**
- * 占用跨机租约；若对方占用则轮询等待其登录完成并释放，再自动取得锁。
+ * 占用跨机租约；若对方占用则 FIFO 入队，并挂起等待中心库「释放信号」（长请求被动唤醒）。
+ * 禁止短间隔轮询 pack-lease。唤醒后拉最新包 + 会话凭证自动登录。
  * @returns {Promise<{ ok: boolean, waited?: boolean, reason?: string, meta?: any, error?: Error }>}
  */
 async function acquirePackLeaseWithWait(profileId, {
@@ -108,7 +104,6 @@ async function acquirePackLeaseWithWait(profileId, {
   hostId: hostOverride = '',
   leaseSeconds = 7200,
   waitMs = packLeaseWaitMs(),
-  pollMs = packLeasePollMs(),
 } = {}) {
   const pid = String(profileId || '').trim();
   const hid = String(hostOverride || hostId());
@@ -126,10 +121,19 @@ async function acquirePackLeaseWithWait(profileId, {
       });
       if (announced) {
         liveLog(
-          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 对方已释放占用，本端已取得锁，开始同步登录凭证`,
+          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 已收到占用解除推送，本端取得锁，开始拉取最新登录凭证`,
           'info',
           { accountId },
         );
+        try {
+          const { publishEvent } = require('../live-log');
+          publishEvent('pack-lease-acquired', {
+            accountId,
+            profileId: pid,
+            hostId: hid,
+            waited: true,
+          });
+        } catch { /* ignore */ }
       }
       return { ok: true, waited: announced, meta };
     } catch (e) {
@@ -152,6 +156,7 @@ async function acquirePackLeaseWithWait(profileId, {
             : `等待环境释放超时：${msg}`,
         );
       }
+
       const info = packLeaseBusyInfo(e);
       const hint = info.holderHost || '其它主机';
       if (!announced || hint !== lastHint) {
@@ -159,12 +164,64 @@ async function acquirePackLeaseWithWait(profileId, {
         lastHint = hint;
         const until = info.leaseUntil ? `，租约至 ${info.leaseUntil}` : '';
         liveLog(
-          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 正被 ${hint} 占用${until}，本端锁定等待对方登录完成并上传凭证后自动登录…`,
+          `账号 #${accountId || '-'}：环境 ${pid.slice(0, 8)}… 正被 ${hint} 占用${until}，已加入等待队列（FIFO），挂起等待对方上传凭证并解除占用…`,
           'warn',
           { accountId },
         );
       }
-      await new Promise((r) => setTimeout(r, Math.max(1000, pollMs)));
+
+      const remainMs = Math.max(5000, deadline - Date.now());
+      const chunkSec = Math.min(120, Math.max(15, Math.ceil(remainMs / 1000)));
+      let waitResult = null;
+      try {
+        // 一次长挂起：中心库占用解除后按 FIFO 唤醒队首（非客户端轮询）
+        waitResult = await phpApi.post(
+          `/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/wait`,
+          {
+            hostId: hid,
+            accountId: Number(accountId) || 0,
+            timeoutSeconds: chunkSec,
+          },
+          { timeoutMs: (chunkSec + 45) * 1000 },
+        );
+      } catch (waitErr) {
+        // 网关超时等：短暂退后再次挂起，仍不算短轮询 acquire
+        liveLog(
+          `账号 #${accountId || '-'}：等待占用信号临时中断（${waitErr.message || waitErr}），将继续挂起…`,
+          'warn',
+          { accountId },
+        );
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+
+      if (waitResult?.ready) {
+        const pos = Number(waitResult.position || 1);
+        liveLog(
+          `账号 #${accountId || '-'}：收到占用解除信号（队列第 ${pos} 位），准备拉取环境包并自动登录`,
+          'info',
+          { accountId },
+        );
+        try {
+          const { publishEvent } = require('../live-log');
+          publishEvent('pack-lease-ready', {
+            accountId,
+            profileId: pid,
+            hostId: hid,
+            position: pos,
+            releaseSeq: waitResult.releaseSeq,
+          });
+        } catch { /* ignore */ }
+        continue; // 立即再 acquire
+      }
+
+      const pos = Number(waitResult?.position || 0);
+      const qSize = Number(waitResult?.queueSize || 0);
+      liveLog(
+        `账号 #${accountId || '-'}：仍在等待队列中（第 ${pos || '?'} / ${qSize || '?'} 位），继续挂起…`,
+        'info',
+        { accountId },
+      );
     }
   }
 }
@@ -528,6 +585,28 @@ function rejectTinyEnvPack() {
   return v === '1' || v === 'true' || v === 'on';
 }
 
+/** 尽力释放跨机租约并触发中心库 FIFO 唤醒（登录上传后 / 关窗 / 失败兜底） */
+async function releasePackLeaseBestEffort(profileId, hostOverride = '') {
+  const pid = String(profileId || '').trim();
+  if (!pid) return null;
+  const hid = String(hostOverride || hostId());
+  try {
+    const data = await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
+      hostId: hid,
+    });
+    const signal = data?.signal || data;
+    if (signal?.nextHostId) {
+      liveLog(
+        `环境 ${pid.slice(0, 8)}… 已解除占用，通知等待队列下一端：${signal.nextHostId}`,
+        'info',
+      );
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 关闭后导出并上传中心库，然后释放租约。
  * 失败只打日志，不抛（避免阻断关闭）。
@@ -545,6 +624,7 @@ async function pushLocalEnvPack(profileId, {
   if (!pid || !provider || !supportsPackSync(provider)) {
     return { pushed: false, reason: 'skip' };
   }
+  const hid = String(hostOverride || hostId());
   // 本机无实体时不要去 export/upload，避免刷「环境不存在」误报（常见于批次仍记着旧 ID）
   const local = await detailLocal(provider, pid).catch(() => null);
   if (!local) {
@@ -553,9 +633,10 @@ async function pushLocalEnvPack(profileId, {
       'info',
       { accountId },
     );
+    // 仍释放：开窗时可能已占租约，避免「本机已删环境」把对方锁死
+    await releasePackLeaseBestEffort(pid, hid);
     return { pushed: false, reason: 'not-local' };
   }
-  const hid = String(hostOverride || hostId());
   let exportPath = '';
   let handoffPath = '';
   try {
@@ -618,9 +699,6 @@ async function pushLocalEnvPack(profileId, {
       'info',
       { accountId },
     );
-    await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
-      hostId: hid,
-    }).catch(() => {});
     return { pushed: true, meta };
   } catch (e) {
     let msg = String(e.message || e);
@@ -635,6 +713,8 @@ async function pushLocalEnvPack(profileId, {
     );
     return { pushed: false, reason: msg };
   } finally {
+    // 成功/失败/过小拒传都释放，避免对方一直卡在等待
+    await releasePackLeaseBestEffort(pid, hid);
     for (const p of [exportPath, handoffPath]) {
       if (p && /[\\/](tk-env-upload-|tk-pack-out-)/.test(p)) {
         try { fs.unlinkSync(p); } catch { /* */ }
@@ -845,4 +925,5 @@ module.exports = {
   healPushOrRegenerate,
   acquirePackLeaseWithWait,
   isPackLeaseBusyError,
+  releasePackLeaseBestEffort,
 };

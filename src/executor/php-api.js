@@ -6,16 +6,9 @@ const als = new AsyncLocalStorage();
 const root = path.resolve(__dirname, '../..');
 let cachedAuth = '';
 
-function normalizeApiOrigin(raw) {
-  return String(raw || '')
-    .trim()
-    .replace(/\/+$/, '')
-    .replace(/\/api$/i, '');
-}
-
 function loadApiBase() {
   if (process.env.TKSWARM_API_BASE) {
-    return normalizeApiOrigin(process.env.TKSWARM_API_BASE);
+    return String(process.env.TKSWARM_API_BASE).replace(/\/+$/, '');
   }
   const files = [
     path.join(root, 'data', 'api.json'),
@@ -25,7 +18,7 @@ function loadApiBase() {
     try {
       if (!fs.existsSync(file)) continue;
       const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (j?.apiBase) return normalizeApiOrigin(j.apiBase);
+      if (j?.apiBase) return String(j.apiBase).replace(/\/+$/, '');
     } catch { /* ignore */ }
   }
   return 'http://tkswarm-api.dyyweb.com';
@@ -81,7 +74,7 @@ function getAuthTokenBare() {
   return String(resolveAuth({}) || '').replace(/^Bearer\s+/i, '').trim();
 }
 
-async function request(method, apiPath, body) {
+async function request(method, apiPath, body, options = {}) {
   const base = loadApiBase();
   const ctx = als.getStore() || {};
   const headers = {
@@ -92,11 +85,27 @@ async function request(method, apiPath, body) {
   if (auth) headers.Authorization = auth;
   if (ctx.actingAs) headers['X-Acting-As'] = ctx.actingAs;
 
-  const res = await fetch(`${base}/api${apiPath}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const timeoutMs = Number(options.timeoutMs) || 0;
+  const ac = timeoutMs > 0 ? new AbortController() : null;
+  const timer = ac ? setTimeout(() => ac.abort(), timeoutMs) : null;
+  let res;
+  try {
+    res = await fetch(`${base}/api${apiPath}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: ac ? ac.signal : undefined,
+    });
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      const err = new Error(`PHP API 请求超时（${Math.round(timeoutMs / 1000)}s）（${method} /api${apiPath}）`);
+      err.status = 408;
+      throw err;
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   const json = await res.json().catch(() => ({ success: false, message: 'PHP API 响应无效' }));
   if (!res.ok || !json.success) {
     // 把接口带上：否则任务日志里只有「无权访问该资源」，看不出是哪个接口
@@ -296,10 +305,10 @@ async function uploadMultipart(apiPath, filePath, { fields = {}, fileField = 'fi
   return json.data;
 }
 
-const get = (p) => request('GET', p);
-const post = (p, body) => request('POST', p, body || {});
-const put = (p, body) => request('PUT', p, body || {});
-const patch = (p, body) => request('PATCH', p, body || {});
+const get = (p, options) => request('GET', p, undefined, options || {});
+const post = (p, body, options) => request('POST', p, body || {}, options || {});
+const put = (p, body, options) => request('PUT', p, body || {}, options || {});
+const patch = (p, body, options) => request('PATCH', p, body || {}, options || {});
 
 module.exports = {
   loadApiBase,

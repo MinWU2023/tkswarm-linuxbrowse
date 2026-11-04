@@ -68,80 +68,121 @@ async function callbackLoginStatus(accountId, result, options = {}) {
       ).trim();
     } catch { /* ignore */ }
   }
+  // 任意登录成功：先上传环境包+凭证，再解除占用并通知 FIFO 等待方
   if (pid && !skipPush) {
-    // 仅「独立登录」结束后推包；批次内同窗登录交给总任务结束时统一推
-    await pushEnvPackBestEffort(accountId, pid);
+    // 账号列表独立登录：推包但保持窗口开着；上传成功后中心库会 signal 等待队列
+    await pushEnvPackBestEffort(accountId, pid, { keepOpen: true });
   } else if (pid && skipPush) {
     liveLog(
-      `账号 #${accountId}：同窗登录中，跳过关窗上传环境包（避免打断任务窗口 / 空包覆盖）`,
+      `账号 #${accountId}：同窗登录中，跳过立即上传（总任务结束时统一推包并通知等待方）`,
       'info',
       { accountId },
     );
-    // 仍释放跨机租约：会话日志已入库，另一端可结束等待并用会话凭证自动登录
-    if (ok) {
-      try {
-        const phpApi = require('../php-api');
-        const { hostId } = require('./env-pack-sync');
-        await phpApi.post(`/node/browser-profiles/${encodeURIComponent(pid)}/pack-lease/release`, {
-          hostId: hostId(),
-        });
-      } catch { /* ignore */ }
-    }
+  } else if (pid && !ok) {
+    // 登录失败也释放占用，避免锁死等待方
+    try {
+      const { releasePackLeaseBestEffort } = require('./env-pack-sync');
+      await releasePackLeaseBestEffort(pid);
+    } catch { /* ignore */ }
   }
   return { ...(result || {}), loginStatus: status, loginOk: ok, profileId: pid || undefined, skipEnvPackPush: skipPush };
 }
 
 /**
- * 推环境包前尽量优雅结束 CDP：让 Chromium 把 Cookie/SQLite 刷到 userdata，
- * 避免「内存里已登录、磁盘包却是空的」被中心库 422 拒绝。
+ * 推环境包前尽量优雅刷盘 Cookie。
+ * 注意：绝不要 goto about:blank——自研客户端会把空白页判成「环境窗口没能正常打开页面」。
+ * keepOpen=true：不断开 CDP、不关窗（账号列表登录后需保持开着）。
  */
-async function flushBrowserBeforePack(profileId) {
+async function flushBrowserBeforePack(profileId, { keepOpen = false } = {}) {
   const pid = String(profileId || '').trim();
   if (!pid) return;
   const session = sessions.get(pid);
   if (!session?.browser) return;
+  try {
+    const page = session.page;
+    if (page && !page.isClosed?.()) {
+      await page.evaluate(() => {
+        try { document.cookie; } catch { /* ignore */ }
+      }).catch(() => {});
+      // 停留当前业务页刷写，勿跳 blank
+      await new Promise((r) => setTimeout(r, keepOpen ? 800 : 400));
+    }
+  } catch { /* ignore */ }
+  if (keepOpen) return;
   sessions.delete(pid);
   try {
     session.browser.removeAllListeners?.('disconnected');
   } catch { /* ignore */ }
-  try {
-    const page = session.page;
-    if (page && !page.isClosed?.()) {
-      // 轻触一下页面，促使 Cookie store 落盘，再 about:blank 降低站点脚本干扰
-      await page.evaluate(() => {
-        try { document.cookie; } catch { /* ignore */ }
-      }).catch(() => {});
-      await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => {});
-      await page.waitForTimeout?.(400).catch?.(() => {});
-    }
-  } catch { /* ignore */ }
-  // 独立登录推包允许真关窗；browser.close 比强杀更容易刷盘
   await session.browser.close().catch(() => {});
   await new Promise((r) => setTimeout(r, 600));
+}
+
+/** 登录后若被误导航到 blank/错误页，拉回 TikTok 主站 */
+async function ensureLoginLandingPage(profileId, accountId = 0) {
+  const pid = String(profileId || '').trim();
+  if (!pid) return;
+  const session = sessions.get(pid);
+  const page = session?.page;
+  if (!page || page.isClosed?.()) return;
+  let url = '';
+  try { url = String(page.url() || ''); } catch { /* ignore */ }
+  if (/tiktok\.com/i.test(url) && !/chrome-error:|about:blank/i.test(url)) return;
+  liveLog(
+    `账号 #${accountId || '-'}：登录后页面异常（${url || '空'}），正在恢复打开 TikTok…`,
+    'warn',
+    { accountId },
+  );
+  await page.goto('https://www.tiktok.com/', {
+    waitUntil: 'domcontentloaded',
+    timeout: 45000,
+  }).catch(() => {});
 }
 
 async function pushEnvPackBestEffort(accountId, profileId, options = {}) {
   const pid = String(profileId || '').trim();
   if (!pid) return;
+  const keepOpen = options.keepOpen === true;
   try {
-    const { pushLocalEnvPack } = require('./env-pack-sync');
+    const { pushLocalEnvPack, releasePackLeaseBestEffort } = require('./env-pack-sync');
     const { getProvider } = require('./providers');
-    await flushBrowserBeforePack(pid);
-    await pushLocalEnvPack(pid, {
+    await flushBrowserBeforePack(pid, { keepOpen });
+    const { keepOpen: _keep, skipClose: skipCloseOpt, ...rest } = options;
+    const pushed = await pushLocalEnvPack(pid, {
       accountId: Number(accountId) || 0,
       provider: getProvider(),
-      ...options,
+      ...rest,
+      skipClose: keepOpen || skipCloseOpt === true,
     });
+    // 上传成功后中心库已 signal；再显式 release 兜底，并本地 WSS 广播
+    await releasePackLeaseBestEffort(pid);
+    try {
+      const { publishEvent } = require('../live-log');
+      publishEvent('pack-lease-released', {
+        accountId: Number(accountId) || 0,
+        profileId: pid,
+        pushed: !!pushed?.pushed,
+        keepOpen,
+      });
+    } catch { /* ignore */ }
+    if (keepOpen) {
+      await ensureLoginLandingPage(pid, accountId);
+      liveLog(
+        `账号 #${accountId}：登录凭证与环境包已上传，已解除占用并通知等待方${pushed?.pushed ? '' : '（推包未成功，仍已放锁）'}`,
+        pushed?.pushed ? 'info' : 'warn',
+        { accountId },
+      );
+    }
   } catch { /* ignore */ }
 }
 
 async function finalizeAfterLogin(accountId, sessionWs, base = {}, page = null, context = null) {
   const skipPush = Boolean(base.skipEnvPackPush);
+  const profileHint = String(base.profileId || base.browserProfileId || '').trim();
   if (base.alreadyLoggedIn || base.loginOk) {
     if (page && await pageLooksLoggedOut(page)) {
       return { ...base, alreadyLoggedIn: false, loginOk: false, message: '页面仍显示登录入口，未确认登录' };
     }
-    if (context) await persistAccountSessionLog(accountId, context, page);
+    if (context) await persistAccountSessionLog(accountId, context, page, '', profileHint);
     await dataStore.updateLoginStatus(accountId, 'online').catch(() => {});
     // 推包统一交给 callbackLoginStatus，避免这里先推一次（空包）再推一次
     return { ...base, loginOk: true, skipEnvPackPush: skipPush };
@@ -154,7 +195,7 @@ async function finalizeAfterLogin(accountId, sessionWs, base = {}, page = null, 
     try {
       const check = await inspectTikTokSession(sessionWs, page);
       if (check?.loggedIn) {
-        if (context) await persistAccountSessionLog(accountId, context, page);
+        if (context) await persistAccountSessionLog(accountId, context, page, '', profileHint);
         await dataStore.updateLoginStatus(accountId, 'online').catch(() => {});
         return {
           ...base,
@@ -1117,7 +1158,7 @@ async function collectStorageSnapshot(page) {
   }
 }
 
-async function persistAccountSessionLog(accountId, context, page, fingerprint = '') {
+async function persistAccountSessionLog(accountId, context, page, fingerprint = '', profileIdHint = '') {
   try {
     const cookies = await context.cookies().catch(() => []);
     const cookie = cookieHeaderFromPlaywrightCookies(cookies);
@@ -1146,6 +1187,8 @@ async function persistAccountSessionLog(accountId, context, page, fingerprint = 
       'info',
       { accountId }
     );
+    // 占用释放改到「环境包上传成功」之后，由中心库 FIFO 推送唤醒等待方
+    void profileIdHint;
     return true;
   } catch (e) {
     liveLog(`账号 #${accountId}：保存会话日志失败：${e.message || e}`, 'warn', { accountId });
@@ -1220,7 +1263,13 @@ async function tryFormFreeLogin(accountId, account, session, page, run) {
   assertNotCancelled(run);
   if (check?.loggedIn && !(await pageLooksLoggedOut(page))) {
     await dataStore.updateLoginStatus(accountId, 'online').catch(() => {});
-    await persistAccountSessionLog(accountId, session.context, page, saved.fingerprint || '');
+    await persistAccountSessionLog(
+      accountId,
+      session.context,
+      page,
+      saved.fingerprint || '',
+      session.profileId || '',
+    );
     return {
       accountId,
       username: account.username,
@@ -1546,7 +1595,7 @@ async function runLoginAssist(accountId, {
     await dataStore.updateLoginStatus(accountId, 'offline').catch(() => {});
   } else if (existingSession.loggedIn) {
     await dataStore.updateLoginStatus(accountId, 'online').catch(() => {});
-    await persistAccountSessionLog(accountId, session.context, page);
+    await persistAccountSessionLog(accountId, session.context, page, '', profileId);
     return withPackFlag({
       accountId,
       username: account.username,
