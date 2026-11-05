@@ -54,13 +54,30 @@ async function waitForDevtools(port, timeoutMs = 30000) {
   throw new Error('Chrome 调试端口启动超时');
 }
 
+/**
+ * 等 CDP 出现可连的 page 级 target。
+ * Electron 有时 type 不是严格的 "page"（webview/other），只要带 webSocketDebuggerUrl 且非 browser 即可。
+ */
 async function waitForPageTarget(port, timeoutMs = 15000) {
   const start = Date.now();
+  const pick = (list) => {
+    if (!Array.isArray(list) || !list.length) return null;
+    const withWs = list.filter((t) => t?.webSocketDebuggerUrl);
+    const page = withWs.find((t) => String(t.type || '') === 'page')
+      || withWs.find((t) => /page|webview/i.test(String(t.type || '')))
+      || withWs.find((t) => !/browser|service_worker|worker|iframe/i.test(String(t.type || '')));
+    return page || null;
+  };
   while (Date.now() - start < timeoutMs) {
     try {
       const list = await fetchJson(`http://127.0.0.1:${port}/json/list`);
-      const page = Array.isArray(list) && list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
-      if (page) return page;
+      const hit = pick(list);
+      if (hit) return hit;
+    } catch { /* retry */ }
+    try {
+      const list2 = await fetchJson(`http://127.0.0.1:${port}/json`);
+      const hit2 = pick(list2);
+      if (hit2) return hit2;
     } catch { /* retry */ }
     await new Promise((r) => setTimeout(r, 200));
   }

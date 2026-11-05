@@ -83,6 +83,19 @@ function enqueueOpen(fn) {
   });
 }
 
+/** 复用前确认 CDP 上仍有 page；进程活着但窗已崩时强制重开 */
+async function sessionStillHasPage(session) {
+  const port = Number(session?.port || 0);
+  if (!port) return Boolean(session?.ws);
+  try {
+    const { waitForPageTarget } = require('./launcher');
+    const page = await waitForPageTarget(port, 2500);
+    return Boolean(page?.webSocketDebuggerUrl);
+  } catch {
+    return false;
+  }
+}
+
 async function openProfile(profileId, options = {}) {
   const id = String(profileId);
   const forceRelaunch = Boolean(options.forceRelaunch);
@@ -92,7 +105,10 @@ async function openProfile(profileId, options = {}) {
   if (forceRelaunch && existing) {
     await closeProfile(id).catch(() => {});
   } else if (existing?.ws && isSessionAlive(existing)) {
-    return formatOpenResult(id, existing);
+    const ok = await sessionStillHasPage(existing);
+    if (ok) return formatOpenResult(id, existing);
+    console.warn(`[manager] 复用环境 ${id.slice(0, 8)}… 进程在但无 page，强制重开`);
+    await closeProfile(id).catch(() => {});
   }
   if (existing && !forceRelaunch) dropStaleSession(id);
 

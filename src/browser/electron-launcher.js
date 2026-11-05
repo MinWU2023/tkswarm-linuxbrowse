@@ -143,12 +143,30 @@ async function launchProfileElectron(profile, options = {}) {
   }
 
   const httpUrl = `http://127.0.0.1:${port}`;
-  // Electron 必须等 page target；桌面端也是返回 page 级 ws，browser 级 ws 下 Playwright 常看不到页
-  const pageTarget = await waitForPageTarget(port, 30000);
+
+  // 子进程会在 load about:blank 后写 .cdp-page-ready；与 /json/list 双保险
+  const readyFile = path.join(userDataDir, '.cdp-page-ready');
+  const readyDeadline = Date.now() + 45000;
+  while (Date.now() < readyDeadline) {
+    if (fs.existsSync(readyFile)) break;
+    if (child.exitCode != null) break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+
+  // Electron 必须等 page target；桌面端也是返回 page 级 ws
+  let pageTarget = await waitForPageTarget(port, 35000);
   if (!pageTarget?.webSocketDebuggerUrl) {
+    const tail = (() => {
+      try {
+        return fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-12).join(' | ');
+      } catch { return ''; }
+    })();
     clearPid(profile.id);
     try { child.kill(); } catch { /* */ }
-    throw new Error(`Electron 已启动但未出现可用页面（CDP :${port} /json/list 无 page）`);
+    throw new Error(
+      `Electron 已启动但未出现可用页面（CDP :${port} /json/list 无 page）`
+      + (tail ? `；日志：${tail.slice(0, 400)}` : '')
+    );
   }
 
   const injectSrc = buildInjectScript(profile.id, {
@@ -163,12 +181,17 @@ async function launchProfileElectron(profile, options = {}) {
   }
   await applyEmulation(port, { timezone, locale, latitude, longitude }).catch(() => null);
 
-  // 注入后 page target 可能刷新，再取一次最新 page ws
+  // 注入后 page target 可能刷新，再取一次最新 page ws；若没了再等一轮
   let pageWs = pageTarget.webSocketDebuggerUrl;
   try {
-    const again = await waitForPageTarget(port, 8000);
+    const again = await waitForPageTarget(port, 10000);
     if (again?.webSocketDebuggerUrl) pageWs = again.webSocketDebuggerUrl;
   } catch { /* keep first */ }
+  if (!pageWs) {
+    clearPid(profile.id);
+    try { child.kill(); } catch { /* */ }
+    throw new Error(`Electron 指纹注入后 page target 消失（CDP :${port}）`);
+  }
 
   const browserWs = ver.webSocketDebuggerUrl
     || (await fetchJson(`http://127.0.0.1:${port}/json/version`).catch(() => null))?.webSocketDebuggerUrl

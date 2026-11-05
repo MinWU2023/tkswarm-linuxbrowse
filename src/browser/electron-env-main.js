@@ -2,6 +2,9 @@
  * Electron 环境子进程入口（Linux 服务器浏览器）。
  * 由 electron-launcher 以 `electron electron-env-main.js` 拉起；
  * 配置走环境变量 TKSWARM_ENV_CONFIG（JSON）。
+ *
+ * 关键：先 load about:blank 立刻挂上 CDP page target，再导航业务 URL。
+ * 否则父进程 waitForPageTarget 常超时（/json/list 无 page），Playwright 报「未出现可用页面」。
  */
 const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs');
@@ -32,6 +35,13 @@ try {
   process.exit(1);
 }
 
+function markPageReady(extra = '') {
+  try {
+    const readyFile = path.join(userDataDir, '.cdp-page-ready');
+    fs.writeFileSync(readyFile, `${Date.now()}\n${extra}\n`, 'utf8');
+  } catch { /* ignore */ }
+}
+
 if (cfg.softwareRender) {
   try {
     app.disableHardwareAcceleration();
@@ -43,9 +53,13 @@ if (cfg.softwareRender) {
 if (process.platform === 'linux') {
   try {
     app.commandLine.appendSwitch('no-sandbox');
+    app.commandLine.appendSwitch('disable-setuid-sandbox');
     app.commandLine.appendSwitch('disable-dev-shm-usage');
   } catch { /* ignore */ }
 }
+
+// 清掉上次残留的 ready 标记
+try { fs.unlinkSync(path.join(userDataDir, '.cdp-page-ready')); } catch { /* */ }
 
 app.whenReady().then(async () => {
   const locale = String(cfg.locale || 'en-US');
@@ -80,25 +94,45 @@ app.whenReady().then(async () => {
       session: ses,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      // Linux + --no-sandbox 下再开 sandbox 易导致渲染进程起不来 → CDP 无 page
+      sandbox: false,
+      backgroundThrottling: false,
     },
   });
 
-  // 时区 / 指纹由父进程 cdp-inject.applyEmulation 注入。
-  // 禁止在此 attach webContents.debugger：Electron 页级 Debugger 互斥，
-  // 占着会导致 Playwright 连 browser CDP 后 contexts/pages 为空。
+  // 禁止 attach webContents.debugger（与 Playwright CDP 互斥）
 
-  win.webContents.setUserAgent(userAgent || win.webContents.getUserAgent());
+  try {
+    win.webContents.setUserAgent(userAgent || win.webContents.getUserAgent());
+  } catch { /* ignore */ }
   if (locale) {
     try { app.commandLine.appendSwitch('lang', locale); } catch { /* ignore */ }
   }
 
   win.on('closed', () => {
+    try { fs.unlinkSync(path.join(userDataDir, '.cdp-page-ready')); } catch { /* */ }
     app.quit();
   });
 
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[electron-env] render-process-gone', details?.reason || details);
+  });
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    console.warn(`[electron-env] did-fail-load ${code} ${desc} ${url}`);
+  });
+
+  // 1) 先挂空白页，保证 /json/list 立刻有 page target
+  try {
+    await win.loadURL('about:blank');
+  } catch (e) {
+    console.warn('[electron-env] load about:blank:', e.message || e);
+  }
+  markPageReady('about:blank');
+
+  // 2) 再进业务页（失败也不清 ready，父进程仍可连上空白页再 goto）
   try {
     await win.loadURL(startUrl);
+    markPageReady(startUrl);
   } catch (e) {
     console.warn('[electron-env] loadURL:', e.message || e);
   }

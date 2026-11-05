@@ -154,16 +154,16 @@
         const qs = token ? `?token=${encodeURIComponent(token)}` : '';
         const url = `${proto}://${location.host}/vnc-ws/${encodeURIComponent(id)}${qs}`;
 
-        // 自动 VNC 密码：优先 URL ?pw= → 服务端 TKSWARM_VNC_PASSWORD → 不再弹窗（除非都没有）
+        // 自动 VNC 密码：URL ?pw= → /api/vnc-config（可不登录）→ 必要时再 prompt
         let autoPassword = String(params.get('pw') || params.get('password') || '').trim();
-        if (!autoPassword && token) {
+        if (!autoPassword) {
           try {
-            const cfgRes = await fetch('/api/vnc-config', {
-              headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
-            });
+            const headers = { Accept: 'application/json' };
+            if (token) headers.Authorization = `Bearer ${token}`;
+            const cfgRes = await fetch('/api/vnc-config', { headers });
             const cfg = await cfgRes.json().catch(() => ({}));
             if (cfg?.ok && cfg.password != null) autoPassword = String(cfg.password);
-          } catch { /* ignore，后面必要时再 prompt */ }
+          } catch { /* ignore */ }
         }
 
         status.textContent = '连接中…';
@@ -179,8 +179,15 @@
           status.classList.add('ok');
         });
         rfb.addEventListener('disconnect', (e) => {
-          status.textContent = e.detail?.clean ? '已断开' : '连接失败 / 已断开';
+          const why = e.detail?.clean ? '已断开' : '连接失败 / 已断开';
+          status.textContent = autoPassword
+            ? `${why}（若反复失败：检查 x11vnc 是否在跑、TKSWARM_VNC_PASSWORD 是否与服务端一致）`
+            : `${why}（未拿到 VNC 密码，请确认已设 TKSWARM_VNC_PASSWORD 或 URL 带 ?pw=）`;
           status.classList.remove('ok');
+          status.classList.add('err');
+        });
+        rfb.addEventListener('securityfailure', (e) => {
+          status.textContent = `VNC 鉴权失败：${e.detail?.status || ''}（密码不匹配或 x11vnc 未用密码文件启动）`;
           status.classList.add('err');
         });
         rfb.addEventListener('credentialsrequired', () => {
@@ -189,6 +196,7 @@
             return;
           }
           const pw = prompt('VNC 密码（可在服务端设 TKSWARM_VNC_PASSWORD 以自动填入）') || '';
+          autoPassword = pw;
           rfb.sendCredentials({ password: pw });
         });
       } catch (e) {

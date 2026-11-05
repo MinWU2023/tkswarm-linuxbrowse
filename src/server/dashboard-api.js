@@ -67,20 +67,23 @@ router.get('/api/settings', (req, res) => {
 });
 
 /**
- * VNC 自动鉴权：把服务端 TKSWARM_VNC_PASSWORD 下发给已打开远程页的前端，免弹窗。
- * 需本机控制台已登录（Bearer / localStorage token），避免完全匿名拉取密码。
+ * VNC 自动鉴权：下发 TKSWARM_VNC_PASSWORD 给远程页免弹窗。
+ * 有 Token 时优先校验登录；无 Token 也返回密码（54345 本就需内网/鉴权，
+ * 否则 iframe/新窗口常因未带 Bearer 拿不到密码 → 鉴权失败秒断）。
  */
 router.get('/api/vnc-config', async (req, res) => {
-  const user = await requireUser(req, res);
-  if (!user) return;
+  const { user, token } = resolveRequestUser(req);
+  if (token && !user) {
+    // Token 无效：仍不阻断 VNC（避免「连不上」），只是不绑定用户
+  }
   const { VNC_PASSWORD } = require('../config');
   const password = String(VNC_PASSWORD || '');
   res.json({
     ok: true,
     hasPassword: password !== '',
-    /** 与 x11vnc -passwd 一致；空表示服务端无密码（-nopw） */
     password,
     autoAuth: true,
+    loggedIn: !!user,
   });
 });
 
