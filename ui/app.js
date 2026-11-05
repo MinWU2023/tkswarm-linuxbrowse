@@ -127,6 +127,9 @@ function openModal(title, html, opts = {}) {
     card.classList.toggle('modal-card--vnc', opts.vnc === true);
     card.classList.toggle('modal-card--wide', opts.wide === true);
   }
+  document.getElementById('modal-root').classList.toggle('modal-root--vnc', opts.vnc === true);
+  const extra = document.getElementById('modal-head-extra');
+  if (extra) extra.innerHTML = opts.headExtra || '';
   show('#modal-root', true);
   document.getElementById('modal-root').setAttribute('aria-hidden', 'false');
 }
@@ -139,6 +142,9 @@ function closeModal() {
   if (card) {
     card.classList.remove('modal-card--vnc', 'modal-card--wide');
   }
+  document.getElementById('modal-root').classList.remove('modal-root--vnc');
+  const extra = document.getElementById('modal-head-extra');
+  if (extra) extra.innerHTML = '';
 }
 
 function filteredWindows() {
@@ -534,10 +540,10 @@ function openVncEmbed(id, href) {
   const url = href || `/vnc.html?id=${encodeURIComponent(id)}`;
   openModal(`VNC · ${String(id).slice(0, 12)}…`, `
     <iframe class="vnc-frame" src="${esc(url)}" title="VNC" allow="clipboard-read; clipboard-write"></iframe>
-    <div class="modal-foot-row">
-      <a class="btn small ghost" href="${esc(url)}" target="_blank" rel="noopener">新窗口打开</a>
-    </div>
-  `, { vnc: true });
+  `, {
+    vnc: true,
+    headExtra: `<a class="btn small ghost" href="${esc(url)}" target="_blank" rel="noopener">新窗口打开</a>`,
+  });
 }
 
 async function doLogin(e) {

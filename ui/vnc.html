@@ -8,6 +8,10 @@
   <meta name="theme-color" content="#2563eb" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>第一页自研浏览器 VNC</title>
+  <script>
+    // 被控制台弹窗 iframe 嵌入时标记，样式里据此隐藏自带顶栏
+    try { if (window.top !== window.self) document.documentElement.classList.add('embedded'); } catch (e) { document.documentElement.classList.add('embedded'); }
+  </script>
   <style>
     :root {
       --ink: #0b1220;
@@ -112,6 +116,36 @@
       background: var(--danger);
       box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.18);
     }
+
+    /* 嵌入弹窗时：去掉自带顶栏，画面占满；连接状态改为右下角浮标，连上后自动淡出 */
+    html.embedded .bar {
+      height: 0;
+      padding: 0;
+      border: 0;
+      background: none;
+      box-shadow: none;
+      overflow: visible;
+    }
+    html.embedded .bar::before,
+    html.embedded .bar a,
+    html.embedded .bar strong,
+    html.embedded .bar code { display: none; }
+    html.embedded #screen { inset: 0; }
+    html.embedded #status {
+      position: fixed;
+      right: 10px;
+      bottom: 10px;
+      z-index: 5;
+      margin: 0;
+      padding: 4px 10px;
+      max-width: 70vw;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.85);
+      color: #e2e8f0;
+      transition: opacity 0.6s ease 2s;
+    }
+    html.embedded #status.ok { color: #6ee7b7; opacity: 0; }
+    html.embedded #status.err { color: #fda4af; }
   </style>
 </head>
 <body>

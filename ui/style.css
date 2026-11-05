@@ -1047,18 +1047,32 @@ code {
   overflow: hidden;
 }
 
-/* VNC 弹框：约 1680×800 可视区域（小屏自动收） */
+/* VNC 弹框：近全屏，只保留一条紧凑标题栏，画面撑满其余区域 */
+.modal-root.modal-root--vnc { padding: 6px; }
 .modal-card.modal-card--vnc {
-  width: min(1680px, calc(100vw - 24px));
-  max-height: min(920px, calc(100vh - 24px));
+  width: calc(100vw - 12px);
+  height: calc(100vh - 12px);
+  max-height: none;
+  border-radius: 10px;
 }
+.modal-card.modal-card--vnc::before { display: none; }
+.modal-card.modal-card--vnc .modal-head { padding: 5px 10px; }
+.modal-card.modal-card--vnc .modal-head strong { font-size: 13px; }
 .modal-card.modal-card--vnc .modal-body {
-  padding: 8px 12px 12px;
+  padding: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
   overflow: hidden;
 }
 .modal-card.modal-card--vnc .vnc-frame {
-  height: min(800px, calc(100vh - 140px));
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
 }
+.modal-head-actions { display: flex; align-items: center; gap: 8px; }
 
 .modal-head {
   display: flex;
