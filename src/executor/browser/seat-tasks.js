@@ -458,6 +458,7 @@ async function runSyncFans(accountId, payload = {}) {
       result: { progress, count: users.length, profileId },
     };
   } finally {
+    liveLog(`账号 #${aid}：同步粉丝收尾 keepOpen=${keepOpen} livePushed=${livePushed} freshLogin=${freshLogin}${keepOpen ? '（保留窗口）' : '（将关闭环境）'}`, 'info', { accountId: aid });
     if (!keepOpen) {
       try { await closeConnection(connection, { force: true }); } catch { /* */ }
       try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }

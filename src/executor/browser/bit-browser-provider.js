@@ -280,7 +280,14 @@ class BitBrowserProvider {
     }
   }
 
-  close(id) { return this.request('browser/close', { id: String(id || '') }, 30000); }
+  close(id) {
+    // 诊断：记录是谁调用了关窗（定位「登录后黑屏」）
+    try {
+      const stack = String(new Error().stack || '').split('\n').slice(2, 6).map((s) => s.trim()).join(' <- ');
+      console.warn(`[provider.close] id=${String(id || '').slice(0, 8)}… 调用方: ${stack}`);
+    } catch { /* ignore */ }
+    return this.request('browser/close', { id: String(id || '') }, 30000);
+  }
   delete(id) { return this.request('browser/delete', { id: String(id || '') }, 30000); }
   detail(id) { return this.request('browser/detail', { id: String(id || '') }); }
 

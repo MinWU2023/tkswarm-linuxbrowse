@@ -235,6 +235,11 @@ function formatOpenResult(id, session) {
 async function closeProfile(profileId) {
   const id = String(profileId);
   const session = running.get(id);
+  // 诊断：记录是谁关的环境（定位「登录后黑屏」），无论来自路由、GC 还是 openProfile
+  try {
+    const stack = String(new Error().stack || '').split('\n').slice(2, 7).map((s) => s.trim().replace(/^at\s+/, '')).join(' <- ');
+    console.warn(`[manager] closeProfile id=${id.slice(0, 8)}… hasSession=${Boolean(session)} 调用方: ${stack}`);
+  } catch { /* ignore */ }
   try { await record.stopIfRecording(id); } catch { /* */ }
   try { vnc.stopVnc(id); } catch { /* */ }
   try { releaseDisplay(id); } catch { /* */ }
