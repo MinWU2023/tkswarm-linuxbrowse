@@ -102,7 +102,9 @@ app.whenReady().then(async () => {
           if (type === 'mainFrame' || type === 'subFrame' || type === 'webSocket' || ALLOW.test(url)) {
             return callback({});
           }
-          if (BLOCK_TYPES.has(type) || type === 'font' || BLOCK_URL.test(url)) {
+          // 脚本/样式/XHR 不按 URL 关键字拦（路径里带 svg/png 的 JS 分包与接口会被误杀，页面停在骨架屏）
+          const CRITICAL_TYPES = type === 'script' || type === 'stylesheet' || type === 'xhr' || type === 'ping' || type === 'cspReport' || type === 'object';
+          if (BLOCK_TYPES.has(type) || type === 'font' || (!CRITICAL_TYPES && BLOCK_URL.test(url))) {
             blocked += 1;
             if (blocked === 1 || blocked % 200 === 0) console.log(`[electron-env] 省流已拦截 ${blocked} 个资源（最近：${type} ${url.slice(0, 80)}）`);
             return callback({ cancel: true });

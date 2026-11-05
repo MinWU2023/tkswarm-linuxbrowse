@@ -2615,7 +2615,7 @@ async function dmPageProbe(page) {
 
 /** 包一层网络监听：把主文档状态码、失败请求、4xx/5xx、页面脚本报错带进失败现场 */
 async function openRecipientChat(page, recipient, log = () => {}) {
-  const net = { doc: '', hdr: '', failed: [], bad: [], errors: [] };
+  const net = { doc: '', docs: [], hdr: '', failed: [], bad: [], errors: [] };
   const onResp = (resp) => {
     try {
       const req = resp.request();
@@ -2623,6 +2623,7 @@ async function openRecipientChat(page, recipient, log = () => {}) {
       const url = String(resp.url() || '');
       if (type === 'document' && req.frame() === page.mainFrame()) {
         net.doc = `${resp.status()} ${url.slice(0, 80)}`;
+        if (net.docs.length < 8) net.docs.push(`${resp.status()} ${url.replace(/^https?:\/\/[^/]+/, '').slice(0, 50)}`);
         // 记下主文档实际发出的请求头与响应头，用来核对 UA / Client Hints 是否自相矛盾
         const rh = resp.headers() || {};
         net.rhdr = `server=${rh.server || '-'} ct=${String(rh['content-type'] || '-').slice(0, 30)} logid=${String(rh['x-tt-logid'] || '-').slice(0, 24)}`;
@@ -2644,7 +2645,7 @@ async function openRecipientChat(page, recipient, log = () => {}) {
   const onPageErr = (e) => {
     if (net.errors.length < 4) net.errors.push(String(e?.message || e).slice(0, 100));
   };
-  const summary = () => `主文档=${net.doc || '无响应'} 响应头=[${net.rhdr || '-'}] 请求头=[${net.hdr || '-'}] 失败请求=[${net.failed.join(' ; ')}] 4xx5xx=[${net.bad.join(' ; ')}] 脚本报错=[${net.errors.join(' ; ')}]`;
+  const summary = () => `主文档=${net.doc || '无响应'} 文档历史=[${net.docs.join(' ; ')}] 响应头=[${net.rhdr || '-'}] 请求头=[${net.hdr || '-'}] 失败请求=[${net.failed.join(' ; ')}] 4xx5xx=[${net.bad.join(' ; ')}] 脚本报错=[${net.errors.join(' ; ')}]`;
   page.on('response', onResp);
   page.on('requestfailed', onFail);
   page.on('pageerror', onPageErr);
