@@ -119,9 +119,14 @@ function fmtBytes(n) {
   return `${(v / 1024 ** 3).toFixed(2)} GB`;
 }
 
-function openModal(title, html) {
+function openModal(title, html, opts = {}) {
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-body').innerHTML = html;
+  const card = document.querySelector('#modal-root .modal-card');
+  if (card) {
+    card.classList.toggle('modal-card--vnc', opts.vnc === true);
+    card.classList.toggle('modal-card--wide', opts.wide === true);
+  }
   show('#modal-root', true);
   document.getElementById('modal-root').setAttribute('aria-hidden', 'false');
 }
@@ -130,6 +135,10 @@ function closeModal() {
   show('#modal-root', false);
   document.getElementById('modal-root').setAttribute('aria-hidden', 'true');
   document.getElementById('modal-body').innerHTML = '';
+  const card = document.querySelector('#modal-root .modal-card');
+  if (card) {
+    card.classList.remove('modal-card--vnc', 'modal-card--wide');
+  }
 }
 
 function filteredWindows() {
@@ -528,7 +537,7 @@ function openVncEmbed(id, href) {
     <div class="modal-foot-row">
       <a class="btn small ghost" href="${esc(url)}" target="_blank" rel="noopener">新窗口打开</a>
     </div>
-  `);
+  `, { vnc: true });
 }
 
 async function doLogin(e) {

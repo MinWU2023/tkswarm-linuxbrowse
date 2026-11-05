@@ -1047,6 +1047,19 @@ code {
   overflow: hidden;
 }
 
+/* VNC 弹框：约 1680×800 可视区域（小屏自动收） */
+.modal-card.modal-card--vnc {
+  width: min(1680px, calc(100vw - 24px));
+  max-height: min(920px, calc(100vh - 24px));
+}
+.modal-card.modal-card--vnc .modal-body {
+  padding: 8px 12px 12px;
+  overflow: hidden;
+}
+.modal-card.modal-card--vnc .vnc-frame {
+  height: min(800px, calc(100vh - 140px));
+}
+
 .modal-head {
   display: flex;
   justify-content: space-between;
@@ -1085,6 +1098,7 @@ code {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: #0b1220;
+  display: block;
 }
 
 .modal-foot-row {
