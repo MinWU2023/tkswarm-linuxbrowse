@@ -2704,6 +2704,7 @@ async function openRecipientChatInner(page, recipient, log = () => {}, netSummar
   const handle = String(recipient || '').replace(/^@/, '').trim();
   if (!handle) return false;
   const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(handle)}`;
+  let noBtn = 0;
 
   for (let attempt = 0; attempt <= DM_LOAD_RETRIES; attempt += 1) {
     log(attempt === 0
@@ -2729,18 +2730,28 @@ async function openRecipientChatInner(page, recipient, log = () => {}, netSummar
 
     const loadError = state === 'failed' || (state === 'timeout' && !(await profileLooksLoaded(page)));
     if (!loadError) {
-      // 主页已渲染但没有私信入口：先记下主页现场（去消息页之后现场就被覆盖了）
-      const profileProbe = await dmPageProbe(page);
-      log(`主页已加载但没有私信入口：${profileProbe}`);
-      const viaInbox = await openViaMessagesInbox(page, handle);
-      if (viaInbox === 'ready') return true;
-      if (viaInbox !== 'failed') {
-        const probe = `${await dmPageProbe(page)} ｜网络：${netSummary()}`;
-        page.__dmLastProbe = `入口未找到（消息页搜索=${viaInbox}）｜主页：${profileProbe}｜消息页：${probe}`;
-        log(`私信入口未找到（主页有内容但无 Message 按钮，消息页搜索=${viaInbox}）：${probe}`);
-        return false;
+      // 主页资料区已渲染：Message 按钮可能还在 hydrate，再多等一会儿
+      let btn2 = null;
+      const btnEnd = Date.now() + 15000;
+      while (Date.now() < btnEnd) {
+        btn2 = await dmMessageButton(page);
+        if (btn2) break;
+        await page.waitForTimeout(500);
       }
-      state = 'failed';
+      if (btn2) {
+        await btn2.click({ timeout: 8000 }).catch(() => {});
+        state = await waitDmSurface(page, DM_CHAT_WAIT_MS, true);
+        if (state === 'ready') return true;
+        log(`已点击 Message 但未出现输入框，当前页面 ${String(page.url() || '').slice(0, 100)}`);
+      } else {
+        // 不再走消息页搜索：新联系人没有历史会话，搜不到；且 /messages 会被重定向到 business-suite
+        const profileProbe = await dmPageProbe(page);
+        noBtn += 1;
+        page.__dmLastProbe = `主页已加载但没有 Message 按钮（对方可能关闭私信或需互相关注；或页面按钮未加载出来）｜主页：${profileProbe}｜网络：${netSummary()}`;
+        log(`@${handle} 主页没有 Message 按钮（第 ${noBtn} 次）：${profileProbe}`);
+        if (noBtn >= 2) return false;
+        continue;
+      }
     }
 
     const probe = `${await dmPageProbe(page)} ｜网络：${netSummary()}`;
@@ -2755,7 +2766,8 @@ async function prepareMessage(accountId, content, recipient = '', options = {}) 
   await awaitSlot(`message:${accountId}`, 10000);
   const autoSend = options.autoSend === true;
   const { parseSaveTrafficFlag } = require('./save-traffic');
-  const connection = await connectAccount(accountId, 'https://www.tiktok.com/messages', 'message', {
+  // 有收件人：从首页起步，随后进对方主页点 Message（/messages 会被 302 到 business-suite 营销页，且新联系人没有历史会话）
+  const connection = await connectAccount(accountId, recipient ? 'https://www.tiktok.com/' : 'https://www.tiktok.com/messages', 'message', {
     saveTraffic: parseSaveTrafficFlag(options.saveTraffic ?? options.save_traffic, false),
     browserBackend: options.browserBackend,
   });
