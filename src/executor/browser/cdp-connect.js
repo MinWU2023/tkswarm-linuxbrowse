@@ -46,7 +46,7 @@ async function resolvePageWs(httpBase, fallbackWs = '') {
  * - Electron / 同进程：必须连 page 级 ws（browser 级常导致 contexts/pages 为空）
  * - 刚 open 后常出现「ws connected 但协议握手超时」，故短等 + 重试
  */
-async function connectPlaywrightOverCDP(opened, {
+async function connectPlaywrightOverCDPRaw(opened, {
   timeoutMs = 60000,
   retries = 3,
   settleMs = 600,
@@ -115,6 +115,64 @@ async function connectPlaywrightOverCDP(opened, {
   throw lastErr || new Error('连接浏览器 CDP 失败');
 }
 
+/**
+ * 服务器浏览器统一的「等页面加载完整」：每次 goto / reload 返回前，
+ * 先等 load 事件（最多 20 秒），再额外固定等待 TKSWARM_PAGE_SETTLE_MS（默认 20000 毫秒），
+ * 让页面和 VNC 画面显示完整后才进入下一步。设为 0 可关闭固定等待。
+ * 导航本身抛错时不再等待，原样抛给调用方处理。
+ */
+function pageSettleMs() {
+  const raw = process.env.TKSWARM_PAGE_SETTLE_MS;
+  if (raw === undefined || raw === '') return 20000;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : 20000;
+}
+
+async function settlePage(page) {
+  if (!page || page.isClosed?.()) return;
+  await page.waitForLoadState('load', { timeout: 20000 }).catch(() => {});
+  const ms = pageSettleMs();
+  if (ms > 0 && !page.isClosed?.()) await sleep(ms);
+}
+
+function installPageSettle(page) {
+  if (!page || page.__tkSettleInstalled) return page;
+  page.__tkSettleInstalled = true;
+  for (const method of ['goto', 'reload']) {
+    const orig = typeof page[method] === 'function' ? page[method].bind(page) : null;
+    if (!orig) continue;
+    page[method] = async (...args) => {
+      const result = await orig(...args);
+      await settlePage(page).catch(() => {});
+      return result;
+    };
+  }
+  return page;
+}
+
+function installBrowserPageSettle(browser) {
+  try {
+    for (const ctx of browser.contexts()) {
+      ctx.pages().forEach(installPageSettle);
+      if (!ctx.__tkSettleInstalled) {
+        ctx.__tkSettleInstalled = true;
+        ctx.on('page', installPageSettle);
+      }
+    }
+  } catch { /* ignore */ }
+  return browser;
+}
+
+async function connectPlaywrightOverCDP(opened, options) {
+  const browser = await connectPlaywrightOverCDPRaw(opened, options);
+  return installBrowserPageSettle(browser);
+}
+
+async function ensurePlaywrightPage(browser, options) {
+  const page = await ensurePlaywrightPageRaw(browser, options);
+  return installPageSettle(page);
+}
+
 function listOpenPages(browser) {
   try {
     return browser.contexts().flatMap((ctx) => ctx.pages()).filter((p) => !p.isClosed?.());
@@ -145,7 +203,7 @@ async function waitForPlaywrightPage(browser, { timeoutMs = 30000, preferUrl = /
  * @returns {Promise<{ page: import('playwright-core').Page, browser?: any }>}
  * 兼容旧调用：若只拿 Page，仍返回 Page；内部失败时抛错。
  */
-async function ensurePlaywrightPage(browser, {
+async function ensurePlaywrightPageRaw(browser, {
   timeoutMs = 45000,
   preferUrl = /tiktok\.com/i,
   allowNewPage = true,

@@ -2552,7 +2552,8 @@ async function waitDmSurface(page, timeoutMs = DM_CHAT_WAIT_MS, loose = false) {
 async function profileLooksLoaded(page) {
   const text = await page.locator('body').innerText({ timeout: 2000 }).catch(() => '');
   if (DM_LOAD_FAIL_RE.test(String(text || ''))) return false;
-  return /followers|following|粉丝|关注/i.test(String(text || ''));
+  // 左侧导航自带 "Following"，只看整页文字会把「资料区没渲染」误判成已加载；必须看到目标用户的资料区元素
+  return page.locator('[data-e2e="user-page"], [data-e2e="user-title"], [data-e2e="followers-count"]').first().isVisible().catch(() => false);
 }
 
 /** 主页没有私信入口时走消息页搜索；加载失败返回 failed，找到输入框立刻 ready */
@@ -2602,12 +2603,19 @@ async function dmPageProbe(page) {
         text: String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 120),
         act: Array.from(document.querySelectorAll('button,a,[role="button"]')).map((b) => String(b.innerText || b.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ')).filter((t) => /message|follow|log ?in|sign ?up|私信|关注|登录|注册/i.test(t)).slice(0, 10).map((t) => t.slice(0, 18)).join('|'),
         btns: Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 8).map((b) => String(b.innerText || b.getAttribute('aria-label') || '').trim().slice(0, 14)).filter(Boolean).join('|'),
-        e2e: Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((n) => n.getAttribute('data-e2e')))).slice(0, 12).join(','),
+        e2e: Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((n) => n.getAttribute('data-e2e')))).filter((x) => x && !['tiktok-logo', 'search-box', 'search-user-input', 'search-box-button', 'upload-icon', 'inbox-icon', 'inbox-notifications', 'inbox-bar', 'all', 'likes', 'comments'].includes(x)).slice(0, 40).join(','),
+        scripts: document.scripts.length,
+        hdr: (() => {
+          const t = document.querySelector('[data-e2e="user-title"]');
+          const box = t ? (t.closest('[data-e2e="user-page"]') || t.parentElement?.parentElement?.parentElement || t.parentElement) : null;
+          if (!box) return '无user-title';
+          return Array.from(box.querySelectorAll('button,a,[role="button"]')).slice(0, 10).map((n) => `${n.tagName.toLowerCase()}:${String(n.getAttribute('data-e2e') || '')}:${String(n.innerText || n.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ').slice(0, 12)}`).join('|') || '资料区内无按钮/链接';
+        })(),
       })),
       new Promise((resolve) => setTimeout(() => resolve({ hung: true }), 4000)),
     ]);
     if (r?.hung) return '渲染进程4秒无响应';
-    return `页面=${r.url} JS_UA=[${r.jsua}] readyState=${r.rs} body子节点=${r.kids} 文本长度=${r.textLen} 按钮=[${r.btns}] 相关元素=[${r.act}] data-e2e=[${r.e2e}] 文本=${r.text}`;
+    return `页面=${r.url} JS_UA=[${r.jsua}] readyState=${r.rs} body子节点=${r.kids} 文本长度=${r.textLen} 按钮=[${r.btns}] 相关元素=[${r.act}] data-e2e=[${r.e2e}] 资料区控件=[${r.hdr}] 脚本数=${r.scripts} 文本=${r.text}`;
   } catch (e) {
     return `体检失败：${String(e?.message || e).slice(0, 80)}`;
   }

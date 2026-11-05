@@ -23,7 +23,8 @@ const sessions = new Map();
 /** @type {Map<string, number>} accountId -> lock startedAt */
 const activeLogins = new Map();
 // 含打开环境 / 代理冷启动 / 填表提交；过短会在页面仍加载时误报超时
-const LOGIN_LOCK_TTL_MS = 180_000;
+// 每次 goto 后统一多等约 20 秒让页面完整加载（见 cdp-connect.js），总超时相应放宽
+const LOGIN_LOCK_TTL_MS = 360_000;
 const screenshotDir = path.resolve(__dirname, '../../data/automation');
 fs.mkdirSync(screenshotDir, { recursive: true });
 
@@ -1495,7 +1496,7 @@ async function loginAssist(accountId, {
         skipEnvPackPush: deferPack,
       }),
       LOGIN_LOCK_TTL_MS,
-      '登录超时（180 秒）。请确认自研浏览器环境已打开且页面可操作后重试'
+      `登录超时（${Math.round(LOGIN_LOCK_TTL_MS / 1000)} 秒）。请确认自研浏览器环境已打开且页面可操作后重试`
     );
     // 无论成功失败，按实际结果回调同步账号登录状态
     return await callbackLoginStatus(accountId, result || { loginOk: false }, { skipEnvPackPush: deferPack });
