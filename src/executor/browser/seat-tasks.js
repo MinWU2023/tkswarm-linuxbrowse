@@ -344,25 +344,47 @@ async function runSyncFans(accountId, payload = {}) {
       }
       freshLogin = true;
     }
-    const stepLog = (msg) => liveLog(`账号 #${aid}：同步粉丝步骤 · ${msg}（页面 ${String(connection.page?.url?.() || '').slice(0, 80)}）`, 'info', { accountId: aid });
+    // 每步日志附带页面体检：渲染进程是否还响应、DOM 是否被清空（4 秒无响应 = 渲染进程挂死/黑屏）
+    const pageProbe = async () => {
+      try {
+        const r = await Promise.race([
+          connection.page.evaluate(() => ({
+            rs: document.readyState,
+            textLen: String(document.body?.innerText || '').length,
+            kids: document.body?.childElementCount || 0,
+            vis: document.visibilityState,
+            size: `${window.innerWidth}x${window.innerHeight}`,
+          })),
+          new Promise((resolve) => setTimeout(() => resolve({ hung: true }), 4000)),
+        ]);
+        if (r?.hung) return '渲染进程4秒无响应';
+        return `readyState=${r.rs} 文本长度=${r.textLen} body子节点=${r.kids} vis=${r.vis} 窗口=${r.size}`;
+      } catch (e) {
+        return `体检失败：${String(e?.message || e).slice(0, 80)}`;
+      }
+    };
+    const stepLog = async (msg) => {
+      const probe = await pageProbe();
+      liveLog(`账号 #${aid}：同步粉丝步骤 · ${msg}（页面 ${String(connection.page?.url?.() || '').slice(0, 80)}；${probe}）`, 'info', { accountId: aid });
+    };
     if (freshLogin) {
       // 登录确认后立即：落会话凭证 → 在线导出环境包上传 → 解除占用（WSS 通知队首），再去抓列表
-      stepLog('登录已确认，开始保存会话凭证');
+      await stepLog('登录已确认，开始保存会话凭证');
       await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
       if (connection.context) {
         await persistAccountSessionLog(aid, connection.context, connection.page).catch(() => {});
       }
-      stepLog('会话凭证已保存，开始在线导出并上传环境包');
+      await stepLog('会话凭证已保存，开始在线导出并上传环境包');
       await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
       livePushed = true;
-      stepLog('环境包流程结束');
+      await stepLog('环境包流程结束');
     }
-    stepLog(`准备打开列表页 ${startUrl}`);
+    await stepLog(`准备打开列表页 ${startUrl}`);
     await connection.page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((e) => {
       liveLog(`账号 #${aid}：打开列表页失败：${String(e?.message || e).slice(0, 160)}`, 'warn', { accountId: aid });
     });
     await connection.page.waitForTimeout?.(2000).catch(() => {});
-    stepLog('列表页已打开，开始抓取');
+    await stepLog('列表页已打开，开始抓取');
     // 列表页又被踢回登录墙：同样打开登录页并软等待
     const again = await probeLogin(connection, aid);
     if (!again?.loggedIn) {
