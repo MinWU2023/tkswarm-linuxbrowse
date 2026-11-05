@@ -2519,6 +2519,9 @@ async function dmEditorVisible(page, loose = false) {
 async function dmMessageButton(page) {
   const btn = page.getByRole('button', { name: /^(Message|私信|发私信)$/i }).first();
   if (await btn.count().catch(() => 0) && await btn.isVisible().catch(() => false)) return btn;
+  // 兜底：按钮可能是链接或带 data-e2e 的元素
+  const alt = page.locator('[data-e2e="message-button"], [data-e2e="dm-button"], a[role="button"]:text-is("Message"), a:text-is("Message"), a:text-is("私信")').first();
+  if (await alt.count().catch(() => 0) && await alt.isVisible().catch(() => false)) return alt;
   return null;
 }
 
@@ -2596,13 +2599,14 @@ async function dmPageProbe(page) {
         kids: document.body?.childElementCount || 0,
         textLen: String(document.body?.innerText || '').length,
         text: String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 120),
+        act: Array.from(document.querySelectorAll('button,a,[role="button"]')).map((b) => String(b.innerText || b.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ')).filter((t) => /message|follow|log ?in|sign ?up|私信|关注|登录|注册/i.test(t)).slice(0, 10).map((t) => t.slice(0, 18)).join('|'),
         btns: Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 8).map((b) => String(b.innerText || b.getAttribute('aria-label') || '').trim().slice(0, 14)).filter(Boolean).join('|'),
         e2e: Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((n) => n.getAttribute('data-e2e')))).slice(0, 12).join(','),
       })),
       new Promise((resolve) => setTimeout(() => resolve({ hung: true }), 4000)),
     ]);
     if (r?.hung) return '渲染进程4秒无响应';
-    return `页面=${r.url} readyState=${r.rs} body子节点=${r.kids} 文本长度=${r.textLen} 按钮=[${r.btns}] data-e2e=[${r.e2e}] 文本=${r.text}`;
+    return `页面=${r.url} readyState=${r.rs} body子节点=${r.kids} 文本长度=${r.textLen} 按钮=[${r.btns}] 相关元素=[${r.act}] data-e2e=[${r.e2e}] 文本=${r.text}`;
   } catch (e) {
     return `体检失败：${String(e?.message || e).slice(0, 80)}`;
   }
@@ -2629,11 +2633,14 @@ async function openRecipientChat(page, recipient, log = () => {}) {
 
     const loadError = state === 'failed' || (state === 'timeout' && !(await profileLooksLoaded(page)));
     if (!loadError) {
+      // 主页已渲染但没有私信入口：先记下主页现场（去消息页之后现场就被覆盖了）
+      const profileProbe = await dmPageProbe(page);
+      log(`主页已加载但没有私信入口：${profileProbe}`);
       const viaInbox = await openViaMessagesInbox(page, handle);
       if (viaInbox === 'ready') return true;
       if (viaInbox !== 'failed') {
         const probe = await dmPageProbe(page);
-        page.__dmLastProbe = `入口未找到（消息页搜索=${viaInbox}）${probe}`;
+        page.__dmLastProbe = `入口未找到（消息页搜索=${viaInbox}）｜主页：${profileProbe}｜消息页：${probe}`;
         log(`私信入口未找到（主页有内容但无 Message 按钮，消息页搜索=${viaInbox}）：${probe}`);
         return false;
       }
@@ -2675,7 +2682,7 @@ async function prepareMessage(accountId, content, recipient = '', options = {}) 
         keepOpen = true;
         return {
           status: 'failed',
-          error: `私信界面加载失败（已重新加载 ${DM_LOAD_RETRIES} 次）：${recipient}${connection.page.__dmLastProbe ? `；页面现场：${String(connection.page.__dmLastProbe).slice(0, 360)}` : ''}`,
+          error: `私信界面打开失败：${recipient}${connection.page.__dmLastProbe ? `；页面现场：${String(connection.page.__dmLastProbe).slice(0, 700)}` : ''}`,
           screenshot: before,
           recipient,
         };
