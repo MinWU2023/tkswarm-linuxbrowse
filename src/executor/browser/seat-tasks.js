@@ -168,6 +168,29 @@ async function runCsLogout(accountId) {
   return { status: 'completed', result: { loginStatus: 'offline', profileId } };
 }
 
+const LOGIN_EMAIL_URL = 'https://www.tiktok.com/login/phone-or-email/email';
+
+/** 未登录时跳到邮箱登录页，方便 VNC 人工登录（不要停在首页弹层） */
+async function gotoLoginPageForManual(connection, accountId) {
+  const page = connection?.page;
+  if (!page || page.isClosed?.()) return;
+  liveLog(
+    `账号 #${accountId}：未登录，正在打开登录页（可在 VNC 完成登录后重试同步）`,
+    'warn',
+    { accountId },
+  );
+  await page.goto(LOGIN_EMAIL_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+  await page.waitForTimeout?.(800).catch(() => {});
+  // 若仍停在方法选择页，点「Use phone / email」
+  try {
+    const phoneEmail = page.getByText(/Use phone(?:\/| or )?email|手机(?:号)?或邮箱|电话或电子邮件/i).first();
+    if (await phoneEmail.isVisible({ timeout: 2500 }).catch(() => false)) {
+      await phoneEmail.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout?.(600).catch(() => {});
+    }
+  } catch { /* ignore */ }
+}
+
 /**
  * 粉丝/关注列表同步：打开主页列表页，抓取可见用户写入 chat_users（dm-ingest）。
  */
@@ -184,19 +207,55 @@ async function runSyncFans(accountId, payload = {}) {
 
   const pathSeg = listKind === 'following' ? 'following' : 'followers';
   const startUrl = `https://www.tiktok.com/@${encodeURIComponent(uname)}/${pathSeg}`;
-  const { connection, profileId } = await openSeatBrowser(aid, startUrl);
+  // 先打开首页探测登录态；未登录再进登录页，已登录再进粉丝/关注列表
+  const { connection, profileId } = await openSeatBrowser(aid, 'https://www.tiktok.com/');
   let livePushed = false;
+  let keepOpen = false;
   try {
-    const session = await probeLogin(connection, aid);
+    let session = await probeLogin(connection, aid);
     if (!session?.loggedIn) {
       await tryInjectSavedSession(connection, aid);
-      const again = await probeLogin(connection, aid);
-      if (!again?.loggedIn) {
-        throw waitingLoginDataError(aid, '同步粉丝/关注前需已登录');
+      session = await probeLogin(connection, aid);
+    }
+    if (!session?.loggedIn) {
+      // 服务器侧尝试一键登录（有账号密码时）；失败则打开登录页留给 VNC
+      liveLog(`账号 #${aid}：同步粉丝前未登录，尝试一键登录`, 'warn', { accountId: aid });
+      let login = null;
+      try {
+        login = await fullLogin(aid, {
+          connection,
+          reuseOpen: true,
+          forceRelaunch: false,
+        });
+      } catch (e) {
+        liveLog(`账号 #${aid}：一键登录异常：${e.message || e}`, 'warn', { accountId: aid });
+      }
+      const ok = Boolean(login?.loginOk || login?.alreadyLoggedIn);
+      if (!ok) {
+        await gotoLoginPageForManual(connection, aid);
+        await dataStore.updateLoginStatus(aid, 'offline').catch(() => {});
+        keepOpen = true;
+        throw waitingLoginDataError(
+          aid,
+          login?.message || '同步粉丝/关注前需已登录：已打开登录页，请在 VNC 完成登录后重试',
+        );
+      }
+      session = await probeLogin(connection, aid);
+      if (!session?.loggedIn) {
+        await gotoLoginPageForManual(connection, aid);
+        keepOpen = true;
+        throw waitingLoginDataError(aid, '一键登录后仍未登录，请在 VNC 完成登录后重试');
       }
     }
     await connection.page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await connection.page.waitForTimeout?.(2000).catch(() => {});
+    // 列表页又被踢回登录墙：同样打开登录页并软等待
+    const again = await probeLogin(connection, aid);
+    if (!again?.loggedIn) {
+      await gotoLoginPageForManual(connection, aid);
+      keepOpen = true;
+      throw waitingLoginDataError(aid, '打开粉丝/关注页后仍未登录，已跳转登录页');
+    }
 
     const users = [];
     const seen = new Set();
@@ -260,9 +319,19 @@ async function runSyncFans(accountId, payload = {}) {
       result: { progress, count: users.length, profileId },
     };
   } finally {
-    try { await closeConnection(connection, { force: true }); } catch { /* */ }
-    try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
-    if (!livePushed) await releaseSeatLease(profileId);
+    if (!keepOpen) {
+      try { await closeConnection(connection, { force: true }); } catch { /* */ }
+      try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+      if (!livePushed) await releaseSeatLease(profileId);
+    } else {
+      // 留给 VNC 人工登录；只断 Playwright 会话缓存，不关 Electron 窗
+      try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* */ }
+      liveLog(
+        `账号 #${aid}：浏览器窗口保持打开，请在远程查看完成登录后重试「粉丝/关注同步」`,
+        'warn',
+        { accountId: aid, profileId },
+      );
+    }
   }
 }
 

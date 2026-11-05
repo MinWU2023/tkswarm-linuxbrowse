@@ -1401,6 +1401,13 @@ async function executeWorkBatch(batch) {
         || code === WAITING_ENV_PACK
         || code === WAITING_LOGIN_DATA
         || /WAITING_ENV_PACK|WAITING_LOGIN_DATA|缺环境包|登录数据无法同步/i.test(String(error?.message || ''));
+      // 未登录软等待：保持窗口，方便 VNC 完成登录后再重试
+      if (waiting && (
+        code === WAITING_LOGIN_DATA
+        || /登录数据无法同步|需已登录|打开登录页|VNC/i.test(String(error?.message || ''))
+      )) {
+        holdBrowserForHumanVerify = true;
+      }
       liveLog(
         `总任务 #${batchId} ${waiting ? '等待重试' : '出错'}：${error.message}`,
         waiting ? 'warn' : 'error',
@@ -1429,7 +1436,7 @@ async function executeWorkBatch(batch) {
       clearInterval(heartbeatTimer);
       if (holdBrowserForHumanVerify) {
         liveLog(
-          `总任务 #${batchId} 因人工验证挂起，浏览器窗口保持打开，请完成后在右上角通知点「恢复」`,
+          `总任务 #${batchId} 因人工验证/待登录挂起，浏览器窗口保持打开，请在 VNC 完成后重试或点「恢复」`,
           'warn',
           { accountId, batchId, profileId }
         );
