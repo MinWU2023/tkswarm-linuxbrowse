@@ -494,10 +494,11 @@ async function closeWindow(id) {
     confirmText: '关闭',
     danger: true,
   });
-  if (!ok) return;
+  if (!ok) return false;
   await json('POST', `/api/windows/${encodeURIComponent(id)}/close`);
   toast('窗口已关闭', 'ok');
   await refreshDashboard();
+  return true;
 }
 
 async function closeSelected() {
@@ -540,9 +541,34 @@ function openVncEmbed(id, href) {
   const url = href || `/vnc.html?id=${encodeURIComponent(id)}`;
   openModal(`VNC · ${String(id).slice(0, 12)}…`, `
     <iframe class="vnc-frame" src="${esc(url)}" title="VNC" allow="clipboard-read; clipboard-write"></iframe>
-  `, {
-    vnc: true,
-    headExtra: `<a class="btn small ghost" href="${esc(url)}" target="_blank" rel="noopener">新窗口打开</a>`,
+    <div class="vnc-fab-wrap">
+      <button type="button" class="vnc-fab" id="vnc-fab" aria-label="菜单" aria-expanded="false">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <div class="vnc-menu hidden" id="vnc-menu">
+        <a class="vnc-menu-item" id="vnc-menu-open" href="${esc(url)}" target="_blank" rel="noopener">新窗打开</a>
+        <button type="button" class="vnc-menu-item danger" id="vnc-menu-close">关闭环境</button>
+      </div>
+    </div>
+  `, { vnc: true });
+
+  const fab = document.getElementById('vnc-fab');
+  const menu = document.getElementById('vnc-menu');
+  const setMenu = (open) => {
+    menu?.classList.toggle('hidden', !open);
+    fab?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  fab?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setMenu(menu.classList.contains('hidden'));
+  });
+  // 点进 iframe（画面区域）时父页面失焦，顺带收起菜单
+  window.addEventListener('blur', () => setMenu(false));
+  document.getElementById('vnc-menu-open')?.addEventListener('click', () => setMenu(false));
+  document.getElementById('vnc-menu-close')?.addEventListener('click', async () => {
+    setMenu(false);
+    const done = await closeWindow(id);
+    if (done) closeModal();
   });
 }
 
@@ -645,6 +671,12 @@ async function init() {
   });
   document.querySelectorAll('[data-close-modal]').forEach((el) => {
     el.addEventListener('click', closeModal);
+  });
+  // VNC 弹窗没有标题栏：Esc 可退回控制台（不关闭环境）
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const root = document.getElementById('modal-root');
+    if (root && !root.classList.contains('hidden')) closeModal();
   });
   document.getElementById('btn-copy-token').onclick = async () => {
     const t = document.getElementById('api-token').textContent.trim();

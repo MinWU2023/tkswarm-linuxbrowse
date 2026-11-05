@@ -1047,18 +1047,24 @@ code {
   overflow: hidden;
 }
 
-/* VNC 弹框：近全屏，只保留一条紧凑标题栏，画面撑满其余区域 */
-.modal-root.modal-root--vnc { padding: 6px; }
+/* VNC 弹框：与屏幕同宽高，无标题栏/边框/留白；仅保留一个悬浮菜单按钮 */
+.modal-root.modal-root--vnc { padding: 0; }
+.modal-root.modal-root--vnc .modal-backdrop { display: none; }
 .modal-card.modal-card--vnc {
-  width: calc(100vw - 12px);
-  height: calc(100vh - 12px);
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
   max-height: none;
-  border-radius: 10px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+  background: #0b1220;
 }
 .modal-card.modal-card--vnc::before { display: none; }
-.modal-card.modal-card--vnc .modal-head { padding: 5px 10px; }
-.modal-card.modal-card--vnc .modal-head strong { font-size: 13px; }
+.modal-card.modal-card--vnc .modal-head { display: none; }
 .modal-card.modal-card--vnc .modal-body {
+  position: relative;
   padding: 0;
   min-height: 0;
   flex: 1;
@@ -1067,12 +1073,65 @@ code {
 }
 .modal-card.modal-card--vnc .vnc-frame {
   flex: 1;
-  height: auto;
+  width: 100%;
+  height: 100%;
   min-height: 0;
   border: 0;
   border-radius: 0;
 }
 .modal-head-actions { display: flex; align-items: center; gap: 8px; }
+
+/* VNC 悬浮菜单 */
+.vnc-fab-wrap { position: absolute; top: 12px; right: 12px; z-index: 3; }
+.vnc-fab {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s;
+}
+.vnc-fab:hover,
+.vnc-fab[aria-expanded="true"] { opacity: 1; background: rgba(15, 23, 42, 0.92); }
+.vnc-menu {
+  position: absolute;
+  top: 42px;
+  right: 0;
+  min-width: 128px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+.vnc-menu.hidden { display: none; }
+.vnc-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.vnc-menu-item:hover { background: rgba(255, 255, 255, 0.1); }
+.vnc-menu-item.danger { color: #fda4af; }
+.vnc-menu-item.danger:hover { background: rgba(225, 29, 72, 0.22); }
 
 .modal-head {
   display: flex;
