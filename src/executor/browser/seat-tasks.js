@@ -399,22 +399,70 @@ async function runSyncFans(accountId, payload = {}) {
     const countSel = listKind === 'following'
       ? '[data-e2e="following-count"], [data-e2e="following"]'
       : '[data-e2e="followers-count"], [data-e2e="followers"]';
-    const waitModal = () => connection.page.locator(MODAL_SEL).first()
-      .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+    const pg = connection.page;
+    // 先等主页上的粉丝/关注数渲染出来
+    await pg.locator(countSel).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    // 弹窗检测：先按已知选择器，再按「悬浮层里至少 2 个用户链接」兜底；命中的根节点打上 data-tks-list 标记，供抓取/滚动复用
+    const detectList = async (timeoutMs) => {
+      const end = Date.now() + timeoutMs;
+      while (Date.now() < end) {
+        const hit = await pg.evaluate(({ sel, self }) => {
+          const vis = (el) => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 80 && r.height > 80 && s.visibility !== 'hidden' && s.display !== 'none';
+          };
+          const userLinks = (root) => Array.from(root.querySelectorAll('a[href*="/@"]')).filter((a) => {
+            const m = String(a.getAttribute('href') || '').match(/\/@([^/?#]+)/);
+            return m && decodeURIComponent(m[1]).toLowerCase() !== self;
+          });
+          document.querySelectorAll('[data-tks-list]').forEach((n) => n.removeAttribute('data-tks-list'));
+          let root = Array.from(document.querySelectorAll(sel)).find((el) => {
+            if (!vis(el)) return false;
+            if (el.getAttribute('role') !== 'dialog') return true;
+            return userLinks(el).length > 0 || /Following|Followers|关注|粉丝/i.test(el.innerText || '');
+          }) || null;
+          if (!root) {
+            const cands = Array.from(document.querySelectorAll('div,section,aside')).filter((el) => {
+              const p = getComputedStyle(el).position;
+              return (p === 'fixed' || p === 'absolute') && vis(el) && userLinks(el).length >= 2;
+            });
+            cands.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+            root = cands[0] || null;
+          }
+          if (!root) return false;
+          root.setAttribute('data-tks-list', '1');
+          return true;
+        }, { sel: MODAL_SEL, self: uname.toLowerCase() }).catch(() => false);
+        if (hit) return true;
+        await pg.waitForTimeout(500).catch(() => {});
+      }
+      return false;
+    };
+    const textRe = listKind === 'following' ? /^(Following|关注)$/i : /^(Followers|粉丝)$/i;
+    const clickers = [
+      () => pg.locator(countSel).first().click({ timeout: 6000 }),
+      () => pg.locator(countSel).first().click({ timeout: 4000, force: true }),
+      () => pg.locator(countSel).first().evaluate((el) => (el.closest('a,button,[role="button"]') || el.parentElement || el).click()),
+      () => pg.getByText(textRe).first().click({ timeout: 5000 }),
+    ];
     let listOpened = false;
-    try {
-      await connection.page.locator(countSel).first().click({ timeout: 8000 });
-      listOpened = await waitModal();
-    } catch { /* 走文字兜底 */ }
-    if (!listOpened) {
-      try {
-        const textRe = listKind === 'following' ? /^(Following|关注)$/i : /^(Followers|粉丝)$/i;
-        await connection.page.getByText(textRe).first().click({ timeout: 6000 });
-        listOpened = await waitModal();
-      } catch { /* ignore */ }
+    for (let i = 0; i < clickers.length && !listOpened; i += 1) {
+      try { await clickers[i](); } catch { /* 换下一种点法 */ }
+      listOpened = await detectList(6000);
+      if (!listOpened) await stepLog(`第 ${i + 1}/${clickers.length} 种点击方式后未见列表弹窗`);
     }
     await stepLog(`列表弹窗${listOpened ? '已打开' : '未能打开'}，开始抓取`);
     if (!listOpened) {
+      // 把页面现状写进日志，便于对照真实 DOM 调整选择器
+      const diag = await pg.evaluate(() => {
+        const e2e = Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((n) => n.getAttribute('data-e2e')))).slice(0, 40).join(',');
+        const dialogs = document.querySelectorAll('[role="dialog"]').length;
+        const links = document.querySelectorAll('a[href*="/@"]').length;
+        const text = String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 160);
+        return `data-e2e=[${e2e}] dialog=${dialogs} /@链接=${links} 文本=${text}`;
+      }).catch((e) => `诊断失败：${String(e?.message || e).slice(0, 80)}`);
+      liveLog(`账号 #${aid}：打开「${kindLabel}」弹窗失败，页面现状：${diag}`, 'warn', { accountId: aid });
       throw new Error(`未能打开「${kindLabel}」列表弹窗（当前页 ${String(connection.page.url?.() || '').slice(0, 80)}），本次不入库，避免把推荐流当成${kindLabel}`);
     }
     const users = [];
@@ -423,7 +471,7 @@ async function runSyncFans(accountId, payload = {}) {
       const batch = await connection.page.evaluate(({ sel, self }) => {
         const out = [];
         // 只在列表弹窗内取，不碰页面其它区域
-        const root = document.querySelector(sel);
+        const root = document.querySelector('[data-tks-list="1"]') || document.querySelector(sel);
         if (!root) return out;
         const anchors = Array.from(root.querySelectorAll('a[href*="/@"]'));
         for (const a of anchors) {
@@ -453,7 +501,7 @@ async function runSyncFans(accountId, payload = {}) {
       }
       // 滚动弹窗里真正可滚动的容器（不是整页）
       await connection.page.evaluate((sel) => {
-        const root = document.querySelector(sel);
+        const root = document.querySelector('[data-tks-list="1"]') || document.querySelector(sel);
         if (!root) return;
         const nodes = [root, ...Array.from(root.querySelectorAll('*'))];
         const scroller = nodes.find((n) => n.scrollHeight > n.clientHeight + 20
