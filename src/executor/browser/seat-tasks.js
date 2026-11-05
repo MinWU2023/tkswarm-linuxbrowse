@@ -344,17 +344,25 @@ async function runSyncFans(accountId, payload = {}) {
       }
       freshLogin = true;
     }
+    const stepLog = (msg) => liveLog(`账号 #${aid}：同步粉丝步骤 · ${msg}（页面 ${String(connection.page?.url?.() || '').slice(0, 80)}）`, 'info', { accountId: aid });
     if (freshLogin) {
       // 登录确认后立即：落会话凭证 → 在线导出环境包上传 → 解除占用（WSS 通知队首），再去抓列表
+      stepLog('登录已确认，开始保存会话凭证');
       await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
       if (connection.context) {
         await persistAccountSessionLog(aid, connection.context, connection.page).catch(() => {});
       }
+      stepLog('会话凭证已保存，开始在线导出并上传环境包');
       await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
       livePushed = true;
+      stepLog('环境包流程结束');
     }
-    await connection.page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    stepLog(`准备打开列表页 ${startUrl}`);
+    await connection.page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((e) => {
+      liveLog(`账号 #${aid}：打开列表页失败：${String(e?.message || e).slice(0, 160)}`, 'warn', { accountId: aid });
+    });
     await connection.page.waitForTimeout?.(2000).catch(() => {});
+    stepLog('列表页已打开，开始抓取');
     // 列表页又被踢回登录墙：同样打开登录页并软等待
     const again = await probeLogin(connection, aid);
     if (!again?.loggedIn) {

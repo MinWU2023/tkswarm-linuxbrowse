@@ -846,7 +846,21 @@ async function dismissLoginOverlay(page) {
     }
   } catch { /* ignore */ }
   await page.evaluate(() => {
-    const kill = (el) => { try { el.remove(); } catch { /* */ } };
+    // 保护：绝不动 html/body/根容器，也不动包含主站导航/搜索/头像/视频流的元素（否则整页被删成黑屏）
+    const APP_MARKERS = '[data-e2e="nav-profile"], [data-e2e="top-profile-icon"], [data-e2e="profile-icon"], [data-e2e="search-box"], [data-e2e="recommend-list-item-container"], [data-e2e="user-post-item"], main, nav, header, video';
+    const kill = (el) => {
+      try {
+        if (!el || el === document.body || el === document.documentElement) return;
+        if (el.id === 'app' || el.id === 'root' || el.id === '__next') return;
+        if (el.querySelector(APP_MARKERS)) return;
+        const r = el.getBoundingClientRect();
+        // 覆盖全屏且子节点很多 = 页面主体，不是弹层
+        if (r.width >= window.innerWidth * 0.95 && r.height >= window.innerHeight * 0.95 && el.querySelectorAll('*').length > 120) return;
+        // 改为隐藏而非 remove，避免破坏页面框架脚本
+        el.style.setProperty('display', 'none', 'important');
+        el.style.setProperty('pointer-events', 'none', 'important');
+      } catch { /* */ }
+    };
     document.querySelectorAll(
       '[data-e2e="modal-close-inner-button"], [class*="DivModalContainer"], [class*="ModalMask"], [class*="modal-mask"]',
     ).forEach(kill);
