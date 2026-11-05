@@ -2657,6 +2657,40 @@ async function openRecipientChat(page, recipient, log = () => {}) {
   }
 }
 
+/** 人工验证等待时长（毫秒），默认 5 分钟；可用 TKSWARM_DM_MANUAL_WAIT_MS 覆盖 */
+const DM_MANUAL_WAIT_MS = Number(process.env.TKSWARM_DM_MANUAL_WAIT_MS || 300000) || 300000;
+
+/**
+ * 主文档 403（疑似人机验证/风控）时：不再重载，临时关闭省流，等人工在 VNC 里完成验证。
+ * @returns {'ready'|'loaded'|'timeout'}
+ */
+async function waitManualVerify(page, handle, log = () => {}) {
+  let paused = false;
+  try {
+    const st = require('./save-traffic');
+    await st.pauseSaveTrafficForCaptcha(page);
+    paused = true;
+  } catch { /* ignore */ }
+  log(`@${handle} 主页返回 403（疑似人机验证/风控）：已停止自动重载并临时关闭省流，请在 VNC 里完成验证，最多等 ${Math.round(DM_MANUAL_WAIT_MS / 60000)} 分钟`);
+  const end = Date.now() + DM_MANUAL_WAIT_MS;
+  let result = 'timeout';
+  while (Date.now() < end) {
+    if (page.isClosed?.()) break;
+    if (await dmEditorVisible(page, true).catch(() => false)) { result = 'ready'; break; }
+    if (await dmMessageButton(page).catch(() => null)) { result = 'loaded'; break; }
+    if (await profileLooksLoaded(page).catch(() => false)) { result = 'loaded'; break; }
+    await page.waitForTimeout(2000).catch(() => {});
+  }
+  if (paused) {
+    try {
+      const st = require('./save-traffic');
+      if (result !== 'timeout') await st.resumeSaveTrafficAfterCaptcha(page);
+    } catch { /* ignore */ }
+  }
+  log(result === 'timeout' ? '等待人工验证超时，未恢复' : '页面已恢复，继续打开私信');
+  return result;
+}
+
 async function openRecipientChatInner(page, recipient, log = () => {}, netSummary = () => '') {
   const handle = String(recipient || '').replace(/^@/, '').trim();
   if (!handle) return false;
@@ -2667,6 +2701,14 @@ async function openRecipientChatInner(page, recipient, log = () => {}, netSummar
       ? `打开私信 @${handle}`
       : `私信界面重新加载 @${handle}（${attempt}/${DM_LOAD_RETRIES}）`);
     await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: DM_NAV_TIMEOUT_MS }).catch(() => {});
+    if (/主文档=403/.test(netSummary())) {
+      const manual = await waitManualVerify(page, handle, log);
+      if (manual === 'ready') return true;
+      if (manual === 'timeout') {
+        page.__dmLastProbe = `主文档 403（疑似人机验证/风控），等待人工 ${Math.round(DM_MANUAL_WAIT_MS / 60000)} 分钟后仍未恢复：${await dmPageProbe(page)} ｜网络：${netSummary()}`;
+        return false;
+      }
+    }
     let state = await waitDmSurface(page, DM_CHAT_WAIT_MS);
     if (state === 'ready') return true;
     if (state === 'button') {
