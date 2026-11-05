@@ -1,4 +1,4 @@
-﻿const { nowChinaIso } = require('./utils/china-time');
+const { nowChinaIso } = require('./utils/china-time');
 
 const clients = new Set();
 
@@ -28,6 +28,11 @@ function publish(message, level = 'info', data = {}) {
   const raw = JSON.stringify(event);
   for (const socket of clients) {
     if (socket.readyState === 1) socket.send(raw);
+  }
+
+  // 同步输出到 stdout（journalctl 可查）；TKSWARM_LIVELOG_CONSOLE=0 可关闭
+  if (String(process.env.TKSWARM_LIVELOG_CONSOLE || '1') !== '0') {
+    try { console.log(`[live-log][${level}] ${String(message || '')}`); } catch { /* ignore */ }
   }
 
   // 有会话/子任务上下文时异步落库，供任务汇总「查看日志」

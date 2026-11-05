@@ -429,6 +429,7 @@ async function runSyncFans(accountId, payload = {}) {
       await connection.page.waitForTimeout?.(900).catch(() => {});
     }
 
+    await stepLog(`抓取循环结束 抓到=${users.length}${users.length ? '' : '（为 0：列表页可能没渲染出来）'}`);
     let added = 0;
     let updated = 0;
     if (users.length) {
