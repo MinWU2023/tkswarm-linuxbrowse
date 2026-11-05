@@ -80,7 +80,10 @@ async function launchProfileElectron(profile, options = {}) {
     timezone,
     latitude,
     longitude,
-    softwareRender: String(process.env.TKSWARM_SOFTWARE_RENDER || '') === '1',
+    // Linux 服务器（Xvfb 无 GPU）默认软件渲染，否则常见「黑屏 → 窗口/进程退出」；设 TKSWARM_SOFTWARE_RENDER=0 可关闭
+    softwareRender: process.platform === 'linux'
+      ? String(process.env.TKSWARM_SOFTWARE_RENDER || '1') !== '0'
+      : String(process.env.TKSWARM_SOFTWARE_RENDER || '') === '1',
   };
 
   const args = [
@@ -121,12 +124,18 @@ async function launchProfileElectron(profile, options = {}) {
     `proxy=${proxyServer || '直连'}`,
   ].join('\n'));
 
+  // stdout/stderr 落到 env-<id>.log，便于排查 GPU / 渲染进程崩溃（原先 stdio:'ignore' 全部丢弃）
+  let logFd = null;
+  try { logFd = fs.openSync(logFile, 'a'); } catch { logFd = null; }
   const child = spawn(electronBin, args, {
     detached: false,
-    stdio: 'ignore',
+    stdio: logFd != null ? ['ignore', logFd, logFd] : 'ignore',
     env: childEnv,
     windowsHide: headless,
   });
+  if (logFd != null) {
+    try { fs.closeSync(logFd); } catch { /* 子进程已继承 fd */ }
+  }
   child.on('error', (error) => appendLog(logFile, `[spawn error] ${error?.message || error}`));
   child.on('exit', (code, signal) => appendLog(logFile, `[exit] code=${code} signal=${signal}`));
   writePid(profile.id, child.pid);

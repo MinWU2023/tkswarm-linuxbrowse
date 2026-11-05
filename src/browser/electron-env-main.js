@@ -47,6 +47,7 @@ if (cfg.softwareRender) {
     app.disableHardwareAcceleration();
     app.commandLine.appendSwitch('use-gl', 'swiftshader');
     app.commandLine.appendSwitch('disable-gpu');
+    app.commandLine.appendSwitch('disable-gpu-compositing');
   } catch { /* ignore */ }
 }
 
@@ -114,8 +115,20 @@ app.whenReady().then(async () => {
     app.quit();
   });
 
+  let renderReloads = 0;
   win.webContents.on('render-process-gone', (_e, details) => {
     console.error('[electron-env] render-process-gone', details?.reason || details);
+    // 渲染进程崩溃（黑屏）：窗口还在就重载，避免整个环境失去 page；最多 3 次，防止崩溃循环
+    if (renderReloads >= 3) return;
+    renderReloads += 1;
+    setTimeout(() => {
+      try {
+        if (!win.isDestroyed()) win.loadURL(startUrl).catch(() => {});
+      } catch { /* ignore */ }
+    }, 800);
+  });
+  app.on('child-process-gone', (_e, details) => {
+    console.error('[electron-env] child-process-gone', details?.type, details?.reason);
   });
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.warn(`[electron-env] did-fail-load ${code} ${desc} ${url}`);
