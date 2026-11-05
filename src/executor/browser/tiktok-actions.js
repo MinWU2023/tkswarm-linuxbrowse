@@ -2595,6 +2595,7 @@ async function dmPageProbe(page) {
     const r = await Promise.race([
       page.evaluate(() => ({
         url: location.href.slice(0, 90),
+        jsua: `${String(navigator.userAgent || '').slice(0, 100)} | uaData=${navigator.userAgentData ? `${navigator.userAgentData.platform} ${(navigator.userAgentData.brands || []).map((b) => `${b.brand}/${b.version}`).join(',')}`.slice(0, 120) : '无'} | webdriver=${navigator.webdriver}`,
         rs: document.readyState,
         kids: document.body?.childElementCount || 0,
         textLen: String(document.body?.innerText || '').length,
@@ -2606,7 +2607,7 @@ async function dmPageProbe(page) {
       new Promise((resolve) => setTimeout(() => resolve({ hung: true }), 4000)),
     ]);
     if (r?.hung) return '渲染进程4秒无响应';
-    return `页面=${r.url} readyState=${r.rs} body子节点=${r.kids} 文本长度=${r.textLen} 按钮=[${r.btns}] 相关元素=[${r.act}] data-e2e=[${r.e2e}] 文本=${r.text}`;
+    return `页面=${r.url} JS_UA=[${r.jsua}] readyState=${r.rs} body子节点=${r.kids} 文本长度=${r.textLen} 按钮=[${r.btns}] 相关元素=[${r.act}] data-e2e=[${r.e2e}] 文本=${r.text}`;
   } catch (e) {
     return `体检失败：${String(e?.message || e).slice(0, 80)}`;
   }
@@ -2614,7 +2615,7 @@ async function dmPageProbe(page) {
 
 /** 包一层网络监听：把主文档状态码、失败请求、4xx/5xx、页面脚本报错带进失败现场 */
 async function openRecipientChat(page, recipient, log = () => {}) {
-  const net = { doc: '', failed: [], bad: [], errors: [] };
+  const net = { doc: '', hdr: '', failed: [], bad: [], errors: [] };
   const onResp = (resp) => {
     try {
       const req = resp.request();
@@ -2622,6 +2623,12 @@ async function openRecipientChat(page, recipient, log = () => {}) {
       const url = String(resp.url() || '');
       if (type === 'document' && req.frame() === page.mainFrame()) {
         net.doc = `${resp.status()} ${url.slice(0, 80)}`;
+        // 记下主文档实际发出的请求头与响应头，用来核对 UA / Client Hints 是否自相矛盾
+        const rh = resp.headers() || {};
+        net.rhdr = `server=${rh.server || '-'} ct=${String(rh['content-type'] || '-').slice(0, 30)} logid=${String(rh['x-tt-logid'] || '-').slice(0, 24)}`;
+        req.allHeaders().then((h) => {
+          net.hdr = `ua=${String(h['user-agent'] || '-').slice(0, 110)} sec-ch-ua=${String(h['sec-ch-ua'] || '-').slice(0, 90)} platform=${h['sec-ch-ua-platform'] || '-'} lang=${String(h['accept-language'] || '-').slice(0, 20)}`;
+        }).catch(() => {});
       } else if (resp.status() >= 400 && net.bad.length < 6) {
         net.bad.push(`${resp.status()} ${type} ${url.slice(0, 70)}`);
       }
@@ -2637,7 +2644,7 @@ async function openRecipientChat(page, recipient, log = () => {}) {
   const onPageErr = (e) => {
     if (net.errors.length < 4) net.errors.push(String(e?.message || e).slice(0, 100));
   };
-  const summary = () => `主文档=${net.doc || '无响应'} 失败请求=[${net.failed.join(' ; ')}] 4xx5xx=[${net.bad.join(' ; ')}] 脚本报错=[${net.errors.join(' ; ')}]`;
+  const summary = () => `主文档=${net.doc || '无响应'} 响应头=[${net.rhdr || '-'}] 请求头=[${net.hdr || '-'}] 失败请求=[${net.failed.join(' ; ')}] 4xx5xx=[${net.bad.join(' ; ')}] 脚本报错=[${net.errors.join(' ; ')}]`;
   page.on('response', onResp);
   page.on('requestfailed', onFail);
   page.on('pageerror', onPageErr);
@@ -2720,7 +2727,7 @@ async function prepareMessage(accountId, content, recipient = '', options = {}) 
         keepOpen = true;
         return {
           status: 'failed',
-          error: `私信界面打开失败：${recipient}${connection.page.__dmLastProbe ? `；页面现场：${String(connection.page.__dmLastProbe).slice(0, 1200)}` : ''}`,
+          error: `私信界面打开失败：${recipient}${connection.page.__dmLastProbe ? `；页面现场：${String(connection.page.__dmLastProbe).slice(0, 1800)}` : ''}`,
           screenshot: before,
           recipient,
         };
