@@ -17,6 +17,34 @@ function getLastReleaseSignal(profileId) {
   return lastReleaseSignals.get(String(profileId || '').trim()) || null;
 }
 
+/**
+ * 本机记录「上次与中心库同步的环境包版本」(packRevision)。
+ * 打开环境时若中心库版本与本机记录不同（别的设备登录后上传了新包），就拉新包覆盖，
+ * 这样即使本机已有旧环境，也能拿到最新登录凭证。没有记录时不覆盖，避免误伤本机新数据。
+ */
+const packRevFile = path.resolve(__dirname, '../../../data/pack-revisions.json');
+function readPackRevs() {
+  try {
+    return JSON.parse(fs.readFileSync(packRevFile, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+function getPackRev(profileId) {
+  return String(readPackRevs()[String(profileId || '').trim()] || '');
+}
+function recordPackRev(profileId, rev) {
+  const pid = String(profileId || '').trim();
+  const r = String(rev || '').trim();
+  if (!pid || !r) return;
+  try {
+    const all = readPackRevs();
+    all[pid] = r;
+    fs.mkdirSync(path.dirname(packRevFile), { recursive: true });
+    fs.writeFileSync(packRevFile, JSON.stringify(all));
+  } catch { /* 记录失败不影响主流程 */ }
+}
+
 function hostId() {
   try {
     return String(process.env.TKSWARM_HOST_ID || os.hostname() || 'node').slice(0, 120);
@@ -335,6 +363,7 @@ async function pullRemotePack(profileId, {
       'info',
       { accountId },
     );
+    recordPackRev(pid, meta?.packRevision);
     return { hydrated: true, profileId: pid, source: 'remote-pack' };
   } catch (e) {
     if (acquiredHere) {
@@ -720,6 +749,7 @@ async function pushLocalEnvPack(profileId, {
       'info',
       { accountId },
     );
+    recordPackRev(pid, meta?.packRevision);
     return { pushed: true, meta };
   } catch (e) {
     let msg = String(e.message || e);
@@ -824,6 +854,37 @@ async function prepareEnvForOpen(profileId, opts = {}) {
     } else {
       liveLog(
         `账号 #${accountId || '-'}：对方已释放占用，但中心库暂无环境包；将依赖会话日志免表单登录`,
+        'warn',
+        { accountId },
+      );
+    }
+  }
+
+  // 没等过别人：本机已有旧环境时，若中心库包版本与本机上次同步的不同（别的设备已登录并上传），拉新包覆盖
+  if (!lease.waited) {
+    try {
+      const meta = await fetchPackMeta(readyId);
+      const remoteRev = String(meta?.packRevision || '').trim();
+      const localRev = getPackRev(readyId);
+      const hasPack = !!(meta?.hasPack || (meta?.packFileExists && Number(meta?.packBytes || 0) > 0));
+      if (hasPack && remoteRev && localRev && remoteRev !== localRev) {
+        liveLog(
+          `账号 #${accountId || '-'}：中心库环境包有更新（本机 rev ${localRev} → 中心库 rev ${remoteRev}），拉取最新登录凭证…`,
+          'info',
+          { accountId },
+        );
+        const pulled = await pullRemotePack(readyId, {
+          accountId,
+          provider,
+          meta,
+          hostId: hid,
+          skipLease: true,
+        });
+        result = { ...result, ...pulled, updatedFromRemote: true };
+      }
+    } catch (e) {
+      liveLog(
+        `账号 #${accountId || '-'}：检查/拉取中心库最新环境包失败：${e.message || e}（继续用本机环境）`,
         'warn',
         { accountId },
       );

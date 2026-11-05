@@ -153,8 +153,24 @@
         const token = localStorage.getItem('tkswarm_lb_token') || '';
         const qs = token ? `?token=${encodeURIComponent(token)}` : '';
         const url = `${proto}://${location.host}/vnc-ws/${encodeURIComponent(id)}${qs}`;
+
+        // 自动 VNC 密码：优先 URL ?pw= → 服务端 TKSWARM_VNC_PASSWORD → 不再弹窗（除非都没有）
+        let autoPassword = String(params.get('pw') || params.get('password') || '').trim();
+        if (!autoPassword && token) {
+          try {
+            const cfgRes = await fetch('/api/vnc-config', {
+              headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+            });
+            const cfg = await cfgRes.json().catch(() => ({}));
+            if (cfg?.ok && cfg.password != null) autoPassword = String(cfg.password);
+          } catch { /* ignore，后面必要时再 prompt */ }
+        }
+
         status.textContent = '连接中…';
-        const rfb = new RFB(document.getElementById('screen'), url);
+        const rfbOpts = autoPassword !== ''
+          ? { credentials: { password: autoPassword } }
+          : undefined;
+        const rfb = new RFB(document.getElementById('screen'), url, rfbOpts);
         rfb.scaleViewport = true;
         rfb.resizeSession = true;
         rfb.addEventListener('connect', () => {
@@ -168,7 +184,11 @@
           status.classList.add('err');
         });
         rfb.addEventListener('credentialsrequired', () => {
-          const pw = prompt('VNC 密码（若服务端设置了 TKSWARM_VNC_PASSWORD）') || '';
+          if (autoPassword !== '') {
+            rfb.sendCredentials({ password: autoPassword });
+            return;
+          }
+          const pw = prompt('VNC 密码（可在服务端设 TKSWARM_VNC_PASSWORD 以自动填入）') || '';
           rfb.sendCredentials({ password: pw });
         });
       } catch (e) {

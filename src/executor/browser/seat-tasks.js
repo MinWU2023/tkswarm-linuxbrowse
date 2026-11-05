@@ -16,6 +16,13 @@ const {
 const { ensureServerBrowserEnv, waitingLoginDataError } = require('./server-browser');
 const { getProvider } = require('./providers');
 
+/** 未上传新包时也要解除本机持有的占用，WSS 才能唤醒队首等待设备（不推包，避免用未登录状态覆盖中心库好包） */
+async function releaseSeatLease(profileId) {
+  try {
+    await require('./env-pack-sync').releasePackLeaseBestEffort(profileId);
+  } catch { /* ignore */ }
+}
+
 async function openSeatBrowser(accountId, startUrl = 'https://www.tiktok.com/') {
   const profileId = await ensureServerBrowserEnv(accountId);
   // 坐席分任务各自开窗：必须 forceRelaunch。
@@ -102,7 +109,8 @@ async function runCsLogin(accountId, payload = {}) {
     if (!keepOpen) {
       try { await closeConnection(connection, { force: true }); } catch { /* */ }
       // 登录成功时已在线上传并解除占用，这里不再重复导出上传
-      try { await closeSession(profileId, { accountId: aid, pushPack: !livePushed }); } catch { /* */ }
+      try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+      if (!livePushed) await releaseSeatLease(profileId);
     }
   }
 }
@@ -110,6 +118,7 @@ async function runCsLogin(accountId, payload = {}) {
 async function runCsDetect(accountId) {
   const aid = Number(accountId);
   const { connection, profileId } = await openSeatBrowser(aid);
+  let livePushed = false;
   try {
     let session = await probeLogin(connection, aid);
     if (!session?.loggedIn) {
@@ -122,14 +131,19 @@ async function runCsDetect(accountId) {
     if (loggedIn && connection.context) {
       await persistAccountSessionLog(aid, connection.context, connection.page).catch(() => {});
     }
-    await pushEnvPackBestEffort(aid, profileId);
+    // 已登录才在线上传（带最新凭证）；未登录不推包，只释放占用
+    if (loggedIn) {
+      await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
+      livePushed = true;
+    }
     return {
       status: 'completed',
       result: { loggedIn, loginStatus: loggedIn ? 'online' : 'offline', profileId },
     };
   } finally {
     try { await closeConnection(connection, { force: true }); } catch { /* */ }
-    try { await closeSession(profileId, { accountId: aid, pushPack: true }); } catch { /* */ }
+    try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+    if (!livePushed) await releaseSeatLease(profileId);
   }
 }
 
@@ -171,6 +185,7 @@ async function runSyncFans(accountId, payload = {}) {
   const pathSeg = listKind === 'following' ? 'following' : 'followers';
   const startUrl = `https://www.tiktok.com/@${encodeURIComponent(uname)}/${pathSeg}`;
   const { connection, profileId } = await openSeatBrowser(aid, startUrl);
+  let livePushed = false;
   try {
     const session = await probeLogin(connection, aid);
     if (!session?.loggedIn) {
@@ -232,7 +247,8 @@ async function runSyncFans(accountId, payload = {}) {
       updated = Math.max(0, users.length - added);
     }
 
-    await pushEnvPackBestEffort(aid, profileId);
+    await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
+    livePushed = true;
     const progress = { scraped: users.length, added, updated, listKind };
     liveLog(
       `账号 #${aid}：${listKind === 'following' ? '关注' : '粉丝'}同步完成 抓取=${users.length} 新增=${added}`,
@@ -245,7 +261,8 @@ async function runSyncFans(accountId, payload = {}) {
     };
   } finally {
     try { await closeConnection(connection, { force: true }); } catch { /* */ }
-    try { await closeSession(profileId, { accountId: aid, pushPack: true }); } catch { /* */ }
+    try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+    if (!livePushed) await releaseSeatLease(profileId);
   }
 }
 

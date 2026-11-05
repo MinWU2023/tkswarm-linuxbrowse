@@ -463,6 +463,8 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
       return session;
     }
     await dataStore.updateLoginStatus(accountId, 'offline').catch(() => {});
+    // 登录数据不可用也要释放打开环境时占的租约，否则排队设备要等到租约过期
+    await releaseLeaseAfterLoggedIn(accountId, connection, batchId);
     throw waitingLoginDataError(accountId, '请先在桌面自研浏览器登录并上传环境包/会话');
   }
 
@@ -1203,6 +1205,8 @@ async function executeWorkBatch(batch) {
     let emptyRounds = 0;
     /** 人机验证挂起：finally 不关窗，留给人工拖滑块 */
     let holdBrowserForHumanVerify = false;
+    /** 本批是否确认过登录：未确认时结束不推包，避免用未登录状态覆盖中心库好包 */
+    let batchLoginOk = false;
     const heartbeatTimer = setInterval(() => {
       phpApi.post(`/node/work-batches/${batchId}/heartbeat`, {
         workerId: WORKER_ID,
@@ -1246,6 +1250,7 @@ async function executeWorkBatch(batch) {
           const { setActiveConnection } = require('./session-context');
           setActiveConnection(boot);
         } catch { /* ignore */ }
+        batchLoginOk = true;
         liveLog(`账号 #${accountId}：登录已确认，开始领取并执行分任务`, 'info', { accountId, batchId });
       }
 
@@ -1463,7 +1468,10 @@ async function executeWorkBatch(batch) {
             /* ignore */
           }
           // 服务器 / 自研：关窗后回传环境包，供桌面与其它主机共用登录态
-          if (backend === 'linux' || backend === 'tkswarm') {
+          if ((backend === 'linux' || backend === 'tkswarm') && !batchLoginOk) {
+            // 本批没确认登录（坐席分任务自行上传 / 登录失败）：不推包，只释放占用让排队设备继续
+            try { await require('./browser/env-pack-sync').releasePackLeaseBestEffort(closePid); } catch { /* ignore */ }
+          } else if (backend === 'linux' || backend === 'tkswarm') {
             try {
               const { pushLocalEnvPack } = require('./browser/env-pack-sync');
               const { getProvider } = require('./browser/providers');

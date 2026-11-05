@@ -66,6 +66,24 @@ router.get('/api/settings', (req, res) => {
   });
 });
 
+/**
+ * VNC 自动鉴权：把服务端 TKSWARM_VNC_PASSWORD 下发给已打开远程页的前端，免弹窗。
+ * 需本机控制台已登录（Bearer / localStorage token），避免完全匿名拉取密码。
+ */
+router.get('/api/vnc-config', async (req, res) => {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  const { VNC_PASSWORD } = require('../config');
+  const password = String(VNC_PASSWORD || '');
+  res.json({
+    ok: true,
+    hasPassword: password !== '',
+    /** 与 x11vnc -passwd 一致；空表示服务端无密码（-nopw） */
+    password,
+    autoAuth: true,
+  });
+});
+
 router.get('/api/dashboard/stats', async (req, res) => {
   const user = await requireUser(req, res);
   if (!user) return;
