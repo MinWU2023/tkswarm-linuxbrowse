@@ -1451,6 +1451,10 @@ async function getSession(profileId, provider, {
     httpBase: opened?.http || opened?.httpUrl || '',
   });
   const context = page.context?.() || browser.contexts()[0];
+  try {
+    const { attachAutoRotateCaptchaWatcher } = require('./nocaptchaai');
+    attachAutoRotateCaptchaWatcher(page);
+  } catch { /* ignore */ }
   const session = {
     browser,
     context,
@@ -1786,7 +1790,24 @@ async function runLoginAssist(accountId, {
       return result;
     }
   }
-  const hasCaptcha = async () => /(captcha|verify you are human|人机验证|滑块|security check)/i.test(await pageBodyText(page));
+  const hasCaptcha = async () => {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      const rot = await solveRotateCaptchaIfPresent(page, { accountId });
+      if (rot?.detected) {
+        return !rot.solved;
+      }
+    } catch { /* ignore */ }
+    const textHit = /(captcha|verify you are human|drag the slider to fit the puzzle|人机验证|滑块|旋转|security check)/i.test(await pageBodyText(page));
+    if (!textHit) return false;
+    try {
+      await page.waitForTimeout(700).catch(() => {});
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      const rot2 = await solveRotateCaptchaIfPresent(page, { accountId });
+      if (rot2?.detected && rot2?.solved) return false;
+    } catch { /* ignore */ }
+    return /(captcha|verify you are human|drag the slider to fit the puzzle|人机验证|滑块|旋转|security check)/i.test(await pageBodyText(page));
+  };
   let captcha = await hasCaptcha();
   // Form should already be open; wait briefly if TikTok is still rendering inputs.
   for (let i = 0; !captcha && i < 10; i += 1) {

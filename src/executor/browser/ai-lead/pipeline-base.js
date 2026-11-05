@@ -320,6 +320,10 @@ function urlLooksLike(target, actual) {
 }
 
 async function dismissSearchOverlays(page) {
+  try {
+    const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   const dismissSelectors = [
     'button:has-text("Accept all")',
     'button:has-text("Accept all cookies")',

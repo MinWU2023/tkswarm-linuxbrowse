@@ -364,8 +364,16 @@ async function fetchInboxViaBit(accountId, opts = {}) {
       }
     }
     connection.page.on('response', onResponse);
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(connection.page, { accountId });
+    } catch { /* ignore */ }
     await connection.page.waitForTimeout(2500);
     for (let i = 0; i < 4; i += 1) {
+      try {
+        const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+        await solveRotateCaptchaIfPresent(connection.page, { accountId });
+      } catch { /* ignore */ }
       await connection.page.evaluate(() => {
         const panes = [...document.querySelectorAll('[class*="conversation"],[class*="inbox"],[data-e2e*="chat"],aside,nav')];
         const el = panes.find((n) => n.scrollHeight > n.clientHeight + 20) || document.scrollingElement;

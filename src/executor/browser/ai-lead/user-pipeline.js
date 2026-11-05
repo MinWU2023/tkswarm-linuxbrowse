@@ -950,6 +950,10 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
 async function isOopsOrBlockedPage(page) {
   const cur = (() => { try { return page.url() || ''; } catch { return ''; } })();
   if (/\/404(?:\?|$|\/)/i.test(cur) || /[?&]fromUrl=\/video\//i.test(cur)) return true;
+  try {
+    const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   return page.evaluate(() => {
     const t = (document.body?.innerText || '').slice(0, 2500);
     return /oops!?\s*something went wrong|something went wrong|please contact your administrator|verify you.?re (a )?human|security check|unusual traffic|页面出错|出了点问题|无法观看|视频不存在|video (?:is )?n.?t available|couldn.?t find this video|this video isn.?t available|couldn.?t find this page|page not found|找不到该页面/i.test(t);

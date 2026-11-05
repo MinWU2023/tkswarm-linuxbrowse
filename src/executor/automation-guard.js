@@ -14,6 +14,10 @@ function automationDir() {
 }
 
 async function inspectPage(page) {
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./browser/nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   const url = page.url();
   const body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
   const inputText = await page.locator('input,button').allTextContents().catch(() => []);
@@ -27,6 +31,10 @@ async function inspectPage(page) {
  * 不应与验证码/全局风控混为一谈。
  */
 async function inspectPageForDm(page) {
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./browser/nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   const url = String(page.url() || '');
   const isMsgShell = /business-suite\/messages|\/messages(?:\?|$)/i.test(url);
   const body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');

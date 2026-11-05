@@ -170,6 +170,14 @@ async function attachSaveTraffic(conn, enabled) {
     const { applySaveTrafficOnConnection } = require('./save-traffic');
     await applySaveTrafficOnConnection(conn, !!enabled);
   } catch { /* ignore */ }
+  try {
+    const { attachAutoRotateCaptchaWatcher, solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    const aid = Number(conn.account?.id || 0);
+    if (conn.page) {
+      attachAutoRotateCaptchaWatcher(conn.page, { accountId: aid });
+      await solveRotateCaptchaIfPresent(conn.page, { accountId: aid });
+    }
+  } catch { /* ignore */ }
 }
 
 async function connectAccount(accountId, url, action = 'publish', options = {}) {
@@ -2538,6 +2546,10 @@ async function dmPageLoadFailed(page) {
 async function waitDmSurface(page, timeoutMs = DM_CHAT_WAIT_MS, loose = false) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     if (await dmEditorVisible(page, loose)) return 'ready';
     if (await dmPageLoadFailed(page)) return 'failed';
     if (!loose && await dmMessageButton(page)) return 'button';
@@ -2685,6 +2697,10 @@ async function waitManualVerify(page, handle, log = () => {}) {
   let result = 'timeout';
   while (Date.now() < end) {
     if (page.isClosed?.()) break;
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page, { log });
+    } catch { /* ignore */ }
     if (await dmEditorVisible(page, true).catch(() => false)) { result = 'ready'; break; }
     if (await dmMessageButton(page).catch(() => null)) { result = 'loaded'; break; }
     if (await profileLooksLoaded(page).catch(() => false)) { result = 'loaded'; break; }

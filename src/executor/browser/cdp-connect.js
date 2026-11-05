@@ -133,10 +133,21 @@ async function settlePage(page) {
   await page.waitForLoadState('load', { timeout: 20000 }).catch(() => {});
   const ms = pageSettleMs();
   if (ms > 0 && !page.isClosed?.()) await sleep(ms);
+  if (!page.isClosed?.()) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
+  }
 }
 
 function installPageSettle(page) {
-  if (!page || page.__tkSettleInstalled) return page;
+  if (!page) return page;
+  try {
+    const { attachAutoRotateCaptchaWatcher } = require('./nocaptchaai');
+    attachAutoRotateCaptchaWatcher(page);
+  } catch { /* ignore */ }
+  if (page.__tkSettleInstalled) return page;
   page.__tkSettleInstalled = true;
   for (const method of ['goto', 'reload']) {
     const orig = typeof page[method] === 'function' ? page[method].bind(page) : null;

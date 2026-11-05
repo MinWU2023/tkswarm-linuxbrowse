@@ -43,6 +43,10 @@ async function openSeatBrowser(accountId, startUrl = 'https://www.tiktok.com/') 
 
 async function probeLogin(connection, accountId) {
   try {
+    if (connection?.page) {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(connection.page, { accountId }).catch(() => {});
+    }
     return await inspectTikTokSession(connection.ws, connection.page);
   } catch (e) {
     liveLog(`账号 #${accountId}：坐席登录探测失败：${e.message || e}`, 'warn', { accountId });
@@ -408,8 +412,16 @@ async function runSyncFans(accountId, payload = {}) {
       ? '[data-e2e="following-count"], [data-e2e="following"]'
       : '[data-e2e="followers-count"], [data-e2e="followers"]';
     const pg = connection.page;
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(pg, { accountId: aid });
+    } catch { /* ignore */ }
     // 先等主页上的粉丝/关注数渲染出来
     await pg.locator(countSel).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(pg, { accountId: aid });
+    } catch { /* ignore */ }
     // 弹窗检测：先按已知选择器，再按「悬浮层里至少 2 个用户链接」兜底；命中的根节点打上 data-tks-list 标记，供抓取/滚动复用
     const detectList = async (timeoutMs) => {
       const end = Date.now() + timeoutMs;

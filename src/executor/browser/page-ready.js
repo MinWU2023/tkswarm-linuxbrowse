@@ -214,6 +214,15 @@ async function waitPageSettled(page, {
         await recoverProxyErrorPage(page, { attempts: 2, label, log });
         continue;
       }
+      // 检测到旋转图片验证时自动调用 NoCaptchaAI 解决
+      try {
+        const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+        const capRes = await solveRotateCaptchaIfPresent(page, { log: say });
+        if (capRes?.detected && !capRes?.solved) {
+          await humanPause(800, 0.15);
+          continue;
+        }
+      } catch { /* ignore */ }
       // 原始 JSON/i18n 乱码页：绝不当「有字即就绪」，尝试刷新一次
       if (await detectRawDocumentPage(page)) {
         if (rawRecovered >= 1) {
@@ -328,11 +337,31 @@ async function waitSearchContent(page, {
         await humanPause(1500, 0.2);
         continue;
       }
+      try {
+        const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+        const rot = await solveRotateCaptchaIfPresent(page, { accountId, log: say });
+        if (rot?.detected && rot?.solved) {
+          await humanPause(1000, 0.15);
+        }
+      } catch { /* ignore */ }
       if (typeof isCaptcha === 'function' && await isCaptcha(page)) {
         // 省流会拦验证码图：一检测到人机验证就临时关闭省流
         try {
           const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
           await pauseSaveTrafficForCaptcha(page);
+        } catch { /* ignore */ }
+        // 关闭省流后再尝试一次 NoCaptchaAI 旋转图片识别
+        try {
+          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+          const rot2 = await solveRotateCaptchaIfPresent(page, { accountId, log: say });
+          if (rot2?.detected && rot2?.solved) {
+            try {
+              const { resumeSaveTrafficAfterCaptcha } = require('./save-traffic');
+              await resumeSaveTrafficAfterCaptcha(page);
+            } catch { /* ignore */ }
+            await humanPause(1000, 0.15);
+            continue;
+          }
         } catch { /* ignore */ }
         if (typeof onCaptcha === 'function') {
           const cap = await onCaptcha(page, accountId, Math.min(120000, end - Date.now()));
