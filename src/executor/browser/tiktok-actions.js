@@ -445,6 +445,7 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
       const page2 = await ensurePlaywrightPage(browser2, {
         preferUrl: /tiktok\.com/i,
         allowNewPage: String(options.browserBackend || '').toLowerCase() !== 'linux',
+        httpBase: reOpened?.http || '',
       });
       const context2 = page2.context?.() || browser2.contexts()[0];
       await page2.bringToFront().catch(() => {});

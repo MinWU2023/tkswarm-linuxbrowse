@@ -1433,6 +1433,7 @@ async function getSession(profileId, provider, {
   const page = await ensurePlaywrightPage(browser, {
     preferUrl: /tiktok\.com/i,
     allowNewPage: !/linux|第一页自研浏览器 Linux/i.test(label),
+    httpBase: opened?.http || opened?.httpUrl || '',
   });
   const context = page.context?.() || browser.contexts()[0];
   const session = {

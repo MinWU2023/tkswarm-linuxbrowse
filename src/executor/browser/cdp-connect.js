@@ -161,14 +161,23 @@ async function ensurePlaywrightPage(browser, {
 
   // Electron：browser 连接无页时，改连 /json/list 的 page ws（与桌面 inProcess 一致）
   if (!allowNewPage && allowPageWsReconnect && httpBase) {
+    // 候选端点：Playwright 的 connectOverCDP 要 browser 级端点（http 或 /json/version 的 browser ws），
+    // page 级 ws 常导致 contexts()/pages() 为空；因此先试 browser 级，最后才回退 page ws。
+    const base = String(httpBase).replace(/\/+$/, '');
+    const candidates = [base];
+    try {
+      const ver = await (await fetch(`${base}/json/version`)).json();
+      if (ver?.webSocketDebuggerUrl) candidates.push(String(ver.webSocketDebuggerUrl));
+    } catch { /* ignore */ }
     const pageWs = await resolvePageWs(httpBase);
-    if (pageWs) {
+    if (pageWs) candidates.push(pageWs);
+    for (const endpoint of candidates) {
       try {
-        const alt = await chromium.connectOverCDP(pageWs, {
+        const alt = await chromium.connectOverCDP(endpoint, {
           timeout: Math.max(15000, Number(timeoutMs) || 45000),
         });
         page = await waitForPlaywrightPage(alt, {
-          timeoutMs: Math.min(15000, Math.max(5000, Number(timeoutMs) || 0)),
+          timeoutMs: Math.min(12000, Math.max(5000, Number(timeoutMs) || 0)),
           preferUrl,
         });
         if (page && !page.isClosed?.()) {
@@ -177,7 +186,7 @@ async function ensurePlaywrightPage(browser, {
           return page;
         }
         await alt.close().catch(() => {});
-      } catch { /* fall through */ }
+      } catch { /* try next endpoint */ }
     }
   }
 
