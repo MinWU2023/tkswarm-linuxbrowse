@@ -26,7 +26,8 @@ async function releaseSeatLease(profileId) {
 }
 
 async function openSeatBrowser(accountId, startUrl = 'https://www.tiktok.com/') {
-  const profileId = await ensureServerBrowserEnv(accountId);
+  // 坐席任务：缺包时在服务器本机复用/代建环境，再走登录流程（不再卡在 WAITING_ENV_PACK）
+  const profileId = await ensureServerBrowserEnv(accountId, { allowProvision: true });
   // 坐席分任务各自开窗：必须 forceRelaunch。
   // 若为 false，代理同步 close 后常挂到正在退出的僵尸进程 → newPage「has been closed」。
   // 必须有头（headless:false）才能挂 x11vnc，否则远程查看页必然「连接失败」。
@@ -303,11 +304,14 @@ async function runSyncFans(accountId, payload = {}) {
   const { connection, profileId } = await openSeatBrowser(aid, 'https://www.tiktok.com/');
   let livePushed = false;
   let keepOpen = false;
+  /** 本次新拿到登录态（注入已存会话 / 一键登录）：确认后立刻推包，不等列表抓完 */
+  let freshLogin = false;
   try {
     let session = await probeLogin(connection, aid);
     if (!session?.loggedIn) {
       await tryInjectSavedSession(connection, aid);
       session = await probeLogin(connection, aid);
+      if (session?.loggedIn) freshLogin = true;
     }
     if (!session?.loggedIn) {
       // 服务器侧尝试一键登录（有账号密码时）；失败则打开登录页留给 VNC
@@ -338,6 +342,16 @@ async function runSyncFans(accountId, payload = {}) {
         keepOpen = true;
         throw waitingLoginDataError(aid, '一键登录后仍未登录，请在 VNC 完成登录后重试');
       }
+      freshLogin = true;
+    }
+    if (freshLogin) {
+      // 登录确认后立即：落会话凭证 → 在线导出环境包上传 → 解除占用（WSS 通知队首），再去抓列表
+      await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
+      if (connection.context) {
+        await persistAccountSessionLog(aid, connection.context, connection.page).catch(() => {});
+      }
+      await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
+      livePushed = true;
     }
     await connection.page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await connection.page.waitForTimeout?.(2000).catch(() => {});
@@ -398,8 +412,11 @@ async function runSyncFans(accountId, payload = {}) {
       updated = Math.max(0, users.length - added);
     }
 
-    await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
-    livePushed = true;
+    // 已在登录确认后推过包则不重复；否则（环境包里本就是登录态）抓完刷新一次凭证
+    if (!livePushed) {
+      await pushEnvPackBestEffort(aid, profileId, { keepOpen: true });
+      livePushed = true;
+    }
     const progress = { scraped: users.length, added, updated, listKind };
     liveLog(
       `账号 #${aid}：${listKind === 'following' ? '关注' : '粉丝'}同步完成 抓取=${users.length} 新增=${added}`,

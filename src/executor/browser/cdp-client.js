@@ -94,11 +94,11 @@ async function pageLooksLoggedIn(page) {
   if (await pageLooksLoggedOut(page)) return false;
   try {
     if (await pageLooksLikeStudioAuthed(page)) return true;
+    // 禁止用信息流里的 a[href*="/@"]：For You 作者链接会把未登录页误判成已登录
     const markers = [
       page.locator('[data-e2e="nav-profile"]').first(),
       page.locator('[data-e2e="profile-icon"]').first(),
       page.locator('[data-e2e="top-profile-icon"]').first(),
-      page.locator('a[href*="/@"]').first(),
       page.locator('[data-e2e="user-avatar"], [data-e2e="avatar"]').first(),
     ];
     for (const loc of markers) {
@@ -311,20 +311,23 @@ function decideLoginState(input = {}) {
   } = input;
   const loginButton = Boolean(topRight?.loginButton);
   const avatar = Boolean(topRight?.avatar);
+  // 无页面：只能看 Cookie（旧行为）；有页面时必须交叉验证，避免「检测已登录、任务却被踢登录页」
   if (!hasPage) return hasSessionCookie;
-  // 1) 接口有明确结论时以接口为准
+  // 1) 接口有明确结论时以接口为准（唯一能识破残留 sessionid）
   if (apiProbe?.ok) return Boolean(apiProbe.loggedIn);
-  // 2) 右上角头像 → 已登录（再要求有会话 Cookie 或其他已登录特征，避免把推广气泡当头像）
-  if (avatar && !loginButton && (hasSessionCookie || uiLoggedIn)) return true;
-  // 3) 右上角是 Log in 按钮 → 未登录：必须覆盖残留 Cookie
+  // 2) 明确未登录信号
   if (loginButton && !avatar) return false;
   if (uiLoggedOut) return false;
-  if (studioAuthed) return true;
-  // 4) 门禁页探针
+  // 3) 右上角头像 + 会话 Cookie
+  if (avatar && !loginButton && hasSessionCookie) return true;
+  // 4) Studio 壳必须带 Cookie（无 Cookie 的 upload 页多半是跳转中间态）
+  if (studioAuthed && hasSessionCookie) return true;
+  // 5) 门禁页探针
   if (gateProbe?.ok) return Boolean(gateProbe.loggedIn);
-  // 5) 兜底：只看 Cookie（页面没起来 / 接口不可用时）
+  // 6) 页面已登录特征 + Cookie
   if (uiLoggedIn && hasSessionCookie) return true;
-  if (hasSessionCookie && !uiLoggedOut) return true;
+  // 有页面时不再「仅有 Cookie / 仅有头像」乐观判定：
+  // api 超时 + 残留 sessionid 曾导致检测已登录，一进 Studio/改资料就被踢到 /login（cookie=false）
   return false;
 }
 

@@ -13,6 +13,43 @@ const { waitForSlot, typeDelay, awaitSlot } = require('../human-pace');
 const { isHeadless } = require('./headless');
 const { nowChinaSql, nowChinaIso } = require('../utils/china-time');
 
+/**
+ * 任务前登录门禁：先用页面交叉验证；若被踢到登录页，尝试注入本地会话日志再复检。
+ */
+async function ensureSessionLoggedIn(connection, accountId, { reloadUrl = '', label = '任务' } = {}) {
+  const aid = Number(accountId || 0);
+  const page = connection?.page;
+  let session = await inspectTikTokSession(connection?.ws, page).catch(() => null);
+  if (session?.loggedIn) return session;
+
+  const { publish: liveLog } = require('../live-log');
+  liveLog(
+    `账号 #${aid}：${label}登录门禁未通过 url=${session?.pageUrl || page?.url?.() || '-'} cookie=${session?.hasSessionCookie}，尝试注入会话日志`,
+    'warn',
+    { accountId: aid },
+  );
+
+  const saved = await dataStore.getSession(aid).catch(() => null);
+  if (saved?.cookie && connection?.context) {
+    const { applySavedSessionToContext } = require('./tiktok-login');
+    const ok = await applySavedSessionToContext(connection.context, page, saved).catch(() => false);
+    if (ok && page && !page.isClosed?.()) {
+      const target = String(reloadUrl || page.url() || 'https://www.tiktok.com/').trim()
+        || 'https://www.tiktok.com/';
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+      await page.waitForTimeout?.(1500).catch(() => {});
+      session = await inspectTikTokSession(connection.ws, page).catch(() => null);
+      if (session?.loggedIn) {
+        liveLog(`账号 #${aid}：注入会话后已恢复登录，继续${label}`, 'info', { accountId: aid });
+        await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
+        return session;
+      }
+    }
+  }
+
+  return session;
+}
+
 /** 发布成功后立刻回写素材状态/账号/平台 video_id（所有发布入口统一走这里） */
 async function markMaterialPublishedCallback(accountId, materialId, extra = {}) {
   const mid = Number(materialId || 0);
@@ -2830,15 +2867,18 @@ async function preparePublish(accountId, materialId, title='', caption='', optio
       await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await pause(3000);
     }
-    const session = await inspectTikTokSession(connection.ws, connection.page);
-    if (!session.loggedIn) {
+    const session = await ensureSessionLoggedIn(connection, accountId, {
+      reloadUrl: startUrl,
+      label: '发布',
+    });
+    if (!session?.loggedIn) {
       liveLog(
-        `发布#${accountId}：登录检测失败 url=${session.pageUrl} cookie=${session.hasSessionCookie} studio=${session.studioAuthed} out=${session.uiLoggedOut} in=${session.uiLoggedIn} evidence=${(session.evidence || []).join(',')}`,
+        `发布#${accountId}：登录检测失败 url=${session?.pageUrl} cookie=${session?.hasSessionCookie} studio=${session?.studioAuthed} out=${session?.uiLoggedOut} in=${session?.uiLoggedIn} evidence=${(session?.evidence || []).join(',')}`,
         'warn',
         { accountId }
       );
       throw new Error(
-        `当前浏览器没有有效 TikTok 登录状态（url=${session.pageUrl || '-'} cookie=${session.hasSessionCookie} studio=${!!session.studioAuthed}）。请确认浏览器窗口已登录且停在 Studio 上传页后重试`
+        `当前浏览器没有有效 TikTok 登录状态（url=${session?.pageUrl || '-'} cookie=${session?.hasSessionCookie} studio=${!!session?.studioAuthed}）。请确认浏览器窗口已登录且停在 Studio 上传页后重试`
       );
     }
     await require('../data-store').updateLoginStatus(accountId, 'online').catch(() => {});
@@ -3301,8 +3341,11 @@ async function modifyTikTokProfile(accountId, options = {}) {
     return fields;
   };
   try {
-    const session = await inspectTikTokSession(connection.ws);
-    if (!session.loggedIn) {
+    const session = await ensureSessionLoggedIn(connection, accountId, {
+      reloadUrl: 'https://www.tiktok.com/',
+      label: '改资料',
+    });
+    if (!session?.loggedIn) {
       logErr('当前浏览器没有有效 TikTok 登录状态');
       throw new Error('当前浏览器没有有效 TikTok 登录状态');
     }
@@ -4376,6 +4419,7 @@ async function inspectOpenedSession(ws, options = {}) {
 module.exports = {
   connectAccount,
   inspectOpenedSession,
+  ensureSessionLoggedIn,
   preparePublish,
   resumePublish,
   prepareMessage,

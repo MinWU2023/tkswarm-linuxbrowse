@@ -420,6 +420,10 @@ async function provisionReplacementEnv(targetProfileId, {
   bundle = null,
   backend = 'tkswarm',
   meta = null,
+  // 服务器浏览器代建：asPrimary=false 不抢账号主绑定；skipPush=true 先不推空包
+  // （登录成功后再推真实凭证，避免空包覆盖桌面端已有的好包）
+  asPrimary = true,
+  skipPush = false,
 } = {}) {
   const aid = Number(accountId) || Number(bundle?.id) || 0;
   if (!aid || !provider) {
@@ -455,8 +459,11 @@ async function provisionReplacementEnv(targetProfileId, {
       'warn',
       { accountId: aid },
     );
-    await persistBrowserBinding(aid, reusedId, true, be, ownerUserId);
-    const pushed = await pushLocalEnvPack(reusedId, { accountId: aid, provider });
+    await persistBrowserBinding(aid, reusedId, asPrimary, be, ownerUserId);
+    // skipPush 时不上传，用 not-local 仅为抑制下面的告警日志
+    const pushed = skipPush
+      ? { pushed: false, reason: 'not-local' }
+      : await pushLocalEnvPack(reusedId, { accountId: aid, provider });
     if (!pushed?.pushed && pushed?.reason !== 'not-local') {
       liveLog(
         `账号 #${aid}：复用环境已绑定，上传中心库未完成：${pushed?.reason || 'unknown'}`,
@@ -482,7 +489,7 @@ async function provisionReplacementEnv(targetProfileId, {
   );
 
   const created = await provisionProfileForAccount(account, provider, {
-    asPrimary: true,
+    asPrimary,
     browserBackend: be,
     ownerUserId,
     name: sameName,
@@ -499,10 +506,12 @@ async function provisionReplacementEnv(targetProfileId, {
     { accountId: aid },
   );
 
-  const pushed = await pushLocalEnvPack(newPid, {
-    accountId: aid,
-    provider,
-  });
+  const pushed = skipPush
+    ? { pushed: true }
+    : await pushLocalEnvPack(newPid, {
+      accountId: aid,
+      provider,
+    });
   if (!pushed?.pushed) {
     liveLog(
       `账号 #${aid}：代建环境已绑定，但上传中心库失败：${pushed?.reason || 'unknown'}（本机仍可继续使用）`,
@@ -617,9 +626,10 @@ async function ensureLocalEnvHydrated(profileId, opts = {}) {
 }
 
 /**
- * 含 Cookie 的会话包通常远大于此；过小仅打警告，默认仍上传（产品要求：过小也要传）。
- * 设 TKSWARM_ENV_PACK_REJECT_TINY=1 可恢复「过小拒传」；
- * TKSWARM_ENV_PACK_MIN_BYTES 控制告警阈值（默认 8KB）。
+ * 含 Cookie 的会话包通常远大于此。
+ * 默认拒传过小包，避免 1KB 空包盖掉中心库好包（曾导致「检测已登录、任务无 Cookie」）。
+ * 设 TKSWARM_ENV_PACK_ALLOW_TINY=1 可强制仍上传；
+ * TKSWARM_ENV_PACK_MIN_BYTES 控制阈值（默认 8KB）。
  */
 function minEnvPackBytes() {
   const n = Number(process.env.TKSWARM_ENV_PACK_MIN_BYTES);
@@ -628,8 +638,10 @@ function minEnvPackBytes() {
 }
 
 function rejectTinyEnvPack() {
-  const v = String(process.env.TKSWARM_ENV_PACK_REJECT_TINY || '').trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'on';
+  const allow = String(process.env.TKSWARM_ENV_PACK_ALLOW_TINY || '').trim().toLowerCase();
+  if (allow === '1' || allow === 'true' || allow === 'on') return false;
+  const v = String(process.env.TKSWARM_ENV_PACK_REJECT_TINY || '1').trim().toLowerCase();
+  return v !== '0' && v !== 'false' && v !== 'off';
 }
 
 /** 尽力释放跨机租约并触发中心库 FIFO 唤醒（登录上传后 / 关窗 / 失败兜底） */
@@ -719,7 +731,7 @@ async function pushLocalEnvPack(profileId, {
     if (tooSmall && rejectTinyEnvPack() && !forceTiny) {
       liveLog(
         `账号 #${accountId || '-'}：环境包过小（${formatPackBytes(localBytes) || localBytes + 'B'} < ${formatPackBytes(minBytes)}），`
-        + `已拒绝覆盖中心库（TKSWARM_ENV_PACK_REJECT_TINY=1）`,
+        + `已拒绝覆盖中心库（默认拒传空包；需要上传时设 TKSWARM_ENV_PACK_ALLOW_TINY=1）`,
         'warn',
         { accountId },
       );
@@ -1001,6 +1013,7 @@ module.exports = {
   supportsPackSync,
   fetchPackMeta,
   ensureEnvReady,
+  provisionReplacementEnv,
   ensureLocalEnvHydrated,
   pushLocalEnvPack,
   prepareEnvForOpen,

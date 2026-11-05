@@ -3,8 +3,10 @@
  * ---------------------------------------------------------------
  * 1. 仅白名单任务可用 linux；其它任务禁止；
  * 2. 强制 Electron（EL）核，与桌面自研共用环境包（同一 profileId）；
- * 3. 无中心环境包时不代建空环境，抛 WAITING_ENV_PACK 软等待；
- * 4. 登录态依赖本机推送的包 / DB session，服务器不走密码一键登录。
+ * 3. 无中心环境包时：AI 拓客不代建空环境，抛 WAITING_ENV_PACK 软等待；
+ *    客服坐席（allowProvision）在服务器本机复用/代建环境，由任务走「已存凭证 → 一键登录 → 登录页」，
+ *    登录成功后立刻上传环境包+凭证并解除占用；
+ * 4. 跨机租约等待失败（超时/被占用）一律中止本次任务，不在没拿到租约时开窗。
  */
 const dataStore = require('../data-store');
 const { publish: liveLog } = require('../live-log');
@@ -13,7 +15,16 @@ const {
   prepareEnvForOpen,
   ensureLocalEnvHydrated,
   pushLocalEnvPack,
+  provisionReplacementEnv,
+  isPackLeaseBusyError,
 } = require('./env-pack-sync');
+
+/** 跨机租约获取失败（被占用/等待超时/中继失败）：必须中止，不能在没拿到租约时继续开窗 */
+function isLeaseWaitError(e) {
+  const msg = String(e?.message || e || '');
+  return isPackLeaseBusyError(e)
+    || /其它主机|等待环境释放|跨机环境租约失败|PACK_LEASE_BUSY/i.test(msg);
+}
 
 /** 允许使用服务器浏览器的分任务类型 */
 const SERVER_BROWSER_TASK_TYPES = new Set([
@@ -169,7 +180,7 @@ async function tryReadySharedEnv(profileId, { accountId, provider }) {
   });
   if (local && (local.id || local.name)) {
     await prepareEnvForOpen(pid, { accountId, provider }).catch((e) => {
-      if (/其它主机/i.test(String(e.message || e))) throw e;
+      if (isLeaseWaitError(e)) throw e;
     });
     return { ok: true, hydrated: false };
   }
@@ -177,7 +188,7 @@ async function tryReadySharedEnv(profileId, { accountId, provider }) {
   const hydrated = await ensureLocalEnvHydrated(pid, { accountId, provider, autoProvision: false });
   if (hydrated?.hydrated) {
     await prepareEnvForOpen(pid, { accountId, provider }).catch((e) => {
-      if (/其它主机/i.test(String(e.message || e))) throw e;
+      if (isLeaseWaitError(e)) throw e;
     });
     return { ok: true, hydrated: true };
   }
@@ -356,7 +367,7 @@ async function ensureServerBrowserEnv(accountId, opts = {}) {
         return pid;
       } catch (e) {
         if (e?.code === 'ENGINE_NOT_EL' || e?.nonRetryable === true) throw e;
-        if (/其它主机/i.test(String(e.message || e))) throw e;
+        if (isLeaseWaitError(e)) throw e;
         tried.push(`${String(pid).slice(0, 8)}…(${e.message || e})`);
         liveLog(
           `账号 #${aid}：共用环境 ${String(pid).slice(0, 8)}… 不可用：${e.message || e}`,
@@ -364,6 +375,51 @@ async function ensureServerBrowserEnv(accountId, opts = {}) {
           { accountId: aid },
         );
       }
+    }
+
+    // 客服坐席：缺包不再软等待，改为服务器本机复用/代建环境，交给任务走登录流程
+    if (opts.allowProvision === true) {
+      // ① 本机已有候选环境（上次代建后登录未完成、中心库还没包）：直接复用，避免反复代建
+      for (const pid of candidates) {
+        const local = await provider.detail(pid).catch(() => null);
+        if (!local || !(local.id || local.name)) continue;
+        try {
+          await prepareEnvForOpen(pid, { accountId: aid, provider });
+        } catch (e) {
+          if (isLeaseWaitError(e)) throw e;
+        }
+        if (String(account.linux_browser_profile_id || '').trim() !== pid) {
+          await bindLinuxProfile(aid, pid);
+        }
+        liveLog(
+          `账号 #${aid}：中心库无可用包，复用服务器本机环境 ${pid.slice(0, 8)}…，将用已存凭证/账密登录并同步凭证`,
+          'warn',
+          { accountId: aid, profileId: pid },
+        );
+        return pid;
+      }
+      // ② 代建（不抢主绑定、不推空包；登录成功后再上传）
+      liveLog(
+        `账号 #${aid}：中心库无包且本机无环境，在服务器浏览器代建环境，稍后用已存凭证/账密登录并同步凭证`,
+        'warn',
+        { accountId: aid },
+      );
+      const provisioned = await provisionReplacementEnv('', {
+        accountId: aid,
+        provider,
+        bundle: account,
+        backend: 'linux',
+        asPrimary: false,
+        skipPush: true,
+      });
+      const newPid = String(provisioned?.profileId || '').trim();
+      if (!newPid) throw waitingEnvPackError(aid, '代建服务器浏览器环境未返回 ID');
+      try {
+        await prepareEnvForOpen(newPid, { accountId: aid, provider });
+      } catch (e) {
+        if (isLeaseWaitError(e)) throw e;
+      }
+      return newPid;
     }
 
     const detail = candidates.length

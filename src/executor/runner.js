@@ -462,10 +462,14 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
       liveLog(`账号 #${accountId}：已用同步登录数据恢复会话，继续执行`, 'info', { accountId, batchId });
       return session;
     }
+    // 没有可用凭证（或凭证已失效）：不再抛 WAITING_LOGIN_DATA，继续往下走同窗表单登录。
+    // 登录成功后由 uploadPackAfterBatchLogin 在线上传环境包+凭证并解除占用（WSS 通知队首）。
+    liveLog(
+      `账号 #${accountId}：服务器浏览器无可用登录凭证，转入表单登录（登录后同步凭证）`,
+      'warn',
+      { accountId, batchId }
+    );
     await dataStore.updateLoginStatus(accountId, 'offline').catch(() => {});
-    // 登录数据不可用也要释放打开环境时占的租约，否则排队设备要等到租约过期
-    await releaseLeaseAfterLoggedIn(accountId, connection, batchId);
-    throw waitingLoginDataError(accountId, '请先在桌面自研浏览器登录并上传环境包/会话');
   }
 
   // 桌面自研：未登录 → 同窗一键登录（禁止登录流程里关窗推包，否则会杀掉本批 CDP / 把空包盖掉中心库）
@@ -486,6 +490,10 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
     });
   } catch (error) {
     await dataStore.updateLoginStatus(accountId, 'offline').catch(() => {});
+    if (isServerBrowser) {
+      await releaseLeaseAfterLoggedIn(accountId, connection, batchId);
+      throw waitingLoginDataError(accountId, `表单登录失败：${error.message || error}，请在远程查看里完成登录后重试`);
+    }
     const err = new Error(`账号未登录，一键登录失败：${error.message || error}`);
     err.nonRetryable = true;
     throw err;
@@ -493,6 +501,10 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
   const okLogin = Boolean(login?.loginOk || login?.alreadyLoggedIn || login?.loginStatus === 'online');
   if (!okLogin) {
     await dataStore.updateLoginStatus(accountId, 'offline').catch(() => {});
+    if (isServerBrowser) {
+      await releaseLeaseAfterLoggedIn(accountId, connection, batchId);
+      throw waitingLoginDataError(accountId, login?.message || '表单登录未完成（可能需要滑块 / 2FA），请在远程查看里完成验证后重试');
+    }
     const err = new Error(
       `账号未登录，一键登录未完成：${login?.message || '请先在「账号管理」点登录完成验证（可能需要滑块 / 2FA）'}`
     );
@@ -1163,7 +1175,10 @@ async function executeWorkBatch(batch) {
     if (!isServerBrowserBatchScope(batch.batch_scope)) {
       throw serverBrowserForbiddenError(batch.batch_scope || 'general');
     }
-    profileId = await ensureServerBrowserEnv(accountId);
+    // 客服坐席批次：缺包时允许在服务器代建环境并走登录流程；AI 拓客仍保持缺包软等待
+    profileId = await ensureServerBrowserEnv(accountId, {
+      allowProvision: String(batch.batch_scope || '') === 'cs_seat',
+    });
     account.linux_browser_profile_id = profileId;
     try {
       const { setRunningProfile } = require('./queue');
