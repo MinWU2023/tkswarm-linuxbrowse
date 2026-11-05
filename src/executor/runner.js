@@ -17,7 +17,12 @@ const dataStore = require('./data-store');
 
 /** 从 payload 解析省流并同步到会话 / 已打开的浏览器 */
 async function syncSaveTrafficFromPayload(payload, defaultOn = false) {
-  const enabled = parseSaveTrafficFlag(
+  let forceLinux = false;
+  try {
+    const be = String(getSession()?.browserBackend || payload?.browserBackend || payload?.browser_backend || '').trim().toLowerCase();
+    forceLinux = be === 'linux' && String(process.env.TKSWARM_SERVER_SAVE_TRAFFIC || '1').trim() !== '0';
+  } catch { /* ignore */ }
+  const enabled = forceLinux || parseSaveTrafficFlag(
     payload?.saveTraffic ?? payload?.save_traffic,
     defaultOn
   );

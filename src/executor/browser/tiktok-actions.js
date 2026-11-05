@@ -148,6 +148,11 @@ function writeMarkPublishedDebug(info) {
 }
 async function resolveConnectSaveTraffic(options = {}) {
   const { parseSaveTrafficFlag } = require('./save-traffic');
+  // 服务器浏览器（linux 后端）一律省流；TKSWARM_SERVER_SAVE_TRAFFIC=0 可关闭
+  if (String(process.env.TKSWARM_SERVER_SAVE_TRAFFIC || '1').trim() !== '0'
+    && String(options.browserBackend || '').trim().toLowerCase() === 'linux') {
+    return true;
+  }
   if (options.saveTraffic != null || options.save_traffic != null) {
     return parseSaveTrafficFlag(options.saveTraffic ?? options.save_traffic, false);
   }

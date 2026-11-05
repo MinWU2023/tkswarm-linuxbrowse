@@ -35,7 +35,7 @@ async function openSeatBrowser(accountId, startUrl = 'https://www.tiktok.com/') 
     browserProfileId: profileId,
     browserBackend: 'linux',
     forceRelaunch: true,
-    saveTraffic: false,
+    saveTraffic: true, // 服务器浏览器一律省流
     headless: false,
   });
   return { connection, profileId };
@@ -379,37 +379,65 @@ async function runSyncFans(accountId, payload = {}) {
       livePushed = true;
       await stepLog('环境包流程结束');
     }
-    await stepLog(`准备打开列表页 ${startUrl}`);
-    await connection.page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((e) => {
-      liveLog(`账号 #${aid}：打开列表页失败：${String(e?.message || e).slice(0, 160)}`, 'warn', { accountId: aid });
+    // TikTok 网页端的 /@user/followers 不是独立页面（会被重定向到 /foryou），
+    // 必须先开主页，再点粉丝/关注数，在弹出的列表里抓取。
+    const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(uname)}`;
+    const MODAL_SEL = '[data-e2e="follow-info-popup"], [class*="DivFollowInfoContainer" i], [class*="UserListContainer" i], [role="dialog"]';
+    const kindLabel = listKind === 'following' ? '关注' : '粉丝';
+    await stepLog(`准备打开主页 ${profileUrl}，再点「${kindLabel}」数打开列表弹窗`);
+    await connection.page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((e) => {
+      liveLog(`账号 #${aid}：打开主页失败：${String(e?.message || e).slice(0, 160)}`, 'warn', { accountId: aid });
     });
-    await connection.page.waitForTimeout?.(2000).catch(() => {});
-    await stepLog('列表页已打开，开始抓取');
-    // 列表页又被踢回登录墙：同样打开登录页并软等待
+    await connection.page.waitForTimeout?.(2500).catch(() => {});
+    // 主页被踢回登录墙：先探测（在点开弹窗之前，避免探测干扰弹窗）
     const again = await probeLogin(connection, aid);
     if (!again?.loggedIn) {
       await gotoLoginPageForManual(connection, aid);
       keepOpen = true;
-      throw waitingLoginDataError(aid, '打开粉丝/关注页后仍未登录，已跳转登录页');
+      throw waitingLoginDataError(aid, '打开个人主页后仍未登录，已跳转登录页');
     }
-
+    const countSel = listKind === 'following'
+      ? '[data-e2e="following-count"], [data-e2e="following"]'
+      : '[data-e2e="followers-count"], [data-e2e="followers"]';
+    const waitModal = () => connection.page.locator(MODAL_SEL).first()
+      .waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+    let listOpened = false;
+    try {
+      await connection.page.locator(countSel).first().click({ timeout: 8000 });
+      listOpened = await waitModal();
+    } catch { /* 走文字兜底 */ }
+    if (!listOpened) {
+      try {
+        const textRe = listKind === 'following' ? /^(Following|关注)$/i : /^(Followers|粉丝)$/i;
+        await connection.page.getByText(textRe).first().click({ timeout: 6000 });
+        listOpened = await waitModal();
+      } catch { /* ignore */ }
+    }
+    await stepLog(`列表弹窗${listOpened ? '已打开' : '未能打开'}，开始抓取`);
+    if (!listOpened) {
+      throw new Error(`未能打开「${kindLabel}」列表弹窗（当前页 ${String(connection.page.url?.() || '').slice(0, 80)}），本次不入库，避免把推荐流当成${kindLabel}`);
+    }
     const users = [];
     const seen = new Set();
     for (let round = 0; round < 25 && users.length < maxPerRun; round += 1) {
-      const batch = await connection.page.evaluate(() => {
+      const batch = await connection.page.evaluate(({ sel, self }) => {
         const out = [];
-        const anchors = Array.from(document.querySelectorAll('a[href*="/@"]'));
+        // 只在列表弹窗内取，不碰页面其它区域
+        const root = document.querySelector(sel);
+        if (!root) return out;
+        const anchors = Array.from(root.querySelectorAll('a[href*="/@"]'));
         for (const a of anchors) {
           const href = String(a.getAttribute('href') || '');
           const m = href.match(/\/@([^/?#]+)/);
           if (!m) continue;
           const username = decodeURIComponent(m[1] || '').replace(/^@+/, '');
           if (!username || /^(following|followers|video|live|music|tag)$/i.test(username)) continue;
+          if (username.toLowerCase() === self) continue;
           const nickname = String(a.innerText || a.textContent || '').split('\n').map((s) => s.trim()).filter(Boolean)[0] || username;
           out.push({ username, nickname, friendUid: username });
         }
         return out;
-      }).catch(() => []);
+      }, { sel: MODAL_SEL, self: uname.toLowerCase() }).catch(() => []);
       for (const u of batch || []) {
         const key = String(u.username || '').toLowerCase();
         if (!key || seen.has(key)) continue;
@@ -422,10 +450,15 @@ async function runSyncFans(accountId, payload = {}) {
         });
         if (users.length >= maxPerRun) break;
       }
-      await connection.page.evaluate(() => {
-        const el = document.scrollingElement || document.documentElement;
-        el.scrollTop = el.scrollHeight;
-      }).catch(() => {});
+      // 滚动弹窗里真正可滚动的容器（不是整页）
+      await connection.page.evaluate((sel) => {
+        const root = document.querySelector(sel);
+        if (!root) return;
+        const nodes = [root, ...Array.from(root.querySelectorAll('*'))];
+        const scroller = nodes.find((n) => n.scrollHeight > n.clientHeight + 20
+          && /(auto|scroll)/.test(getComputedStyle(n).overflowY)) || root;
+        scroller.scrollTop = scroller.scrollHeight;
+      }, MODAL_SEL).catch(() => {});
       await connection.page.waitForTimeout?.(900).catch(() => {});
     }
 
@@ -433,14 +466,22 @@ async function runSyncFans(accountId, payload = {}) {
     let added = 0;
     let updated = 0;
     if (users.length) {
-      const ingested = await phpApi.post('/node/chat/dm-ingest', {
-        accountId: aid,
-        friends: users,
-        source: listKind === 'following' ? 'chat.refresh-following' : 'chat.refresh-fans',
-      }).catch(() => null);
-      const upserted = Number(ingested?.friends || ingested?.added || 0) || users.length;
-      added = upserted;
+      let ingested = null;
+      try {
+        ingested = await phpApi.post('/node/chat/dm-ingest', {
+          accountId: aid,
+          friends: users,
+          source: listKind === 'following' ? 'chat.refresh-following' : 'chat.refresh-fans',
+        });
+      } catch (e) {
+        const m = String(e?.message || e).slice(0, 300);
+        liveLog(`账号 #${aid}：${kindLabel}写入中心库失败：${m}`, 'error', { accountId: aid });
+        throw new Error(`抓到 ${users.length} 个${kindLabel}，但写入中心库失败：${m}`);
+      }
+      const upserted = Number(ingested?.friends);
+      added = Number.isFinite(upserted) ? upserted : 0;
       updated = Math.max(0, users.length - added);
+      liveLog(`账号 #${aid}：${kindLabel}已写入中心库 提交=${users.length} 中心库确认=${added}`, 'info', { accountId: aid });
     }
 
     // 已在登录确认后推过包则不重复；否则（环境包里本就是登录态）抓完刷新一次凭证
