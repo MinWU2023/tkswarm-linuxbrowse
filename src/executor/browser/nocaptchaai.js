@@ -9,17 +9,70 @@
  * 默认密钥可通过环境变量 NOCAPTCHAAI_KEY / TKSWARM_NOCAPTCHAAI_KEY 覆盖。
  */
 const { publish: liveLog } = require('../live-log');
+const dataStore = require('../data-store');
+const phpApi = require('../php-api');
 
 const DEFAULT_API_KEY = 'nocap_XrWSZYi3dyxKzr2zvtUxLzbM';
 const BASE_URL = (process.env.NOCAPTCHAAI_BASE_URL || 'https://api.nocaptchaai.com').replace(/\/+$/, '');
+const KEY_CACHE_TTL_MS = 10000;
+
+let cachedRemoteKey = null;
+let cachedRemoteFetchedAt = 0;
 
 function getApiKey(overrideKey = '') {
   return String(
     overrideKey
+    || cachedRemoteKey?.apiKey
     || process.env.NOCAPTCHAAI_KEY
     || process.env.TKSWARM_NOCAPTCHAAI_KEY
     || DEFAULT_API_KEY
   ).trim();
+}
+
+/**
+ * 从中心库（开发管理 · NoCaptchaAI 密钥管理）读取当前启用（status=1）记录的 api_key 字段。
+ * - 若有启用记录，返回其 apiKey；
+ * - 若所有记录均已禁用（enabled=false 且成功从后端返回），返回空字符串以尊重禁用状态；
+ * - 若网络/接口不可达，回退环境变量或默认密钥。
+ */
+async function resolveActiveApiKey(overrideKey = '', { forceRefresh = false } = {}) {
+  const manual = String(overrideKey || '').trim();
+  if (manual) return manual;
+
+  const now = Date.now();
+  if (!forceRefresh && cachedRemoteKey && (now - cachedRemoteFetchedAt) < KEY_CACHE_TTL_MS) {
+    return cachedRemoteKey.apiKey;
+  }
+
+  try {
+    const res = typeof dataStore.getNocaptchaKey === 'function'
+      ? await dataStore.getNocaptchaKey()
+      : await phpApi.get('/node/nocaptcha-key');
+    if (res && typeof res === 'object') {
+      const key = String(res.apiKey ?? res.api_key ?? '').trim();
+      const enabled = res.enabled !== undefined ? Boolean(res.enabled) : (Number(res.status) === 1 && Boolean(key));
+      cachedRemoteKey = {
+        enabled,
+        apiKey: enabled ? key : '',
+        id: Number(res.id || 0),
+        email: String(res.email || ''),
+      };
+      cachedRemoteFetchedAt = now;
+      return cachedRemoteKey.apiKey;
+    }
+  } catch { /* ignore and fallback */ }
+
+  try {
+    const fromSetting = await dataStore.getSetting('nocaptchaApiKey', '');
+    if (fromSetting) {
+      const k = String(fromSetting).trim();
+      cachedRemoteKey = { enabled: true, apiKey: k, id: 0, email: '' };
+      cachedRemoteFetchedAt = now;
+      return k;
+    }
+  } catch { /* ignore */ }
+
+  return getApiKey();
 }
 
 function sleep(ms) {
@@ -49,9 +102,9 @@ async function requestRotateSolution({
   apiKey = '',
   timeoutMs = 45000,
 } = {}) {
-  const clientKey = getApiKey(apiKey);
+  const clientKey = await resolveActiveApiKey(apiKey);
   if (!clientKey) {
-    return { ok: false, angle: 0, angles: [], raw: null, error: '缺少 NoCaptchaAI 密钥' };
+    return { ok: false, angle: 0, angles: [], raw: null, error: '未配置或未启用 NoCaptchaAI 密钥（请在开发管理 → NoCaptchaAI 启用一条密钥记录）' };
   }
   const outer = stripDataUrlPrefix(outerBase64);
   const inner = stripDataUrlPrefix(innerBase64);
@@ -783,6 +836,7 @@ function attachAutoRotateCaptchaWatcher(page, { accountId = 0, apiKey = '' } = {
 module.exports = {
   DEFAULT_API_KEY,
   getApiKey,
+  resolveActiveApiKey,
   requestRotateSolution,
   detectRotateCaptcha,
   solveRotateCaptchaIfPresent,

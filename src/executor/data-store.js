@@ -183,6 +183,10 @@ async function dmIngest(payload) {
   return phpApi.post('/node/chat/dm-ingest', payload);
 }
 
+async function getNocaptchaKey() {
+  return phpApi.get('/node/nocaptcha-key');
+}
+
 module.exports = {
   usePhp,
   getSetting,
@@ -202,4 +206,5 @@ module.exports = {
   qrComplete,
   saveMonitorResult,
   dmIngest,
+  getNocaptchaKey,
 };
