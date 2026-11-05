@@ -171,39 +171,71 @@
           } catch { /* ignore */ }
         }
 
+        // 先确认服务端已挂 x11vnc（环境未开/无头时给出明确提示，避免无意义秒断）
+        try {
+          const headers = { Accept: 'application/json' };
+          if (token) headers.Authorization = `Bearer ${token}`;
+          const st = await fetch(`/api/windows/${encodeURIComponent(id)}/vnc`, { headers });
+          const stJson = await st.json().catch(() => ({}));
+          if (!stJson?.ok) {
+            status.textContent = stJson?.message || 'VNC 未就绪（请先打开有头窗口）';
+            status.classList.add('err');
+            // 仍尝试连接一次（upgrade 侧会 revive）；不直接 return
+          }
+        } catch { /* ignore */ }
+
         status.textContent = '连接中…';
+        // 经典 VNC 只认前 8 字符
+        if (autoPassword) autoPassword = String(autoPassword).slice(0, 8);
         const rfbOpts = autoPassword !== ''
           ? { credentials: { password: autoPassword } }
           : undefined;
-        const rfb = new RFB(document.getElementById('screen'), url, rfbOpts);
-        rfb.scaleViewport = true;
-        rfb.resizeSession = true;
-        rfb.addEventListener('connect', () => {
-          status.textContent = '已连接';
-          status.classList.remove('err');
-          status.classList.add('ok');
-        });
-        rfb.addEventListener('disconnect', (e) => {
-          const why = e.detail?.clean ? '已断开' : '连接失败 / 已断开';
-          status.textContent = autoPassword
-            ? `${why}（若反复失败：检查 x11vnc 是否在跑、TKSWARM_VNC_PASSWORD 是否与服务端一致）`
-            : `${why}（未拿到 VNC 密码，请确认已设 TKSWARM_VNC_PASSWORD 或 URL 带 ?pw=）`;
-          status.classList.remove('ok');
-          status.classList.add('err');
-        });
-        rfb.addEventListener('securityfailure', (e) => {
-          status.textContent = `VNC 鉴权失败：${e.detail?.status || ''}（密码不匹配或 x11vnc 未用密码文件启动）`;
-          status.classList.add('err');
-        });
-        rfb.addEventListener('credentialsrequired', () => {
-          if (autoPassword !== '') {
-            rfb.sendCredentials({ password: autoPassword });
-            return;
-          }
-          const pw = prompt('VNC 密码（可在服务端设 TKSWARM_VNC_PASSWORD 以自动填入）') || '';
-          autoPassword = pw;
-          rfb.sendCredentials({ password: pw });
-        });
+
+        let retried = false;
+        const connectOnce = () => {
+          const rfb = new RFB(document.getElementById('screen'), url, rfbOpts);
+          rfb.scaleViewport = true;
+          rfb.resizeSession = true;
+          rfb.addEventListener('connect', () => {
+            status.textContent = '已连接';
+            status.classList.remove('err');
+            status.classList.add('ok');
+          });
+          rfb.addEventListener('disconnect', (e) => {
+            const why = e.detail?.clean ? '已断开' : '连接失败 / 已断开';
+            if (!e.detail?.clean && !retried) {
+              retried = true;
+              status.textContent = '连接失败，正在重试（尝试拉起 x11vnc）…';
+              status.classList.remove('ok');
+              setTimeout(() => {
+                try { connectOnce(); } catch (err) {
+                  status.textContent = err.message || why;
+                  status.classList.add('err');
+                }
+              }, 1600);
+              return;
+            }
+            status.textContent = autoPassword
+              ? `${why}（请确认：① 环境窗口仍在运行 ② 已 apt install x11vnc ③ 密码前 8 位与 TKSWARM_VNC_PASSWORD 一致）`
+              : `${why}（未拿到 VNC 密码，请确认已设 TKSWARM_VNC_PASSWORD 或 URL 带 ?pw=）`;
+            status.classList.remove('ok');
+            status.classList.add('err');
+          });
+          rfb.addEventListener('securityfailure', (e) => {
+            status.textContent = `VNC 鉴权失败：${e.detail?.status || ''}（密码不匹配；经典 VNC 仅前 8 位有效）`;
+            status.classList.add('err');
+          });
+          rfb.addEventListener('credentialsrequired', () => {
+            if (autoPassword !== '') {
+              rfb.sendCredentials({ password: autoPassword });
+              return;
+            }
+            const pw = (prompt('VNC 密码（可在服务端设 TKSWARM_VNC_PASSWORD 以自动填入）') || '').slice(0, 8);
+            autoPassword = pw;
+            rfb.sendCredentials({ password: pw });
+          });
+        };
+        connectOnce();
       } catch (e) {
         status.textContent = e.message || 'noVNC 加载失败（请 npm i @novnc/novnc 或检查网络）';
         status.classList.add('err');

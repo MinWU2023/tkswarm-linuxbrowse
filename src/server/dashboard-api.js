@@ -77,7 +77,10 @@ router.get('/api/vnc-config', async (req, res) => {
     // Token 无效：仍不阻断 VNC（避免「连不上」），只是不绑定用户
   }
   const { VNC_PASSWORD } = require('../config');
-  const password = String(VNC_PASSWORD || '');
+  // 经典 VNC 只认前 8 字符，须与 x11vnc -storepasswd 一致
+  const password = typeof vnc.normalizeVncPassword === 'function'
+    ? vnc.normalizeVncPassword(VNC_PASSWORD)
+    : String(VNC_PASSWORD || '').slice(0, 8);
   res.json({
     ok: true,
     hasPassword: password !== '',
@@ -208,9 +211,22 @@ router.get('/api/windows/:id/vnc', async (req, res) => {
     const gate = assertProfileOwner(user, profile);
     if (!gate.ok) return res.json({ ok: false, message: gate.msg });
   }
-  const info = vnc.getVncInfo(id);
+  let info = vnc.getVncInfo(id);
+  if (!info && typeof vnc.reviveVncIfNeeded === 'function') {
+    try {
+      await vnc.reviveVncIfNeeded(id);
+      info = vnc.getVncInfo(id);
+    } catch { /* */ }
+  }
   if (!info) {
-    return res.json({ ok: false, message: '该窗口未开启 VNC（需有头模式）' });
+    const session = manager.getSession?.(id);
+    if (!session) {
+      return res.json({ ok: false, message: '环境未在运行：请先打开有头窗口再点 VNC' });
+    }
+    if (session.headless) {
+      return res.json({ ok: false, message: '当前是无头模式，请先「显示窗口」再开 VNC' });
+    }
+    return res.json({ ok: false, message: '该窗口未开启 VNC（检查 x11vnc 是否安装、TKSWARM_VNC_PASSWORD 是否已设）' });
   }
   res.json({ ok: true, data: info });
 });

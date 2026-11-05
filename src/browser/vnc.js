@@ -42,11 +42,18 @@ function x11vncInstalled() {
 }
 
 /**
+ * 经典 VNC 鉴权只认前 8 字节。存盘与下发给 noVNC 必须一致，否则秒断。
+ */
+function normalizeVncPassword(plain) {
+  return String(plain || '').slice(0, 8);
+}
+
+/**
  * 把明文密码写成 x11vnc / libvncserver 可读的 passwd 文件。
  * @returns {string} 文件绝对路径
  */
 function ensureVncPassFile(plain) {
-  const password = String(plain || '');
+  const password = normalizeVncPassword(plain);
   if (!password) return '';
   if (cachedPassFile && cachedPassPlain === password && fs.existsSync(cachedPassFile)) {
     return cachedPassFile;
@@ -91,21 +98,49 @@ function waitPortOpen(port, timeoutMs = 5000) {
   });
 }
 
+function rejectUpgrade(socket, code, reason) {
+  try {
+    socket.write(
+      `HTTP/1.1 ${code} ${reason}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(reason)}\r\n\r\n${reason}`,
+    );
+  } catch { /* */ }
+  try { socket.destroy(); } catch { /* */ }
+}
+
+/**
+ * 有头会话还在但 x11vnc 挂了时，同步拉起一次（WebSocket upgrade 用）。
+ */
+async function reviveVncIfNeeded(profileId) {
+  const id = String(profileId || '');
+  const cur = vncByProfile.get(id);
+  if (cur?.rfbPort && cur.proc && cur.proc.exitCode == null && !cur.proc.killed) {
+    const alive = await waitPortOpen(cur.rfbPort, 800);
+    if (alive) return cur;
+  }
+  let session = null;
+  try {
+    session = require('./manager').getSession(id);
+  } catch { /* */ }
+  if (!session || session.headless || !session.display) return null;
+  try {
+    await startVnc(id, session.display);
+  } catch (e) {
+    console.warn(`[vnc] revive 失败 profile=${id.slice(0, 8)}…:`, e.message || e);
+    return null;
+  }
+  return vncByProfile.get(id) || null;
+}
+
 function attachToHttpServer(server) {
   if (wss) return wss;
-  wss = new WebSocketServer({ noServer: true });
+  // 关闭压缩：RFB 二进制帧经 deflate 易损坏 → noVNC 秒断
+  wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url || '', 'http://127.0.0.1');
     if (!url.pathname.startsWith('/vnc-ws/')) {
       return;
     }
     const profileId = decodeURIComponent(url.pathname.slice('/vnc-ws/'.length).replace(/\/$/, ''));
-    const info = vncByProfile.get(String(profileId));
-    if (!info?.rfbPort) {
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-      socket.destroy();
-      return;
-    }
     // 可选：带 token 时校验归属（默认共用放行）。无 token 时仅内网场景放行
     try {
       const db = require('../db');
@@ -115,14 +150,33 @@ function attachToHttpServer(server) {
         const user = db.getUserByToken(token);
         const profile = db.getProfile(profileId);
         if (!user || (profile && !assertProfileOwner(user, profile).ok)) {
-          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-          socket.destroy();
+          rejectUpgrade(socket, 403, 'Forbidden');
           return;
         }
       }
     } catch { /* ignore auth errors, still allow connect on trusted network */ }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      bridgeWsToRfb(ws, info.rfbPort);
+
+    const finish = (info) => {
+      if (!info?.rfbPort || socket.destroyed) {
+        rejectUpgrade(socket, 404, 'VNC not running (need headed window + x11vnc)');
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        bridgeWsToRfb(ws, info.rfbPort);
+      });
+    };
+
+    const existing = vncByProfile.get(String(profileId));
+    const tryConnect = async () => {
+      if (existing?.rfbPort) {
+        const alive = await waitPortOpen(existing.rfbPort, 600);
+        if (alive) return existing;
+      }
+      // 窗口仍在但 VNC 进程没了 / 端口已死：自动拉起再升级
+      return reviveVncIfNeeded(profileId);
+    };
+    tryConnect().then(finish).catch(() => {
+      rejectUpgrade(socket, 404, 'VNC not running');
     });
   });
   return wss;
@@ -130,28 +184,49 @@ function attachToHttpServer(server) {
 
 function bridgeWsToRfb(ws, rfbPort) {
   try { ws.binaryType = 'nodebuffer'; } catch { /* */ }
-  const tcp = net.connect(rfbPort, '127.0.0.1');
+  const pendingFromTcp = [];
+  const clientBuf = [];
+  let tcpReady = false;
+  const tcp = net.connect({ host: '127.0.0.1', port: rfbPort });
+
+  const flushToWs = () => {
+    if (ws.readyState !== 1) return;
+    while (pendingFromTcp.length) {
+      try { ws.send(pendingFromTcp.shift(), { binary: true }); } catch { return; }
+    }
+  };
+  const sendToWs = (buf) => {
+    if (!buf || !buf.length) return;
+    if (ws.readyState !== 1) {
+      pendingFromTcp.push(buf);
+      return;
+    }
+    flushToWs();
+    try { ws.send(buf, { binary: true }); } catch { /* */ }
+  };
+
+  tcp.on('connect', () => {
+    tcpReady = true;
+    while (clientBuf.length && !tcp.destroyed) {
+      try { tcp.write(clientBuf.shift()); } catch { break; }
+    }
+  });
   tcp.on('error', () => {
     try { ws.close(); } catch { /* */ }
   });
   ws.on('error', () => {
     try { tcp.destroy(); } catch { /* */ }
   });
-  tcp.on('data', (buf) => {
-    if (ws.readyState === 1) {
-      try { ws.send(buf); } catch { /* */ }
-    }
-  });
-  ws.on('message', (data, isBinary) => {
-    if (tcp.destroyed) return;
+  tcp.on('data', (buf) => sendToWs(buf));
+  ws.on('message', (data) => {
     let buf;
     if (Buffer.isBuffer(data)) buf = data;
     else if (data instanceof ArrayBuffer) buf = Buffer.from(data);
     else if (ArrayBuffer.isView(data)) buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
     else buf = Buffer.from(String(data));
-    // RFB 必须是二进制；若被当文本会立刻鉴权失败
-    if (isBinary === false && buf.length && buf[0] > 127) {
-      /* still forward */
+    if (!tcpReady || tcp.destroyed) {
+      clientBuf.push(buf);
+      return;
     }
     try { tcp.write(buf); } catch { /* */ }
   });
@@ -232,10 +307,16 @@ async function startVnc(profileId, display) {
     if (cur?.rfbPort === rfbPort) vncByProfile.delete(id);
   });
 
-  const ready = await waitPortOpen(rfbPort, 6000);
+  const ready = await waitPortOpen(rfbPort, 10000);
   if (!ready || (proc.exitCode != null && proc.exitCode !== 0)) {
     try { proc.kill('SIGKILL'); } catch { /* */ }
     console.warn(`[vnc] x11vnc 未在 :${rfbPort} 就绪，请看日志 ${logFile}`);
+    return null;
+  }
+  // 再确认进程没秒退（密码文件错误时常见）
+  await new Promise((r) => setTimeout(r, 300));
+  if (proc.exitCode != null || proc.killed) {
+    console.warn(`[vnc] x11vnc 启动后立即退出，请看日志 ${logFile}`);
     return null;
   }
 
@@ -248,6 +329,7 @@ async function startVnc(profileId, display) {
     bindHost: VNC_BIND_HOST,
   };
   vncByProfile.set(id, info);
+  console.log(`[vnc] 已启动 profile=${id.slice(0, 8)}… display=${display} rfb=:${rfbPort}`);
   return { rfbPort, viewPath, display };
 }
 
@@ -291,4 +373,6 @@ module.exports = {
   x11vncInstalled,
   vncPasswordRequired,
   ensureVncPassFile,
+  reviveVncIfNeeded,
+  normalizeVncPassword,
 };

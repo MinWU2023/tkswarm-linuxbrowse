@@ -295,7 +295,10 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
       await new Promise((r) => setTimeout(r, 800));
     }
     const openedInner = await synced.provider.open(synced.profileId, {
-      headless: isHeadless(action),
+      // 坐席 / VNC 等可显式强制有头
+      headless: options.headless === false
+        ? false
+        : (options.headless === true ? true : isHeadless(action)),
       forceRelaunch: force,
     });
     if (!openedInner?.ws && !openedInner?.http) {
@@ -395,7 +398,9 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
       });
       markProxySynced(recovered.profileId);
       const reOpened = await recovered.provider.open(recovered.profileId, {
-        headless: isHeadless(action),
+        headless: options.headless === false
+          ? false
+          : (options.headless === true ? true : isHeadless(action)),
         forceRelaunch: true,
       });
       if (!reOpened?.ws && !reOpened?.http) throw new Error(`${recovered.provider.backendLabel || '本地浏览器'}重开后未返回 CDP`);
