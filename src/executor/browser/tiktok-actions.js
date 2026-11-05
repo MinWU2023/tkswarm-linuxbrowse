@@ -486,7 +486,24 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
       return recoveredConn;
     }
     if (page.isClosed?.() || !browser.isConnected?.()) {
-      throw new Error('打开目标页后浏览器已关闭（可能被并发关窗/写代理打断）');
+      // 只整窗重开一次；仍然关闭就如实报错
+      if (!options.__reopenedAfterGoto) {
+        const { publish: liveLog } = require('../live-log');
+        liveLog(
+          `账号 #${accountId}：打开目标页后浏览器已关闭（页面已关=${Boolean(page.isClosed?.())}，CDP 断开=${!browser.isConnected?.()}），强制重开环境再试一次`,
+          'warn',
+          { accountId },
+        );
+        // 缓存的旧连接无需手动清：getActiveConnection() 对已断开/已关页的连接会返回 null
+        await browser.close?.().catch(() => {});
+        await activeProvider.close(profileId).catch(() => {});
+        return connectAccount(accountId, url, action, {
+          ...options,
+          forceRelaunch: true,
+          __reopenedAfterGoto: true,
+        });
+      }
+      throw new Error('打开目标页后浏览器已关闭（重开一次后仍关闭；可能是 Electron 渲染进程崩溃或被并发关窗）');
     }
     if (/tiktokstudio\/upload/i.test(url)) {
       await page.getByText(/Select video/i).first().waitFor({ state: 'visible', timeout: 30000 }).catch(() => {});

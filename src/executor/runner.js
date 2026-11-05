@@ -729,7 +729,8 @@ async function executeWorkItem(item) {
           accountId,
           content: payload.content || '',
           translated: payload.translated || '',
-          status: 'sent',
+          recordId: Number(payload.recordId || 0) || undefined,
+          status: 'synced',
         });
       } catch (e) {
         liveLog(`账号 #${accountId}：坐席发信回写本地失败：${e.message || e}`, 'warn', logCtx);
