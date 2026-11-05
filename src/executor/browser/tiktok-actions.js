@@ -392,7 +392,8 @@ async function connectAccount(accountId, url, action = 'publish', options = {}) 
     ({ opened, browser, context, page } = await openAndAttach(forceRelaunch));
   } catch (e) {
     // 僵尸/半关进程：强制关窗后整窗重开一次
-    if (/PAGE_CONTEXT_CLOSED|CREATE_TARGET_UNSUPPORTED|NO_PAGE|has been closed|Target closed|Target page|context or browser|Not supported/i.test(String(e?.message || e || e?.code))) {
+    // 含 CDP 端口拒绝连接（Electron 进程已退出）：同样整窗重开一次
+    if (/PAGE_CONTEXT_CLOSED|CREATE_TARGET_UNSUPPORTED|NO_PAGE|has been closed|Target closed|Target page|context or browser|Not supported|ECONNREFUSED|ECONNRESET|WebSocket error|连接浏览器 CDP 失败|CDP 已断开|未返回 CDP/i.test(String(e?.message || e || e?.code))) {
       const { publish: liveLog } = require('../live-log');
       liveLog(
         `账号 #${accountId}：开页失败（${String(e.message || e).slice(0, 120)}），强制重开环境再试`,
