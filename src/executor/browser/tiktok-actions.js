@@ -2761,8 +2761,18 @@ async function prepareMessage(accountId, content, recipient = '', options = {}) 
   });
   let keepOpen = false;
   try {
-    const session = await inspectTikTokSession(connection.ws);
-    if (!session.loggedIn) throw new Error('当前浏览器没有有效 TikTok 登录状态');
+    if (String(options.browserBackend || '').toLowerCase() === 'linux') {
+      // 服务器浏览器：先检测登录 → 注入同步登录数据 → 一键/表单登录 → 登录页填表；登录后才继续私信
+      try {
+        await require('./seat-tasks').ensureSeatLoggedIn(connection, accountId, { label: '私信' });
+      } catch (e) {
+        if (e?.waiting) keepOpen = true;
+        throw e;
+      }
+    } else {
+      const session = await inspectTikTokSession(connection.ws);
+      if (!session.loggedIn) throw new Error('当前浏览器没有有效 TikTok 登录状态');
+    }
     const before = await capture(connection.page, accountId, 'message', 'before');
     const security = await inspectPageForDm(connection.page);
     if (security.blocked) {

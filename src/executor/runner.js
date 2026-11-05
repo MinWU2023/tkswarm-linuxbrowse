@@ -1361,6 +1361,22 @@ async function executeWorkBatch(batch) {
               );
               break;
             }
+            // 登录门禁未通过（等待登录）：窗口留给 VNC 完成登录，不关窗；本批后续分任务不再继续
+            if (error?.waiting === true && String(error?.code || '') === WAITING_LOGIN_DATA) {
+              holdBrowserForHumanVerify = true;
+              fail += 1;
+              await phpApi.post(`/node/work-batches/${batchId}/items/${item.id}/result`, {
+                workerId: WORKER_ID,
+                status: 'failed',
+                errorMessage: error.message,
+              }).catch(() => {});
+              liveLog(
+                `总任务#${batchId} 分任务#${item.id} 未登录且自动登录未成功（浏览器保持打开，请在 VNC 完成登录后重试）：${error.message}`,
+                'warn',
+                { accountId, batchId, itemId: item.id }
+              );
+              break;
+            }
             fail += 1;
             await phpApi.post(`/node/work-batches/${batchId}/items/${item.id}/result`, {
               workerId: WORKER_ID,

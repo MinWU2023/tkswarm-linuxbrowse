@@ -335,8 +335,15 @@ async function scrapeMessagesDom(page, limit) {
 async function fetchInboxViaBit(accountId, opts = {}) {
   const maxConversations = Math.min(40, Math.max(3, Number(opts.maxConversations) || 15));
   const maxMessagesPerChat = Math.min(50, Math.max(1, Number(opts.maxMessagesPerChat) || 12));
-  const connection = await connectAccount(accountId, 'https://www.tiktok.com/messages', 'message');
+  const isLinux = String(opts.browserBackend || '').toLowerCase() === 'linux';
+  const connection = await connectAccount(
+    accountId,
+    'https://www.tiktok.com/messages',
+    'message',
+    isLinux ? { browserBackend: 'linux' } : {},
+  );
   const captured = [];
+  let holdForLogin = false;
   const onResponse = async (response) => {
     try {
       const url = response.url();
@@ -347,9 +354,14 @@ async function fetchInboxViaBit(accountId, opts = {}) {
     } catch { /* ignore */ }
   };
   try {
-    const session = await inspectTikTokSession(connection.ws);
-    if (!session.loggedIn) {
-      return { ok: false, status: 'unsupported', reason: '浏览器环境未检测到 TikTok 登录态' };
+    if (isLinux) {
+      // 服务器浏览器：先检测登录 → 注入同步登录数据 → 一键/表单登录 → 登录页填表；登录后才同步私信
+      await require('./seat-tasks').ensureSeatLoggedIn(connection, accountId, { label: '同步私信' });
+    } else {
+      const session = await inspectTikTokSession(connection.ws);
+      if (!session.loggedIn) {
+        return { ok: false, status: 'unsupported', reason: '浏览器环境未检测到 TikTok 登录态' };
+      }
     }
     connection.page.on('response', onResponse);
     await connection.page.waitForTimeout(2500);
@@ -425,9 +437,17 @@ async function fetchInboxViaBit(accountId, opts = {}) {
       conversations,
       capturedApis: [...new Set(captured.map((c) => c.url.split('?')[0]))],
     };
+  } catch (e) {
+    // 等待登录：窗口留给 VNC 人工完成验证，不关窗
+    if (e?.waiting) holdForLogin = true;
+    throw e;
   } finally {
     try { connection.page.off('response', onResponse); } catch { /* ignore */ }
-    await closeConnection(connection);
+    if (holdForLogin) {
+      try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* ignore */ }
+    } else {
+      await closeConnection(connection);
+    }
   }
 }
 
@@ -478,6 +498,8 @@ async function syncAccountDm(accountId, opts = {}) {
       fetched = await fetchInboxViaBit(accountId, opts);
       attempts.push({ via: fetched.source || 'bit', ok: fetched.ok, reason: fetched.reason });
     } catch (e) {
+      // 等待登录（WAITING_LOGIN_DATA）必须抛给上层，由队列软等待重试，不能吞成「同步失败」
+      if (e?.waiting) throw e;
       attempts.push({ via: 'bit', ok: false, reason: e.message });
       fetched = {
         ok: false,

@@ -574,7 +574,58 @@ async function runSyncFans(accountId, payload = {}) {
   }
 }
 
+/**
+ * 服务器浏览器任务统一登录门禁（执行任务前必须先过）：
+ * 1) 检测登录态；2) 未登录 → 注入已同步的会话/环境包登录数据；
+ * 3) 仍未登录 → 服务器侧一键（表单）登录；4) 仍失败 → 打开登录页并填账密，留给 VNC，抛 WAITING_LOGIN_DATA。
+ * 本次新拿到登录态时，立刻落会话凭证并回传环境包。
+ */
+async function ensureSeatLoggedIn(connection, accountId, { label = '任务' } = {}) {
+  const aid = Number(accountId);
+  const profileId = String(connection?.account?.browser_profile_id || '');
+  let session = await probeLogin(connection, aid);
+  if (session?.loggedIn) {
+    liveLog(`账号 #${aid}：${label}前登录检测通过`, 'info', { accountId: aid });
+    return { session, fresh: false };
+  }
+
+  liveLog(`账号 #${aid}：${label}前检测到未登录，尝试注入已同步的登录数据`, 'warn', { accountId: aid });
+  await tryInjectSavedSession(connection, aid);
+  session = await probeLogin(connection, aid);
+
+  if (!session?.loggedIn) {
+    liveLog(`账号 #${aid}：同步登录数据无效，尝试服务器侧一键（表单）登录`, 'warn', { accountId: aid });
+    let login = null;
+    try {
+      login = await fullLogin(aid, { connection, reuseOpen: true, forceRelaunch: false });
+    } catch (e) {
+      liveLog(`账号 #${aid}：一键登录异常：${e.message || e}`, 'warn', { accountId: aid });
+    }
+    const ok = Boolean(login?.loginOk || login?.alreadyLoggedIn);
+    if (ok) session = await probeLogin(connection, aid);
+    if (!session?.loggedIn) {
+      await dataStore.updateLoginStatus(aid, 'offline').catch(() => {});
+      if (!login?.usernameFilled || !login?.passwordFilled) {
+        await ensureLoginPageAndFill(connection, aid).catch(() => {});
+      }
+      throw waitingLoginDataError(
+        aid,
+        login?.message || `${label}前需已登录：自动登录未成功，已打开登录页并尝试填入账密，请在 VNC 完成验证后重试`,
+      );
+    }
+  }
+
+  liveLog(`账号 #${aid}：登录已确认，保存会话凭证并回传环境包后继续${label}`, 'info', { accountId: aid });
+  await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
+  if (connection.context) {
+    await persistAccountSessionLog(aid, connection.context, connection.page).catch(() => {});
+  }
+  if (profileId) await pushEnvPackBestEffort(aid, profileId, { keepOpen: true }).catch(() => {});
+  return { session, fresh: true };
+}
+
 module.exports = {
+  ensureSeatLoggedIn,
   runCsLogin,
   runCsDetect,
   runCsLogout,
