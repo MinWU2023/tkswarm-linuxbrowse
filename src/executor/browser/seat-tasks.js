@@ -389,6 +389,14 @@ async function runSyncFans(accountId, payload = {}) {
       liveLog(`账号 #${aid}：打开主页失败：${String(e?.message || e).slice(0, 160)}`, 'warn', { accountId: aid });
     });
     await connection.page.waitForTimeout?.(2500).catch(() => {});
+    // 主页白屏（body 无子节点）：多半是脚本分包没加载出来，刷新重试最多 2 次
+    for (let r = 1; r <= 2; r += 1) {
+      const kids = await connection.page.evaluate(() => document.body?.childElementCount || 0).catch(() => 0);
+      if (kids > 0) break;
+      await stepLog(`主页白屏（body 无内容），第 ${r}/2 次刷新重试`);
+      await connection.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+      await connection.page.waitForTimeout?.(3000).catch(() => {});
+    }
     // 主页被踢回登录墙：先探测（在点开弹窗之前，避免探测干扰弹窗）
     const again = await probeLogin(connection, aid);
     if (!again?.loggedIn) {

@@ -168,6 +168,8 @@ function shouldAbortRequest(request) {
   const type = String(request.resourceType?.() || request.resourceType || '').toLowerCase();
   // 主文档绝不 abort（避免白屏/诊断页被毁）
   if (type === 'document' || type === 'websocket' || type === 'eventsource') return false;
+  // 脚本/样式/接口请求不按 URL 关键字拦（avatar、icon、analytics 等会误伤站点 JS 分包和 API，导致页面白屏）
+  if (['script', 'stylesheet', 'xhr', 'fetch', 'manifest', 'texttrack'].includes(type)) return false;
   if (BLOCK_RESOURCE_TYPES.has(type)) return true;
   if (isSvgLikeUrl(url)) return true;
   return BLOCK_URL_RE.some((re) => re.test(url));
