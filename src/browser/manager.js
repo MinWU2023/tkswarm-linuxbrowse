@@ -11,6 +11,8 @@ const db = require('../db');
 
 /** @type {Map<string, object>} */
 const running = new Map();
+/** 正在启动中的环境 id（进程/Xvfb 已起但尚未登记进 running），GC 不得回收 */
+const launching = new Set();
 const queue = [];
 let queueBusy = false;
 const events = new EventEmitter();
@@ -39,6 +41,11 @@ function listWindows() {
       recording,
     };
   });
+}
+
+/** GC 用：已运行 + 启动中的环境 id */
+function listProtectedProfileIds() {
+  return new Set([...running.keys(), ...launching]);
 }
 
 function isSessionAlive(session) {
@@ -158,10 +165,16 @@ async function openProfile(profileId, options = {}) {
 
     // 强制 EL 核；resolveEngine 在缺 Electron / 配置 chrome 时抛错
     resolveEngine();
-    const launched = await launchProfileElectron(profile, {
-      headless: options.headless,
-      args: options.args,
-    });
+    launching.add(id);
+    let launched;
+    try {
+      launched = await launchProfileElectron(profile, {
+        headless: options.headless,
+        args: options.args,
+      });
+    } finally {
+      launching.delete(id);
+    }
 
     const now = Date.now();
     const session = {
@@ -288,5 +301,6 @@ module.exports = {
   getSession,
   touchSession,
   closeIdleSessions,
+  listProtectedProfileIds,
   events,
 };

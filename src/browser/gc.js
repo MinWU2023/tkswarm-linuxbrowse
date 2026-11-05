@@ -10,12 +10,13 @@ const manager = require('./manager');
 const vnc = require('./vnc');
 const { releaseDisplay } = require('./display-pool');
 
+/** 受保护的环境 id（运行中 + 启动中）；reclaimOrphans 按环境目录名（profile id）匹配，不是 pid */
 function listAliveManagedPids() {
-  const set = new Set();
-  for (const w of manager.listWindows()) {
-    if (w.pid) set.add(Number(w.pid));
+  try {
+    return manager.listProtectedProfileIds();
+  } catch {
+    return new Set(manager.listWindows().map((w) => String(w.profileId)));
   }
-  return set;
 }
 
 function reclaimOrphanXvfb() {
@@ -31,6 +32,14 @@ function reclaimOrphanXvfb() {
     const managedDisplays = new Set(
       manager.listWindows().map((w) => w.display).filter(Boolean)
     );
+    // 启动中的环境已 acquireDisplay 但尚未登记进 running：其 Xvfb 也不能回收
+    try {
+      const { getDisplay } = require('./display-pool');
+      for (const pid of manager.listProtectedProfileIds()) {
+        const d = getDisplay(pid);
+        if (d) managedDisplays.add(d);
+      }
+    } catch { /* ignore */ }
     for (const line of lines) {
       const m = line.trim().match(/^(\d+)\s+.*Xvfb\s+(:\d+)/);
       if (!m) continue;
