@@ -12,6 +12,8 @@ const {
   persistAccountSessionLog,
   closeSession,
   pushEnvPackBestEffort,
+  fillLoginCredentials,
+  dismissLoginOverlay,
 } = require('./tiktok-login');
 const { ensureServerBrowserEnv, waitingLoginDataError } = require('./server-browser');
 const { getProvider } = require('./providers');
@@ -73,17 +75,30 @@ async function runCsLogin(accountId, payload = {}) {
     }
     if (!session?.loggedIn) {
       liveLog(`账号 #${aid}：同步会话无效，尝试服务器侧一键登录`, 'warn', { accountId: aid });
-      const login = await fullLogin(aid, {
-        connection,
-        reuseOpen: true,
-        forceRelaunch: false,
-      });
+      // 先离开首页弹层，再走一键登录（避免停在 FYP + 黑罩）
+      await ensureLoginPageAndFill(connection, aid, { fillOnly: false }).catch(() => {});
+      let login = null;
+      try {
+        login = await fullLogin(aid, {
+          connection,
+          reuseOpen: true,
+          forceRelaunch: false,
+        });
+      } catch (e) {
+        liveLog(`账号 #${aid}：一键登录异常：${e.message || e}`, 'warn', { accountId: aid });
+        await ensureLoginPageAndFill(connection, aid).catch(() => {});
+        keepOpen = true;
+        throw waitingLoginDataError(aid, e.message || '一键登录异常，已打开登录页并尝试填表');
+      }
       const ok = Boolean(login?.loginOk || login?.alreadyLoggedIn);
       if (!ok) {
         await dataStore.updateLoginStatus(aid, 'offline').catch(() => {});
-        // 需要人工验证时保持窗口
-        if (login?.captcha || login?.manualRequired) keepOpen = true;
-        throw waitingLoginDataError(aid, login?.message || '一键登录未完成，请在 VNC/桌面完成登录后重试');
+        // 未填上账密时再硬跳+填表；已填则保留当前页（验证码/2FA）
+        if (!login?.usernameFilled || !login?.passwordFilled) {
+          await ensureLoginPageAndFill(connection, aid).catch(() => {});
+        }
+        keepOpen = true;
+        throw waitingLoginDataError(aid, login?.message || '一键登录未完成，已打开登录页并填入账密，请在 VNC 完成验证后重试');
       }
     }
     await dataStore.updateLoginStatus(aid, 'online').catch(() => {});
@@ -111,6 +126,14 @@ async function runCsLogin(accountId, payload = {}) {
       // 登录成功时已在线上传并解除占用，这里不再重复导出上传
       try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
       if (!livePushed) await releaseSeatLease(profileId);
+    } else {
+      // 留给 VNC 人工完成验证码/登录；不断 Electron 窗
+      try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* */ }
+      liveLog(
+        `账号 #${aid}：浏览器窗口保持打开，请在远程查看完成登录`,
+        'warn',
+        { accountId: aid, profileId },
+      );
     }
   }
 }
@@ -169,19 +192,30 @@ async function runCsLogout(accountId) {
 }
 
 const LOGIN_EMAIL_URL = 'https://www.tiktok.com/login/phone-or-email/email';
+const LOGIN_HUB_URL = 'https://www.tiktok.com/login';
 
-/** 未登录时跳到邮箱登录页，方便 VNC 人工登录（不要停在首页弹层） */
-async function gotoLoginPageForManual(connection, accountId) {
+/**
+ * 未登录时：清首页遮罩 → 硬跳邮箱登录页 →（可选）自动填入账密。
+ * fillOnly=false 时只导航不填（留给随后的 fullLogin）。
+ */
+async function ensureLoginPageAndFill(connection, accountId, { fillOnly = true } = {}) {
   const page = connection?.page;
-  if (!page || page.isClosed?.()) return;
+  if (!page || page.isClosed?.()) return { ok: false, message: '页面已关闭' };
   liveLog(
-    `账号 #${accountId}：未登录，正在打开登录页（可在 VNC 完成登录后重试同步）`,
+    `账号 #${accountId}：打开邮箱登录页${fillOnly ? '并填写账密' : ''}`,
     'warn',
     { accountId },
   );
+  if (typeof dismissLoginOverlay === 'function') {
+    await dismissLoginOverlay(page);
+  }
   await page.goto(LOGIN_EMAIL_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   await page.waitForTimeout?.(800).catch(() => {});
-  // 若仍停在方法选择页，点「Use phone / email」
+  if (typeof dismissLoginOverlay === 'function') {
+    await dismissLoginOverlay(page);
+  }
+
+  // 若落在方法选择页，点「Use phone / email」
   try {
     const phoneEmail = page.getByText(/Use phone(?:\/| or )?email|手机(?:号)?或邮箱|电话或电子邮件/i).first();
     if (await phoneEmail.isVisible({ timeout: 2500 }).catch(() => false)) {
@@ -189,6 +223,62 @@ async function gotoLoginPageForManual(connection, accountId) {
       await page.waitForTimeout?.(600).catch(() => {});
     }
   } catch { /* ignore */ }
+
+  // 仍不在 /login：再走 hub
+  const url = String(page.url() || '');
+  if (!/\/login/i.test(url)) {
+    await page.goto(LOGIN_HUB_URL, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout?.(400).catch(() => {});
+    if (typeof dismissLoginOverlay === 'function') await dismissLoginOverlay(page);
+    try {
+      const phoneEmail = page.getByText(/Use phone(?:\/| or )?email|手机(?:号)?或邮箱/i).first();
+      if (await phoneEmail.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await phoneEmail.click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout?.(500).catch(() => {});
+      }
+    } catch { /* ignore */ }
+    // 再硬跳一次邮箱页
+    await page.goto(LOGIN_EMAIL_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout?.(600).catch(() => {});
+  }
+
+  if (!fillOnly) return { ok: true, filled: false, message: '已打开登录页' };
+
+  const bundle = await dataStore.getAccountBundle(accountId).catch(() => null);
+  const systemUsername = String(bundle?.username || '').replace(/^@+/, '').trim();
+  const pendingUsername = String(bundle?.username_prev || bundle?.usernamePrev || '').replace(/^@+/, '').trim();
+  // 有待提交改名时，登录仍用 TikTok 原名
+  const username = (pendingUsername && systemUsername
+    && pendingUsername.toLowerCase() !== systemUsername.toLowerCase())
+    ? pendingUsername
+    : systemUsername;
+  const password = String(bundle?.password || '');
+  if (!username || !password) {
+    const reason = bundle?.password_decrypt_failed
+      ? '密码密文无法解密，请在「密码/2FA」重新填写'
+      : '账号缺少用户名或密码，无法自动填表';
+    liveLog(`账号 #${accountId}：${reason}`, 'warn', { accountId });
+    return { ok: false, filled: false, message: reason };
+  }
+
+  for (let i = 0; i < 12; i += 1) {
+    const hasPass = await page.locator('input[type="password"]').first().isVisible({ timeout: 400 }).catch(() => false);
+    if (hasPass) break;
+    await page.waitForTimeout?.(400).catch(() => {});
+  }
+
+  const fillRes = await fillLoginCredentials(page, username, password, { accountId, attempts: 3 });
+  if (fillRes?.ok) {
+    liveLog(`账号 #${accountId}：已自动填入用户名和密码`, 'info', { accountId });
+  } else {
+    liveLog(`账号 #${accountId}：自动填表未完成：${fillRes?.message || '未知'}`, 'warn', { accountId });
+  }
+  return { ok: Boolean(fillRes?.ok), filled: Boolean(fillRes?.ok), message: fillRes?.message || '' };
+}
+
+/** 兼容旧调用：跳登录页并填账密 */
+async function gotoLoginPageForManual(connection, accountId) {
+  return ensureLoginPageAndFill(connection, accountId, { fillOnly: true });
 }
 
 /**

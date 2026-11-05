@@ -79,7 +79,12 @@
     #screen {
       position: absolute;
       inset: 48px 0 0 0;
-      background: #000;
+      /* 避免四周纯黑像「蒙罩」；实际画面由 noVNC canvas 铺满 */
+      background: #1e293b;
+    }
+    #screen > div,
+    #screen canvas {
+      background: transparent !important;
     }
     #status {
       margin-left: auto;

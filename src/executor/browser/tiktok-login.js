@@ -832,21 +832,73 @@ async function isLoginMethodHub(page) {
   return /Log in to TikTok|登录到 TikTok|Use phone\s*(or|\/)\s*email|Use phone\s*\/\s*email\s*\/\s*username|使用手机号.*邮箱|Continue with Google|Continue with Facebook|Use QR code|使用二维码/i.test(text);
 }
 
+/** 清掉首页「Log in to TikTok」弹层/黑罩，避免 VNC 里以为整页挂了、也挡导航 */
+async function dismissLoginOverlay(page) {
+  if (!page || page.isClosed?.()) return;
+  try {
+    const skip = page.getByRole('button', { name: /^Skip$/i })
+      .or(page.getByText(/^Skip$/i))
+      .or(page.locator('[aria-label="Skip"], button:has-text("Skip")'))
+      .first();
+    if (await skip.isVisible({ timeout: 1200 }).catch(() => false)) {
+      await skip.click({ timeout: 2500 }).catch(() => {});
+      await page.waitForTimeout(300).catch(() => {});
+    }
+  } catch { /* ignore */ }
+  await page.evaluate(() => {
+    const kill = (el) => { try { el.remove(); } catch { /* */ } };
+    document.querySelectorAll(
+      '[data-e2e="modal-close-inner-button"], [class*="DivModalContainer"], [class*="ModalMask"], [class*="modal-mask"]',
+    ).forEach(kill);
+    for (const el of Array.from(document.querySelectorAll('div, section'))) {
+      const t = String(el.innerText || '').slice(0, 80);
+      if (/^Log in to TikTok|^登录到 TikTok/i.test(t.trim()) && el.childElementCount < 40) {
+        let node = el;
+        for (let i = 0; i < 5 && node; i += 1) {
+          const style = window.getComputedStyle(node);
+          if (style.position === 'fixed' || style.position === 'absolute' || Number(style.zIndex) > 1000) {
+            kill(node);
+            break;
+          }
+          node = node.parentElement;
+        }
+      }
+    }
+    for (const el of Array.from(document.querySelectorAll('body *'))) {
+      try {
+        const st = window.getComputedStyle(el);
+        if (st.position !== 'fixed') continue;
+        const zi = Number(st.zIndex) || 0;
+        if (zi < 1000) continue;
+        const bg = st.backgroundColor || '';
+        const rgba = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\)/);
+        const alpha = rgba ? Number(rgba[4] ?? 1) : 1;
+        const dark = rgba && Number(rgba[1]) < 40 && Number(rgba[2]) < 40 && Number(rgba[3]) < 40;
+        if (dark && alpha > 0.2 && alpha < 0.95) kill(el);
+      } catch { /* */ }
+    }
+    try { document.body.style.overflow = ''; document.documentElement.style.overflow = ''; } catch { /* */ }
+  }).catch(() => {});
+}
+
 async function openEmailCredentialForm(page, accountId, proxyHint = '') {
   await assertPageNetworkOk(page, { accountId, proxyHint });
   if (await hasCredentialForm(page)) return true;
 
-  // Hub page (QR / Google / Apple / phone-email-username). Prefer a direct
-  // deep-link; TikTok often redirects back to the hub, so also click the tile.
-  if (await isLoginMethodHub(page) || !/\/login\/phone-or-email\/email/i.test(page.url())) {
-    liveLog(`账号 #${accountId}：打开邮箱/用户名登录表单`,'info',{accountId});
+  // 首页弹层也带 “Log in to TikTok”，会被当成 hub；必须先清罩再硬跳独立邮箱登录页
+  await dismissLoginOverlay(page);
+  const alreadyOnEmail = /\/login\/phone-or-email\/email/i.test(String(page.url() || ''));
+  if (!alreadyOnEmail) {
+    liveLog(`账号 #${accountId}：硬跳邮箱/用户名登录页`, 'info', { accountId });
     await safeLoginGoto(page, 'https://www.tiktok.com/login/phone-or-email/email', { accountId, proxyHint });
-    await page.waitForTimeout(900);
+    await page.waitForTimeout(1000);
+    await dismissLoginOverlay(page);
   }
   if (await hasCredentialForm(page)) return true;
 
+  // Hub page (QR / Google / Apple / phone-email-username)：点「手机/邮箱」
   if (await isLoginMethodHub(page) || /tiktok\.com\/login\/?(?:\?|$)/i.test(page.url())) {
-    liveLog(`账号 #${accountId}：点击「手机 / 邮箱 / 用户名」`,'info',{accountId});
+    liveLog(`账号 #${accountId}：点击「手机 / 邮箱 / 用户名」`, 'info', { accountId });
     const clicked = await clickPhoneEmailUsernameEntry(page);
     if (clicked) await page.waitForTimeout(1200);
   }
@@ -855,7 +907,7 @@ async function openEmailCredentialForm(page, accountId, proxyHint = '') {
 
   // Intermediate "phone or email" chooser — pick email/username.
   if (/\/login\/phone-or-email\/?(?:\?|$)/i.test(page.url()) || /Log in with (?:email|username)|email\s*(?:or|\/)\s*username/i.test(await pageBodyText(page))) {
-    liveLog(`账号 #${accountId}：点击「用邮箱/用户名登录」`,'info',{accountId});
+    liveLog(`账号 #${accountId}：点击「用邮箱/用户名登录」`, 'info', { accountId });
     const clicked = await clickSafeLoginMethod(page,
       /Log in with (?:email|username)|email\s*(?:or|\/)\s*username|使用.*(?:邮箱|用户名).*登录/i);
     if (clicked) await page.waitForTimeout(1200);
@@ -863,8 +915,13 @@ async function openEmailCredentialForm(page, accountId, proxyHint = '') {
   if (await hasCredentialForm(page)) return true;
 
   // Last attempt: deep-link again after the hub click path.
+  await dismissLoginOverlay(page);
   await safeLoginGoto(page, 'https://www.tiktok.com/login/phone-or-email/email', { accountId, proxyHint });
-  await page.waitForTimeout(900);
+  await page.waitForTimeout(1200);
+  // 输入框偶发晚挂载
+  for (let i = 0; i < 8 && !(await hasCredentialForm(page)); i += 1) {
+    await page.waitForTimeout(400);
+  }
   return hasCredentialForm(page);
 }
 
@@ -1640,11 +1697,12 @@ async function runLoginAssist(accountId, {
     });
   }
 
-  // 登录方式弹窗：先点 Use phone or email，再进邮箱密码表
-  if (await isLoginMethodHub(page) && !(await hasCredentialForm(page))) {
-    liveLog(`账号 #${accountId}：检测到登录方式弹窗，点击「手机或邮箱登录」`, 'info', { accountId });
-    await clickPhoneEmailUsernameEntry(page);
-    await page.waitForTimeout(1200);
+  // 未登录：先清首页弹层并硬跳邮箱密码页（不要停在 FYP「Log in to TikTok」里点）
+  if (!(await hasCredentialForm(page)) && !(await isTwoStepVerificationPage(page))) {
+    if (onLoginWall || await isLoginMethodHub(page) || !/\/login\/phone-or-email\/email/i.test(String(page.url() || ''))) {
+      liveLog(`账号 #${accountId}：离开首页/方式选择页，进入邮箱登录表单`, 'info', { accountId });
+      await openEmailCredentialForm(page, accountId, proxyHint);
+    }
   }
 
   // Handle 2-step FIRST. Never clear cookies / navigate away while the user is
@@ -1953,4 +2011,7 @@ module.exports = {
   applySavedSessionToContext,
   persistAccountSessionLog,
   pushEnvPackBestEffort,
+  fillLoginCredentials,
+  openEmailCredentialForm,
+  dismissLoginOverlay,
 };
