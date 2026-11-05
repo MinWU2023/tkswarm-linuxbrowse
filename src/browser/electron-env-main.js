@@ -45,9 +45,12 @@ function markPageReady(extra = '') {
 if (cfg.softwareRender) {
   try {
     app.disableHardwareAcceleration();
-    app.commandLine.appendSwitch('use-gl', 'swiftshader');
-    app.commandLine.appendSwitch('disable-gpu');
-    app.commandLine.appendSwitch('disable-gpu-compositing');
+    // 新版 Chromium 已取消「自动回退软件 WebGL」，必须显式允许 SwiftShader；
+    // 否则 WebGL 上下文创建失败（日志：fail_if_major_perf_caveat + swiftshader / kFatalFailure），TikTok 页面黑屏。
+    app.commandLine.appendSwitch('use-gl', 'angle');
+    app.commandLine.appendSwitch('use-angle', 'swiftshader');
+    app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+    app.commandLine.appendSwitch('ignore-gpu-blocklist');
   } catch { /* ignore */ }
 }
 
