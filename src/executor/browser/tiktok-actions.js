@@ -2612,7 +2612,45 @@ async function dmPageProbe(page) {
   }
 }
 
+/** 包一层网络监听：把主文档状态码、失败请求、4xx/5xx、页面脚本报错带进失败现场 */
 async function openRecipientChat(page, recipient, log = () => {}) {
+  const net = { doc: '', failed: [], bad: [], errors: [] };
+  const onResp = (resp) => {
+    try {
+      const req = resp.request();
+      const type = req.resourceType();
+      const url = String(resp.url() || '');
+      if (type === 'document' && req.frame() === page.mainFrame()) {
+        net.doc = `${resp.status()} ${url.slice(0, 80)}`;
+      } else if (resp.status() >= 400 && net.bad.length < 6) {
+        net.bad.push(`${resp.status()} ${type} ${url.slice(0, 70)}`);
+      }
+    } catch { /* ignore */ }
+  };
+  const onFail = (req) => {
+    try {
+      // 省流主动拦掉的图片/媒体/字体不算故障，否则 6 条名额会被噪音占满
+      if (['image', 'media', 'font', 'ping', 'other'].includes(req.resourceType())) return;
+      if (net.failed.length < 6) net.failed.push(`${req.resourceType()} ${req.failure()?.errorText || ''} ${String(req.url() || '').slice(0, 70)}`);
+    } catch { /* ignore */ }
+  };
+  const onPageErr = (e) => {
+    if (net.errors.length < 4) net.errors.push(String(e?.message || e).slice(0, 100));
+  };
+  const summary = () => `主文档=${net.doc || '无响应'} 失败请求=[${net.failed.join(' ; ')}] 4xx5xx=[${net.bad.join(' ; ')}] 脚本报错=[${net.errors.join(' ; ')}]`;
+  page.on('response', onResp);
+  page.on('requestfailed', onFail);
+  page.on('pageerror', onPageErr);
+  try {
+    return await openRecipientChatInner(page, recipient, log, summary);
+  } finally {
+    page.off('response', onResp);
+    page.off('requestfailed', onFail);
+    page.off('pageerror', onPageErr);
+  }
+}
+
+async function openRecipientChatInner(page, recipient, log = () => {}, netSummary = () => '') {
   const handle = String(recipient || '').replace(/^@/, '').trim();
   if (!handle) return false;
   const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(handle)}`;
@@ -2639,7 +2677,7 @@ async function openRecipientChat(page, recipient, log = () => {}) {
       const viaInbox = await openViaMessagesInbox(page, handle);
       if (viaInbox === 'ready') return true;
       if (viaInbox !== 'failed') {
-        const probe = await dmPageProbe(page);
+        const probe = `${await dmPageProbe(page)} ｜网络：${netSummary()}`;
         page.__dmLastProbe = `入口未找到（消息页搜索=${viaInbox}）｜主页：${profileProbe}｜消息页：${probe}`;
         log(`私信入口未找到（主页有内容但无 Message 按钮，消息页搜索=${viaInbox}）：${probe}`);
         return false;
@@ -2647,7 +2685,7 @@ async function openRecipientChat(page, recipient, log = () => {}) {
       state = 'failed';
     }
 
-    const probe = await dmPageProbe(page);
+    const probe = `${await dmPageProbe(page)} ｜网络：${netSummary()}`;
     page.__dmLastProbe = `${state === 'failed' ? '页面异常或加载失败' : '超时未出现输入框'}：${probe}`;
     log(`私信界面未加载（${state === 'failed' ? '页面异常或加载失败' : '超时未出现输入框'}）：${probe}${attempt >= DM_LOAD_RETRIES ? '' : '，准备重新加载'}`);
     if (attempt >= DM_LOAD_RETRIES) break;
@@ -2682,7 +2720,7 @@ async function prepareMessage(accountId, content, recipient = '', options = {}) 
         keepOpen = true;
         return {
           status: 'failed',
-          error: `私信界面打开失败：${recipient}${connection.page.__dmLastProbe ? `；页面现场：${String(connection.page.__dmLastProbe).slice(0, 700)}` : ''}`,
+          error: `私信界面打开失败：${recipient}${connection.page.__dmLastProbe ? `；页面现场：${String(connection.page.__dmLastProbe).slice(0, 1200)}` : ''}`,
           screenshot: before,
           recipient,
         };
