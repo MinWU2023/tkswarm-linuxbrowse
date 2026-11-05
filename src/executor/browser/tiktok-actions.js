@@ -2632,13 +2632,17 @@ async function openRecipientChat(page, recipient, log = () => {}) {
       const viaInbox = await openViaMessagesInbox(page, handle);
       if (viaInbox === 'ready') return true;
       if (viaInbox !== 'failed') {
-        log(`私信入口未找到（主页有内容但无 Message 按钮，消息页搜索=${viaInbox}）：${await dmPageProbe(page)}`);
+        const probe = await dmPageProbe(page);
+        page.__dmLastProbe = `入口未找到（消息页搜索=${viaInbox}）${probe}`;
+        log(`私信入口未找到（主页有内容但无 Message 按钮，消息页搜索=${viaInbox}）：${probe}`);
         return false;
       }
       state = 'failed';
     }
 
-    log(`私信界面未加载（${state === 'failed' ? '页面异常或加载失败' : '超时未出现输入框'}）：${await dmPageProbe(page)}${attempt >= DM_LOAD_RETRIES ? '' : '，准备重新加载'}`);
+    const probe = await dmPageProbe(page);
+    page.__dmLastProbe = `${state === 'failed' ? '页面异常或加载失败' : '超时未出现输入框'}：${probe}`;
+    log(`私信界面未加载（${state === 'failed' ? '页面异常或加载失败' : '超时未出现输入框'}）：${probe}${attempt >= DM_LOAD_RETRIES ? '' : '，准备重新加载'}`);
     if (attempt >= DM_LOAD_RETRIES) break;
   }
   return false;
@@ -2671,7 +2675,7 @@ async function prepareMessage(accountId, content, recipient = '', options = {}) 
         keepOpen = true;
         return {
           status: 'failed',
-          error: `私信界面加载失败（已重新加载 ${DM_LOAD_RETRIES} 次）：${recipient}`,
+          error: `私信界面加载失败（已重新加载 ${DM_LOAD_RETRIES} 次）：${recipient}${connection.page.__dmLastProbe ? `；页面现场：${String(connection.page.__dmLastProbe).slice(0, 360)}` : ''}`,
           screenshot: before,
           recipient,
         };
