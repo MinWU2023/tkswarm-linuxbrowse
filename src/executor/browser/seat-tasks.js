@@ -447,6 +447,7 @@ async function runSyncFans(accountId, payload = {}) {
           nickname: u.nickname || u.username,
           friendUid: u.friendUid || u.username,
           relation,
+          isNew: 0, // 旧版 PHP dm-ingest 读 is_new 无默认值会 500，显式带上
         });
         if (users.length >= maxPerRun) break;
       }
