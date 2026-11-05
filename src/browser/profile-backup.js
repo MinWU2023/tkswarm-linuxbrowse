@@ -35,6 +35,18 @@ const SESSION_KEEP_RELS = [
   'Default/Network/TransportSecurity',
   'Default/Extension Cookies',
   'Default/Extension Cookies-journal',
+  // Electron 内核：userData=profiles/<id>，defaultSession 的会话直接落在根目录（无 Default/ 层）
+  'Preferences',
+  'Cookies',
+  'Cookies-journal',
+  'Network/Cookies',
+  'Network/Cookies-journal',
+  'Network/Network Persistent State',
+  'Network/TransportSecurity',
+  'Local Storage',
+  'Session Storage',
+  // Electron 分区会话（persist:env-<id> → Partitions/env-<id>/...），目录内缓存仍由 SKIP_NAMES 过滤
+  'Partitions',
 ];
 
 const SKIP_NAMES = new Set([

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * TikTok 资料同步 / 编辑资料 浏览器封装
  * 同步资料流程：个人中心 → 编辑资料 → 填入信息 → 保存提交 → 回写本地
  */
@@ -798,7 +798,12 @@ async function setAvatarInEditModal(page, filePath, log = () => {}) {
   if (!filePath) return false;
   const fs = require('node:fs');
   const path = require('node:path');
-  if (!fs.existsSync(filePath)) throw new Error(`头像文件不存在：${filePath}`);
+  if (!fs.existsSync(filePath)) {
+    // 头像文件缺失：改用默认头像，不让整个任务失败
+    const missing = filePath;
+    filePath = require('./default-avatar').resolveAvatarOrDefault(missing, log);
+    if (!filePath) throw new Error(`头像文件不存在：${missing}`);
+  }
 
   const isVideo = isAvatarVideoFile(filePath);
   const preferKind = isVideo ? 'video' : 'image';
@@ -1837,7 +1842,14 @@ async function syncProfile(accountId, options = {}) {
         || avatarPath.match(/\/uploads\/([^/\\]+)(?:\?|$)/i);
       if (m) avatarFile = path.join(uploadDir, m[1]);
       if (!path.isAbsolute(avatarFile)) avatarFile = path.resolve(process.cwd(), avatarFile);
-      if (!fs.existsSync(avatarFile)) throw new Error(`头像文件不存在：${avatarFile}`);
+      if (!fs.existsSync(avatarFile)) {
+        // 头像文件缺失：改用默认头像，不让同步资料失败
+        const missing = avatarFile;
+        avatarFile = require('./default-avatar').resolveAvatarOrDefault(missing, (m) => {
+          try { require('../live-log').publish(`同步资料#${accountId}：${m}`, 'warn', { accountId }); } catch { /* ignore */ }
+        });
+        if (!avatarFile) throw new Error(`头像文件不存在：${missing}`);
+      }
       if (!/\.(jpe?g|png|webp|gif|mp4|webm|mov)$/i.test(avatarFile)) {
         throw new Error('头像仅支持图片（JPG/PNG/WebP/GIF）或视频（MP4，建议 ≤6 秒）');
       }

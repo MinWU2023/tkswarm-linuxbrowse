@@ -1,4 +1,4 @@
-﻿const { getProvider } = require('./providers');
+const { getProvider } = require('./providers');
 const { inspectTikTokSession } = require('./cdp-client');
 const {
   connectPlaywrightOverCDP,
@@ -3256,7 +3256,16 @@ async function modifyTikTokProfile(accountId, options = {}) {
     if (!path.isAbsolute(avatarPath)) {
       avatarPath = path.resolve(process.cwd(), avatarPath);
     }
-    if (!fs.existsSync(avatarPath)) throw new Error(`头像文件不存在：${avatarPath}`);
+    if (!fs.existsSync(avatarPath)) {
+      // 头像文件缺失：改用默认头像，不让改资料任务失败
+      const missing = avatarPath;
+      avatarPath = require('./default-avatar').resolveAvatarOrDefault(missing, (m) => {
+        try {
+          require('../live-log').publish(`改资料#${accountId}：${m}`, 'warn', { accountId, ...(options.logContext || options.log_context || {}) });
+        } catch { /* ignore */ }
+      });
+      if (!avatarPath) throw new Error(`头像文件不存在：${missing}`);
+    }
     if (!/\.(jpe?g|png|webp|gif|mp4|webm|mov)$/i.test(avatarPath)) {
       throw new Error('头像仅支持图片（JPG/PNG/WebP/GIF）或视频（MP4，建议 ≤6 秒）');
     }
