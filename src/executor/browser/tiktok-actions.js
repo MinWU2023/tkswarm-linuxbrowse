@@ -2586,6 +2586,28 @@ async function openViaMessagesInbox(page, handle) {
   return 'miss';
 }
 
+/** 私信失败时的页面现场：URL、DOM 是否为空、文本片段、可见按钮，便于判断是白屏、报错页还是缺入口 */
+async function dmPageProbe(page) {
+  try {
+    const r = await Promise.race([
+      page.evaluate(() => ({
+        url: location.href.slice(0, 90),
+        rs: document.readyState,
+        kids: document.body?.childElementCount || 0,
+        textLen: String(document.body?.innerText || '').length,
+        text: String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 120),
+        btns: Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 8).map((b) => String(b.innerText || b.getAttribute('aria-label') || '').trim().slice(0, 14)).filter(Boolean).join('|'),
+        e2e: Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]')).map((n) => n.getAttribute('data-e2e')))).slice(0, 12).join(','),
+      })),
+      new Promise((resolve) => setTimeout(() => resolve({ hung: true }), 4000)),
+    ]);
+    if (r?.hung) return '渲染进程4秒无响应';
+    return `页面=${r.url} readyState=${r.rs} body子节点=${r.kids} 文本长度=${r.textLen} 按钮=[${r.btns}] data-e2e=[${r.e2e}] 文本=${r.text}`;
+  } catch (e) {
+    return `体检失败：${String(e?.message || e).slice(0, 80)}`;
+  }
+}
+
 async function openRecipientChat(page, recipient, log = () => {}) {
   const handle = String(recipient || '').replace(/^@/, '').trim();
   if (!handle) return false;
@@ -2609,12 +2631,15 @@ async function openRecipientChat(page, recipient, log = () => {}) {
     if (!loadError) {
       const viaInbox = await openViaMessagesInbox(page, handle);
       if (viaInbox === 'ready') return true;
-      if (viaInbox !== 'failed') return false;
+      if (viaInbox !== 'failed') {
+        log(`私信入口未找到（主页有内容但无 Message 按钮，消息页搜索=${viaInbox}）：${await dmPageProbe(page)}`);
+        return false;
+      }
       state = 'failed';
     }
 
+    log(`私信界面未加载（${state === 'failed' ? '页面异常或加载失败' : '超时未出现输入框'}）：${await dmPageProbe(page)}${attempt >= DM_LOAD_RETRIES ? '' : '，准备重新加载'}`);
     if (attempt >= DM_LOAD_RETRIES) break;
-    log(`私信界面未加载（${state === 'failed' ? '页面异常或加载失败' : '超时未出现输入框'}），准备重新加载`);
   }
   return false;
 }
