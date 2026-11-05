@@ -301,6 +301,21 @@ function setProfileStatus(id, status) {
   });
 }
 
+/** 服务启动时调用：进程已全部被回收，库里残留的 running/headless 状态一律复位为 idle */
+function resetStaleRunningStatus() {
+  let n = 0;
+  withStore((data) => {
+    for (const p of data.profiles) {
+      if (p.status === 'running' || p.status === 'headless') {
+        p.status = 'idle';
+        p.updated_at = new Date().toISOString();
+        n += 1;
+      }
+    }
+  });
+  return n;
+}
+
 const sessions = require('./sessions');
 
 function saveUser(user) {
@@ -359,6 +374,7 @@ module.exports = {
   deleteGroup,
   deleteProfile,
   setProfileStatus,
+  resetStaleRunningStatus,
   saveUser,
   getCurrentUser,
   statsForOwner,

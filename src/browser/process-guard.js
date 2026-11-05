@@ -101,6 +101,7 @@ function reclaimOrphans(exceptIds = new Set()) {
       if (exceptIds.has(name)) continue;
       const pid = readPid(name);
       if (pid && isPidAlive(pid)) {
+        console.warn(`[process-guard] 回收无主进程 profile=${String(name).slice(0, 8)}… pid=${pid}`);
         killPid(pid);
         killed += 1;
       }

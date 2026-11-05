@@ -19,6 +19,10 @@ const events = new EventEmitter();
 
 try {
   reclaimOrphans(new Set());
+  try {
+    const n = db.resetStaleRunningStatus?.() || 0;
+    if (n) console.log(`[manager] 启动复位 ${n} 个残留「运行中」环境状态为 idle`);
+  } catch { /* ignore */ }
 } catch { /* ignore */ }
 
 function listWindows() {
