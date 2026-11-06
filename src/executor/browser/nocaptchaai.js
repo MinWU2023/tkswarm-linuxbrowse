@@ -15,7 +15,7 @@ const phpApi = require('../php-api');
 const DEFAULT_API_KEY = 'nocap_XrWSZYi3dyxKzr2zvtUxLzbM';
 const BASE_URL = (process.env.NOCAPTCHAAI_BASE_URL || 'https://api.nocaptchaai.com').replace(/\/+$/, '');
 const KEY_CACHE_TTL_MS = 10000;
-const QUOTA_LIMIT = 6000;
+const QUOTA_LIMIT = 200;
 
 let cachedRemoteKey = null;
 let cachedRemoteFetchedAt = 0;
@@ -35,22 +35,31 @@ function clearNocaptchaKeyCache() {
   cachedRemoteFetchedAt = 0;
 }
 
-/** 识别 NoCaptchaAI 返回的额度耗尽 / 余额不足类错误 */
+/** 识别 NoCaptchaAI 返回的当日额度耗尽 / 200 次上限 / 余额不足类错误 */
 function looksLikeQuotaExhausted(payloadOrMsg) {
   const text = typeof payloadOrMsg === 'string'
     ? payloadOrMsg
     : JSON.stringify(payloadOrMsg || {});
-  return /zero[_\s-]?balance|insufficient|no[_\s-]?balance|out[_\s-]?of[_\s-]?(credit|quota)|quota[_\s-]?(exceed|limit|used)|free[_\s-]?limit|limit[_\s-]?reached|余额不足|额度|用完|耗尽|6000/i.test(text);
+  return /daily[_\s-]?(limit|quota)|zero[_\s-]?balance|insufficient|no[_\s-]?balance|out[_\s-]?of[_\s-]?(credit|quota)|quota[_\s-]?(exceed|limit|used)|free[_\s-]?(limit|trial)|limit[_\s-]?reached|余额不足|额度|用完|耗尽|上限/i.test(text);
+}
+
+/** 识别免费 30 天到期 / 账号封停类永久报废错误 */
+function looksLikeKeyScrapped(payloadOrMsg) {
+  const text = typeof payloadOrMsg === 'string'
+    ? payloadOrMsg
+    : JSON.stringify(payloadOrMsg || {});
+  return /trial[_\s-]?expired|free[_\s-]?plan[_\s-]?expired|account[_\s-]?(banned|suspended|terminated)|已过期|已报废/i.test(text);
 }
 
 /**
- * 上报用量到中心库；达 6000 或 exhausted=true 时自动切换下一个未用完密钥。
+ * 上报用量到中心库；当日达 200（或 exhausted=true / 超 30 天报废）时自动切换下一个可用密钥。
  */
 async function reportUsageToCenter({
   apiKey = '',
   id = 0,
   increment = 1,
   exhausted = false,
+  scrapped = false,
   remoteUsed = null,
 } = {}) {
   try {
@@ -58,7 +67,8 @@ async function reportUsageToCenter({
       apiKey: String(apiKey || cachedRemoteKey?.apiKey || '').trim(),
       id: Number(id || cachedRemoteKey?.id || 0) || 0,
       increment: Math.max(0, Number(increment) || 0),
-      exhausted: Boolean(exhausted),
+      exhausted: Boolean(exhausted || scrapped),
+      scrapped: Boolean(scrapped),
     };
     if (remoteUsed != null && Number.isFinite(Number(remoteUsed))) {
       payload.remoteUsed = Math.max(0, Number(remoteUsed));
@@ -66,9 +76,10 @@ async function reportUsageToCenter({
     const res = typeof dataStore.reportNocaptchaUsage === 'function'
       ? await dataStore.reportNocaptchaUsage(payload)
       : await phpApi.post('/node/nocaptcha-key/report-usage', payload);
-    if (res?.switched || res?.exhausted) {
+    if (res?.switched || res?.exhausted || res?.scrapped) {
       clearNocaptchaKeyCache();
       const nextKey = String(res?.active?.apiKey || res?.active?.api_key || '').trim();
+      const reasonLabel = res?.scrapped ? '已满30天报废' : '今日200次额度已满';
       if (nextKey) {
         cachedRemoteKey = {
           enabled: true,
@@ -80,11 +91,11 @@ async function reportUsageToCenter({
         };
         cachedRemoteFetchedAt = Date.now();
         liveLog(
-          `[NoCaptchaAI] 密钥额度已用完，已自动切换到 #${cachedRemoteKey.id || '-'}（${cachedRemoteKey.email || '备用'}）`,
+          `[NoCaptchaAI] 当前密钥${reasonLabel}，已自动切换到 #${cachedRemoteKey.id || '-'}（${cachedRemoteKey.email || '备用'}）`,
           'warn',
         );
       } else {
-        liveLog('[NoCaptchaAI] 当前密钥额度已用完，且暂无其它未用完密钥可切换', 'warn');
+        liveLog(`[NoCaptchaAI] 当前密钥${reasonLabel}，且暂无其它可用密钥可切换`, 'warn');
       }
     } else if (res?.active && cachedRemoteKey) {
       cachedRemoteKey.usedCount = Number(res.active.usedCount ?? res.active.used_count ?? 0);
@@ -97,9 +108,9 @@ async function reportUsageToCenter({
 }
 
 /**
- * 从中心库（开发管理 · NoCaptchaAI 密钥管理）读取当前启用（status=1 且未用完）记录的 api_key。
- * 若启用记录已达 6000，中心库会自动切换到任意一条未用完密钥。
- * - 若所有记录均已禁用/用完（enabled=false 且成功从后端返回），返回空字符串；
+ * 从中心库（开发管理 · NoCaptchaAI 密钥管理）读取当前启用（status=1、未报废且当日未满 200）记录的 api_key。
+ * 若启用记录当日已达 200 或已满 30 天报废，中心库会自动切换到下一条可用密钥。
+ * - 若所有记录均已禁用/用完/报废（enabled=false 且成功从后端返回），返回空字符串；
  * - 若网络/接口不可达，回退环境变量或默认密钥。
  */
 async function resolveActiveApiKey(overrideKey = '', { forceRefresh = false } = {}) {
@@ -119,7 +130,12 @@ async function resolveActiveApiKey(overrideKey = '', { forceRefresh = false } = 
       const key = String(res.apiKey ?? res.api_key ?? '').trim();
       const enabled = res.enabled !== undefined
         ? Boolean(res.enabled)
-        : (Number(res.status) === 1 && Number(res.isExhausted ?? res.is_exhausted ?? 0) !== 1 && Boolean(key));
+        : (
+          Number(res.status) === 1
+          && Number(res.isScrapped ?? res.is_scrapped ?? 0) !== 1
+          && Number(res.isExhausted ?? res.is_exhausted ?? 0) !== 1
+          && Boolean(key)
+        );
       cachedRemoteKey = {
         enabled,
         apiKey: enabled ? key : '',
@@ -172,10 +188,11 @@ async function requestRotateSolution({
   websiteURL = 'https://www.tiktok.com',
   apiKey = '',
   timeoutMs = 45000,
+  _failoverDepth = 0,
 } = {}) {
-  const clientKey = await resolveActiveApiKey(apiKey);
+  const clientKey = await resolveActiveApiKey(apiKey, { forceRefresh: _failoverDepth > 0 });
   if (!clientKey) {
-    return { ok: false, angle: 0, angles: [], raw: null, error: '未配置或未启用 NoCaptchaAI 密钥（请在开发管理 → NoCaptchaAI 启用一条密钥记录）' };
+    return { ok: false, angle: 0, angles: [], raw: null, error: '未配置或暂无可用的 NoCaptchaAI 密钥（今日额度已满或已报废）' };
   }
   const outer = stripDataUrlPrefix(outerBase64);
   const inner = stripDataUrlPrefix(innerBase64);
@@ -225,9 +242,12 @@ async function requestRotateSolution({
     await reportUsageToCenter({ apiKey: clientKey, increment: 1 });
   };
   const markExhaustedIfNeeded = async (payload) => {
-    if (!looksLikeQuotaExhausted(payload)) return false;
-    await reportUsageToCenter({ apiKey: clientKey, increment: 0, exhausted: true });
-    return true;
+    const scrapped = looksLikeKeyScrapped(payload);
+    const exhausted = scrapped || looksLikeQuotaExhausted(payload);
+    if (!exhausted) return { exhausted: false, nextKey: '' };
+    const r = await reportUsageToCenter({ apiKey: clientKey, increment: 0, exhausted: true, scrapped });
+    const nextKey = String(r?.active?.apiKey || r?.active?.api_key || '').trim();
+    return { exhausted: true, nextKey };
   };
 
   try {
@@ -256,7 +276,17 @@ async function requestRotateSolution({
 
     if (created.errorId || created.code) {
       const errMsg = created.errorDescription || created.msg || created.errorCode || JSON.stringify(created);
-      const exhausted = await markExhaustedIfNeeded(created);
+      const { exhausted, nextKey } = await markExhaustedIfNeeded(created);
+      if (exhausted && !apiKey && nextKey && nextKey !== clientKey && _failoverDepth < 3) {
+        return requestRotateSolution({
+          outerBase64,
+          innerBase64,
+          websiteURL,
+          apiKey: '',
+          timeoutMs,
+          _failoverDepth: _failoverDepth + 1,
+        });
+      }
       return { ok: false, angle: 0, angles: [], raw: created, exhausted, error: `NoCaptchaAI createTask 失败: ${errMsg}` };
     }
 
@@ -305,7 +335,17 @@ async function requestRotateSolution({
       }
       if (result.status === 'failed' || result.errorId || result.code) {
         const errMsg = result.errorDescription || result.msg || result.errorCode || JSON.stringify(result);
-        const exhausted = await markExhaustedIfNeeded(result);
+        const { exhausted, nextKey } = await markExhaustedIfNeeded(result);
+        if (exhausted && !apiKey && nextKey && nextKey !== clientKey && _failoverDepth < 3) {
+          return requestRotateSolution({
+            outerBase64,
+            innerBase64,
+            websiteURL,
+            apiKey: '',
+            timeoutMs,
+            _failoverDepth: _failoverDepth + 1,
+          });
+        }
         return { ok: false, angle: 0, angles: [], raw: result, exhausted, error: `NoCaptchaAI 任务失败: ${errMsg}` };
       }
     }
