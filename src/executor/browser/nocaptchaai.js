@@ -15,6 +15,7 @@ const phpApi = require('../php-api');
 const DEFAULT_API_KEY = 'nocap_XrWSZYi3dyxKzr2zvtUxLzbM';
 const BASE_URL = (process.env.NOCAPTCHAAI_BASE_URL || 'https://api.nocaptchaai.com').replace(/\/+$/, '');
 const KEY_CACHE_TTL_MS = 10000;
+const QUOTA_LIMIT = 6000;
 
 let cachedRemoteKey = null;
 let cachedRemoteFetchedAt = 0;
@@ -29,10 +30,76 @@ function getApiKey(overrideKey = '') {
   ).trim();
 }
 
+function clearNocaptchaKeyCache() {
+  cachedRemoteKey = null;
+  cachedRemoteFetchedAt = 0;
+}
+
+/** 识别 NoCaptchaAI 返回的额度耗尽 / 余额不足类错误 */
+function looksLikeQuotaExhausted(payloadOrMsg) {
+  const text = typeof payloadOrMsg === 'string'
+    ? payloadOrMsg
+    : JSON.stringify(payloadOrMsg || {});
+  return /zero[_\s-]?balance|insufficient|no[_\s-]?balance|out[_\s-]?of[_\s-]?(credit|quota)|quota[_\s-]?(exceed|limit|used)|free[_\s-]?limit|limit[_\s-]?reached|余额不足|额度|用完|耗尽|6000/i.test(text);
+}
+
 /**
- * 从中心库（开发管理 · NoCaptchaAI 密钥管理）读取当前启用（status=1）记录的 api_key 字段。
- * - 若有启用记录，返回其 apiKey；
- * - 若所有记录均已禁用（enabled=false 且成功从后端返回），返回空字符串以尊重禁用状态；
+ * 上报用量到中心库；达 6000 或 exhausted=true 时自动切换下一个未用完密钥。
+ */
+async function reportUsageToCenter({
+  apiKey = '',
+  id = 0,
+  increment = 1,
+  exhausted = false,
+  remoteUsed = null,
+} = {}) {
+  try {
+    const payload = {
+      apiKey: String(apiKey || cachedRemoteKey?.apiKey || '').trim(),
+      id: Number(id || cachedRemoteKey?.id || 0) || 0,
+      increment: Math.max(0, Number(increment) || 0),
+      exhausted: Boolean(exhausted),
+    };
+    if (remoteUsed != null && Number.isFinite(Number(remoteUsed))) {
+      payload.remoteUsed = Math.max(0, Number(remoteUsed));
+    }
+    const res = typeof dataStore.reportNocaptchaUsage === 'function'
+      ? await dataStore.reportNocaptchaUsage(payload)
+      : await phpApi.post('/node/nocaptcha-key/report-usage', payload);
+    if (res?.switched || res?.exhausted) {
+      clearNocaptchaKeyCache();
+      const nextKey = String(res?.active?.apiKey || res?.active?.api_key || '').trim();
+      if (nextKey) {
+        cachedRemoteKey = {
+          enabled: true,
+          apiKey: nextKey,
+          id: Number(res.active?.id || 0),
+          email: String(res.active?.email || ''),
+          usedCount: Number(res.active?.usedCount ?? res.active?.used_count ?? 0),
+          quotaLimit: Number(res.active?.quotaLimit ?? res.active?.quota_limit ?? QUOTA_LIMIT),
+        };
+        cachedRemoteFetchedAt = Date.now();
+        liveLog(
+          `[NoCaptchaAI] 密钥额度已用完，已自动切换到 #${cachedRemoteKey.id || '-'}（${cachedRemoteKey.email || '备用'}）`,
+          'warn',
+        );
+      } else {
+        liveLog('[NoCaptchaAI] 当前密钥额度已用完，且暂无其它未用完密钥可切换', 'warn');
+      }
+    } else if (res?.active && cachedRemoteKey) {
+      cachedRemoteKey.usedCount = Number(res.active.usedCount ?? res.active.used_count ?? 0);
+      cachedRemoteKey.quotaLimit = Number(res.active.quotaLimit ?? res.active.quota_limit ?? QUOTA_LIMIT);
+    }
+    return res || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从中心库（开发管理 · NoCaptchaAI 密钥管理）读取当前启用（status=1 且未用完）记录的 api_key。
+ * 若启用记录已达 6000，中心库会自动切换到任意一条未用完密钥。
+ * - 若所有记录均已禁用/用完（enabled=false 且成功从后端返回），返回空字符串；
  * - 若网络/接口不可达，回退环境变量或默认密钥。
  */
 async function resolveActiveApiKey(overrideKey = '', { forceRefresh = false } = {}) {
@@ -50,12 +117,16 @@ async function resolveActiveApiKey(overrideKey = '', { forceRefresh = false } = 
       : await phpApi.get('/node/nocaptcha-key');
     if (res && typeof res === 'object') {
       const key = String(res.apiKey ?? res.api_key ?? '').trim();
-      const enabled = res.enabled !== undefined ? Boolean(res.enabled) : (Number(res.status) === 1 && Boolean(key));
+      const enabled = res.enabled !== undefined
+        ? Boolean(res.enabled)
+        : (Number(res.status) === 1 && Number(res.isExhausted ?? res.is_exhausted ?? 0) !== 1 && Boolean(key));
       cachedRemoteKey = {
         enabled,
         apiKey: enabled ? key : '',
         id: Number(res.id || 0),
         email: String(res.email || ''),
+        usedCount: Number(res.usedCount ?? res.used_count ?? 0),
+        quotaLimit: Number(res.quotaLimit ?? res.quota_limit ?? QUOTA_LIMIT),
       };
       cachedRemoteFetchedAt = now;
       return cachedRemoteKey.apiKey;
@@ -150,6 +221,15 @@ async function requestRotateSolution({
     return out;
   };
 
+  const markSuccess = async () => {
+    await reportUsageToCenter({ apiKey: clientKey, increment: 1 });
+  };
+  const markExhaustedIfNeeded = async (payload) => {
+    if (!looksLikeQuotaExhausted(payload)) return false;
+    await reportUsageToCenter({ apiKey: clientKey, increment: 0, exhausted: true });
+    return true;
+  };
+
   try {
     const createRes = await fetch(`${BASE_URL}/createTask`, {
       method: 'POST',
@@ -165,6 +245,7 @@ async function requestRotateSolution({
     // 部分图片任务 createTask 直接同步返回 solution
     const directAngles = parseAngles(created);
     if (directAngles.length > 0) {
+      await markSuccess();
       return {
         ok: true,
         angle: directAngles[0],
@@ -175,7 +256,8 @@ async function requestRotateSolution({
 
     if (created.errorId || created.code) {
       const errMsg = created.errorDescription || created.msg || created.errorCode || JSON.stringify(created);
-      return { ok: false, angle: 0, angles: [], raw: created, error: `NoCaptchaAI createTask 失败: ${errMsg}` };
+      const exhausted = await markExhaustedIfNeeded(created);
+      return { ok: false, angle: 0, angles: [], raw: created, exhausted, error: `NoCaptchaAI createTask 失败: ${errMsg}` };
     }
 
     const taskId = created.taskId || created.id;
@@ -204,6 +286,7 @@ async function requestRotateSolution({
       const result = await pollRes.json().catch(() => ({}));
       const angles = parseAngles(result);
       if (angles.length > 0) {
+        await markSuccess();
         return {
           ok: true,
           angle: angles[0],
@@ -222,7 +305,8 @@ async function requestRotateSolution({
       }
       if (result.status === 'failed' || result.errorId || result.code) {
         const errMsg = result.errorDescription || result.msg || result.errorCode || JSON.stringify(result);
-        return { ok: false, angle: 0, angles: [], raw: result, error: `NoCaptchaAI 任务失败: ${errMsg}` };
+        const exhausted = await markExhaustedIfNeeded(result);
+        return { ok: false, angle: 0, angles: [], raw: result, exhausted, error: `NoCaptchaAI 任务失败: ${errMsg}` };
       }
     }
 
@@ -263,17 +347,38 @@ async function inspectRotateCaptchaInContext(target) {
       '[role="dialog"]',
     ];
 
+    // 先修复被遮罩清理逻辑误设为 opacity: 0 或 pointer-events: none 的验证弹窗容器及祖先节点
+    const explicitCaptchaNodes = Array.from(document.querySelectorAll(
+      '.TUXModal.captcha-verify-container, #captcha-verify-container, .captcha_verify_container, [class*="captcha-verify-container" i], [class*="captcha_verify_container" i], [id*="captcha" i], [class*="secsdk-captcha" i], [class*="secsdk_captcha" i]'
+    ));
+    for (const node of explicitCaptchaNodes) {
+      let cur = node;
+      while (cur && cur !== document.body && cur instanceof HTMLElement) {
+        if (cur.hasAttribute('data-tkswarm-mask-cleared') || cur.style.opacity === '0' || cur.style.pointerEvents === 'none') {
+          cur.style.opacity = '';
+          cur.style.pointerEvents = '';
+          cur.removeAttribute('data-tkswarm-mask-cleared');
+        }
+        cur = cur.parentElement;
+      }
+    }
+
     let container = null;
     for (const sel of containerSelectors) {
       const list = Array.from(document.querySelectorAll(sel)).filter(vis);
       for (const el of list) {
         const imgs = Array.from(el.querySelectorAll('img'));
         const text = String(el.innerText || '');
+        const isExplicitCaptchaShell = sel !== '[role="dialog"]' && (
+          /captcha|secsdk/i.test(`${el.id || ''} ${el.className || ''}`)
+          || Boolean(el.querySelector('iframe[src*="captcha" i], iframe[src*="verify" i], iframe[src*="secsdk" i], [class*="captcha" i], [id*="captcha" i]'))
+        );
         const hasSlideBtn = Boolean(
           el.querySelector('#captcha_slide_button, .secsdk-captcha-drag-icon, div.cap-flex.cap-absolute')
         );
         if (
-          hasSlideBtn
+          isExplicitCaptchaShell
+          || hasSlideBtn
           || imgs.filter(vis).length >= 2
           || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块|完成拼图|调整角度|verify to continue|安全验证|人机验证/i.test(text)
         ) {
@@ -288,11 +393,18 @@ async function inspectRotateCaptchaInContext(target) {
     if (!root) return { detected: false };
 
     const rootText = String(root.innerText || '').slice(0, 4000);
+    const hasExplicitContainer = Boolean(
+      container && (
+        /captcha|secsdk/i.test(`${container.id || ''} ${container.className || ''}`)
+        || container.querySelector('#captcha-verify-container, .captcha_verify_container, [class*="captcha" i], [id*="captcha" i], iframe')
+      )
+    );
     const hasRotateHint = Boolean(
       container
       && (
-        root.querySelector('#captcha_slide_button, .secsdk-captcha-drag-icon, div.cap-flex.cap-absolute')
-        || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块.*拼图|调整角度/i.test(rootText)
+        hasExplicitContainer
+        || root.querySelector('#captcha_slide_button, .secsdk-captcha-drag-icon, div.cap-flex.cap-absolute')
+        || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块.*拼图|调整角度|verify to continue|安全验证|人机验证/i.test(rootText)
       )
     );
     const allImgs = Array.from(root.querySelectorAll('img')).filter((img) => {
@@ -381,14 +493,14 @@ async function inspectRotateCaptchaInContext(target) {
         || container
         || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块|完成拼图|调整角度|verify you are human|人机验证/i.test(rootText)
       );
-      return { detected: false, containerPending };
+      return { detected: false, containerPending, loading: containerPending };
     }
 
     if (
       (outerImg.complete === false || innerImg.complete === false)
       || (outerImg.naturalWidth === 0 || innerImg.naturalWidth === 0)
     ) {
-      return { detected: false, containerPending: true, reason: 'captcha_images_incomplete' };
+      return { detected: false, containerPending: true, loading: true, reason: 'captcha_images_incomplete' };
     }
 
     // 寻找滑块按钮与滑轨
@@ -433,7 +545,7 @@ async function inspectRotateCaptchaInContext(target) {
     }
 
     if (!handleEl) {
-      return { detected: false, containerPending: true, reason: 'found_images_but_no_slider_handle' };
+      return { detected: false, containerPending: true, loading: true, reason: 'found_images_but_no_slider_handle' };
     }
 
     if (handleEl.getBoundingClientRect().width < 34 && handleEl.parentElement) {
@@ -754,13 +866,19 @@ async function solveRotateCaptchaIfPresent(page, {
     };
 
     let firstCheck = await detectRotateCaptcha(page);
-    // 若验证容器/文本刚挂载但双圆环图片或滑块尚未完成渲染，先暂停省流并轮询等待最多 3.2 秒
+    // 若验证容器/文本刚挂载但双圆环图片或滑块尚未完成渲染，先暂停省流并轮询等待最多 10 秒（中途可自动点一次刷新）
     if (!firstCheck.detected && firstCheck.containerPending) {
       await ensureSaveTrafficPaused();
-      for (let w = 0; w < 6 && !firstCheck.detected; w += 1) {
-        await sleep(520);
+      let refreshedWhileLoading = false;
+      const loadWaitStart = Date.now();
+      for (let w = 0; w < 18 && !firstCheck.detected; w += 1) {
+        await sleep(500);
         firstCheck = await detectRotateCaptcha(page);
         if (!firstCheck.detected && !firstCheck.containerPending && w >= 2) break;
+        if (!firstCheck.detected && !refreshedWhileLoading && Date.now() - loadWaitStart > 3200) {
+          refreshedWhileLoading = true;
+          await clickCaptchaRefresh(firstCheck.target || page).catch(() => {});
+        }
       }
     }
     if (!firstCheck.detected) {
@@ -974,6 +1092,8 @@ module.exports = {
   DEFAULT_API_KEY,
   getApiKey,
   resolveActiveApiKey,
+  reportUsageToCenter,
+  looksLikeQuotaExhausted,
   requestRotateSolution,
   detectRotateCaptcha,
   solveRotateCaptchaIfPresent,

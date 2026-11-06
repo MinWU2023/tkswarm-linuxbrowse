@@ -1931,14 +1931,76 @@ async function forceClick(locator, label, log = () => {}) {
 }
 
 /**
+ * 判断页面或子 Frame 中是否存在正在加载或已渲染的人机验证/旋转验证弹窗。
+ * 存在时绝不能按 Escape、点 Close 或强拆全屏遮罩，否则会把验证弹框打成白屏或触发 "Something went wrong"。
+ */
+async function hasActiveOrLoadingCaptchaModal(page) {
+  if (!page || page.isClosed?.()) return false;
+  if (page.__tkNoCaptchaSolving) return true;
+  try {
+    const { detectRotateCaptcha } = require('./nocaptchaai');
+    const det = await detectRotateCaptcha(page);
+    if (det?.detected || det?.loading || det?.containerPending) return true;
+  } catch { /* ignore */ }
+
+  return page.evaluate(() => {
+    const vis = (el) => {
+      if (!el) return false;
+      const st = window.getComputedStyle?.(el);
+      if (!st || st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
+      const r = el.getBoundingClientRect?.() || { width: 0, height: 0 };
+      return r.width > 12 && r.height > 12;
+    };
+    const captchaSelectors = [
+      '.TUXModal.captcha-verify-container',
+      '#captcha-verify-container',
+      '.captcha_verify_container',
+      '[class*="captcha-verify-container" i]',
+      '[class*="captcha_verify_container" i]',
+      '[id*="captcha-verify" i]',
+      '[class*="secsdk-captcha" i]',
+      '[class*="secsdk_captcha" i]',
+      'iframe[src*="captcha" i]',
+      'iframe[src*="verify" i]',
+      'iframe[src*="secsdk" i]',
+    ];
+    for (const sel of captchaSelectors) {
+      if (Array.from(document.querySelectorAll(sel)).some(vis)) return true;
+    }
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .TUXModal')).filter(vis);
+    for (const d of dialogs) {
+      const idCls = `${d.id || ''} ${d.className || ''}`;
+      const txt = String(d.innerText || '');
+      if (
+        /captcha|secsdk|verify-container/i.test(idCls)
+        || /drag the slider|fit the puzzle|verify to continue|verify you are human|拖动滑块|完成拼图|旋转|安全验证|人机验证/i.test(txt)
+        || d.querySelector('#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="secsdk" i], iframe')
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }).catch(() => false);
+}
+
+/**
  * Remove orphan full-screen dim layers that block clicks after a modal was dismissed
  * without leaving Cancel/close. Prefer Escape first; only strip inert backdrops.
  */
 async function clearStuckPublishMask(page, log = () => {}) {
-  // Never Escape while a publish confirm is on screen — that cancels Post now / Turn on
+  // 若当前存在或正在加载人机验证弹框，先交由 NoCaptchaAI 处理，严禁按 Escape / 拆遮罩导致验证弹框白屏
+  if (await hasActiveOrLoadingCaptchaModal(page)) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page, { log });
+    } catch { /* ignore */ }
+    if (await hasActiveOrLoadingCaptchaModal(page)) return 0;
+  }
+
+  // Never Escape while a publish confirm or captcha is on screen — that cancels Post now / Turn on or breaks captcha
   const confirmLive = await page.evaluate(() => {
     const t = String(document.body?.innerText || '');
-    return /Continue to post|Turn on automatic content checks|copyright check is incomplete/i.test(t)
+    return /Continue to post|Turn on automatic content checks|copyright check is incomplete|drag the slider|fit the puzzle|verify to continue|安全验证|人机验证/i.test(t)
       || !!Array.from(document.querySelectorAll('button,[role="button"]')).find((b) => /^(Post now|Turn on)$/i.test(String(b.innerText || '').trim()));
   }).catch(() => false);
   if (confirmLive) return 0;
@@ -1946,16 +2008,25 @@ async function clearStuckPublishMask(page, log = () => {}) {
   await page.keyboard.press('Escape').catch(() => {});
   await page.waitForTimeout(250);
 
-  // Close (X) only on leftover dialogs that are NOT publish confirms
+  if (await hasActiveOrLoadingCaptchaModal(page)) return 0;
+
+  // Close (X) only on leftover dialogs that are NOT publish confirms and NOT captcha modals
   const junkDialog = page.locator('[role="dialog"]').filter({
-    hasNotText: /Continue to post|automatic content checks|Post now|Turn on/i,
+    hasNotText: /Continue to post|automatic content checks|Post now|Turn on|drag the slider|fit the puzzle|verify|captcha|安全验证|人机验证|拖动滑块|旋转/i,
   }).first();
   if (await junkDialog.count().catch(() => 0) && await junkDialog.isVisible().catch(() => false)) {
-    const closeBtn = junkDialog.locator(
-      'button[aria-label*="Close" i], button[aria-label*="关闭" i], [class*="close" i]'
-    ).first();
-    if (await closeBtn.count().catch(() => 0)) {
-      await closeBtn.click({ force: true, timeout: 2000 }).catch(() => {});
+    const isCaptchaDialog = await junkDialog.evaluate((el) => {
+      const idCls = `${el.id || ''} ${el.className || ''}`;
+      if (/captcha|secsdk|verify/i.test(idCls)) return true;
+      return Boolean(el.querySelector('#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="secsdk" i], iframe'));
+    }).catch(() => true);
+    if (!isCaptchaDialog) {
+      const closeBtn = junkDialog.locator(
+        'button[aria-label*="Close" i], button[aria-label*="关闭" i], [class*="close" i]'
+      ).first();
+      if (await closeBtn.count().catch(() => 0)) {
+        await closeBtn.click({ force: true, timeout: 2000 }).catch(() => {});
+      }
     }
   }
 
@@ -1963,6 +2034,8 @@ async function clearStuckPublishMask(page, log = () => {}) {
     let n = 0;
     const vw = window.innerWidth || 1;
     const vh = window.innerHeight || 1;
+    const CAPTCHA_SEL = '.TUXModal.captcha-verify-container, #captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="Captcha"], [class*="secsdk" i], iframe[src*="captcha" i], iframe[src*="verify" i], iframe[src*="secsdk" i]';
+    if (document.querySelector(CAPTCHA_SEL)) return 0;
     const nodes = Array.from(document.querySelectorAll('body *'));
     for (const el of nodes) {
       if (!(el instanceof HTMLElement)) continue;
@@ -1971,9 +2044,12 @@ async function clearStuckPublishMask(page, log = () => {}) {
       if (style.position !== 'fixed' && style.position !== 'absolute') continue;
       const r = el.getBoundingClientRect();
       if (r.width < vw * 0.85 || r.height < vh * 0.85) continue;
+      const idCls = `${el.id || ''} ${el.className || ''}`;
+      if (/captcha|secsdk|verify|TUXModal/i.test(idCls)) continue;
+      if (el.closest?.(CAPTCHA_SEL) || el.querySelector?.(CAPTCHA_SEL) || el.querySelector?.('iframe')) continue;
       const text = String(el.innerText || '').replace(/\s+/g, ' ').trim();
-      // Keep real confirm dialogs
-      if (/Continue to post|Turn on automatic content checks|Post now|copyright check is incomplete/i.test(text)) {
+      // Keep real confirm dialogs & captcha dialogs
+      if (/Continue to post|Turn on automatic content checks|Post now|copyright check is incomplete|drag the slider|fit the puzzle|verify|captcha|安全验证|人机验证|拖动滑块|旋转/i.test(text)) {
         continue;
       }
       const buttons = el.querySelectorAll('button, [role="button"]');
@@ -2122,6 +2198,10 @@ async function settleCopyrightAndConfirms(page, timeoutMs = 60000, log = () => {
 }
 
 async function clickPostButton(page, log = () => {}) {
+  try {
+    const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
+    await pauseSaveTrafficForCaptcha(page);
+  } catch { /* ignore */ }
   await clearStuckPublishMask(page, log);
   // Prefer main Post/Publish; Post now is confirm dialog
   const namePatterns = [
@@ -2153,9 +2233,42 @@ async function clickPostButton(page, log = () => {}) {
  * After primary Post: hammer confirm dialogs, clear mask, retry Post if still on upload.
  */
 async function drivePublishConfirmations(page, timeoutMs = 120000, log = () => {}) {
+  try {
+    const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
+    await pauseSaveTrafficForCaptcha(page);
+  } catch { /* ignore */ }
   const end = Date.now() + timeoutMs;
   let postRetries = 0;
+  let postCaptchaSolvedRetries = 0;
+  let lastSolvedStamp = Number(page.__tkNoCaptchaLastSolvedAt || 0);
+  // 点击 Post 后先留出短暂窗口让可能弹出的旋转验证码或二次确认框挂载，避免瞬间 Escape 把弹框打成白屏
+  await page.waitForTimeout(1000).catch(() => {});
   while (Date.now() < end) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      const rot = await solveRotateCaptchaIfPresent(page, { log });
+      const nowSolvedStamp = Number(page.__tkNoCaptchaLastSolvedAt || 0);
+      if ((rot?.detected && rot?.solved) || (nowSolvedStamp > lastSolvedStamp)) {
+        lastSolvedStamp = Math.max(lastSolvedStamp, nowSolvedStamp, Date.now());
+        log('旋转图片验证已由 NoCaptchaAI 自动通过，继续推进发布确认…');
+        await page.waitForTimeout(1500).catch(() => {});
+        const curUrl = page.url() || '';
+        if (/upload/i.test(curUrl) && postCaptchaSolvedRetries < 3) {
+          const postNowAfterCap = page.getByRole('button', { name: /^Post now$/i }).first();
+          if (await postNowAfterCap.count().catch(() => 0) && await postNowAfterCap.isVisible().catch(() => false)) {
+            await forceClick(postNowAfterCap, 'Post now', log);
+          } else {
+            const reClicked = await clickPostButton(page, log);
+            if (reClicked) {
+              postCaptchaSolvedRetries += 1;
+              log(`旋转验证通过后重新点击发布（第 ${postCaptchaSolvedRetries} 次）`);
+            }
+          }
+          await page.waitForTimeout(1500).catch(() => {});
+        }
+      }
+    } catch { /* ignore */ }
+
     await dismissPublishDialogs(page, log);
     await settleCopyrightAndConfirms(page, Math.min(20000, end - Date.now()), log);
 
@@ -2177,23 +2290,49 @@ async function drivePublishConfirmations(page, timeoutMs = 120000, log = () => {
       continue;
     }
 
+    // 若验证码弹框正在加载或识别中，等待其完成，不要清理遮罩或误判 security_paused
+    if (await hasActiveOrLoadingCaptchaModal(page)) {
+      await page.waitForTimeout(1200).catch(() => {});
+      continue;
+    }
+
     // Still on upload editor with mask / no confirm → clear mask and re-hit Post (max 3)
     if (/upload/i.test(url) && postRetries < 3) {
       const checking = /Checking in progress/i.test(text);
       if (!checking) {
         await clearStuckPublishMask(page, log);
+        if (await hasActiveOrLoadingCaptchaModal(page)) {
+          continue;
+        }
         const again = await clickPostButton(page, log);
         if (again) {
           postRetries += 1;
           log(`清除遮罩后重新点击发布（第 ${postRetries} 次）`);
-          await page.waitForTimeout(1000);
+          await page.waitForTimeout(1200);
           continue;
         }
       }
     }
 
     const security = await inspectPage(page);
-    if (security.blocked) return { status: 'security_paused', reason: security.reason };
+    if (security.blocked) {
+      // 若触发的是 something went wrong 且仍在上传页，先尝试解决可能刚弹出的旋转验证码并重试点击一次 Post，避免误挂起人工
+      if (/something went wrong/i.test(String(security.reason || '')) && /upload/i.test(url) && postRetries < 3) {
+        log(`页面提示 "${security.reason}"，尝试检测旋转验证码并重试点击发布…`);
+        await page.waitForTimeout(1200).catch(() => {});
+        try {
+          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+          await solveRotateCaptchaIfPresent(page, { log });
+        } catch { /* ignore */ }
+        const retried = await clickPostButton(page, log);
+        if (retried) {
+          postRetries += 1;
+          await page.waitForTimeout(2000).catch(() => {});
+          continue;
+        }
+      }
+      return { status: 'security_paused', reason: security.reason };
+    }
     await page.waitForTimeout(1500);
   }
   return { status: 'timeout' };

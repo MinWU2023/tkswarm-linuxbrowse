@@ -27,13 +27,15 @@ const ALLOW_URL_RE = [
   /arkose/i,
   /funcaptcha/i,
   /(?:^|\.)byteoversea\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk)/i,
-  /(?:^|\.)(?:ibyteimg|byteimg|ibytedtos|ttwstatic)\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk)/i,
+  /(?:^|\.)(?:ibyteimg|byteimg|ibytedtos|ttwstatic)\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|tos-|obj\/)/i,
   /p\d+-(?:rc-)?captcha/i,
   /p\d+-security/i,
   /sf\d+-website-login/i,
   /captcha[-.].*\.(?:tiktok|bytedance|byteoversea)/i,
   /verification[-.].*\.(?:tiktok|byte)/i,
   /tiktokcdn[^/]*\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|secsdk|eden)/i,
+  /rc-verification/i,
+  /secsdk-captcha/i,
 ];
 
 /** 广告 / 追踪 / 图标字体 / 媒体等 URL 特征 */
@@ -99,10 +101,16 @@ image {
 [class*="secsdk" i] svg *,
 [aria-label*="captcha" i] svg,
 [aria-label*="verify" i] svg,
+.TUXModal svg,
+.TUXModal svg *,
+[role="dialog"] svg,
+[role="dialog"] svg *,
 #captcha-verify-container img,
 .captcha_verify_container img,
 [id*="captcha" i] img,
-[class*="captcha" i] img {
+[class*="captcha" i] img,
+.TUXModal img,
+[role="dialog"] img {
   opacity: 1 !important;
   fill-opacity: 1 !important;
   stroke-opacity: 1 !important;
@@ -110,7 +118,7 @@ image {
 }
 `.trim();
 
-const CAPTCHA_CLOSEST = '#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="Captcha"], [class*="secsdk" i]';
+const CAPTCHA_CLOSEST = '#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="Captcha"], [class*="secsdk" i], .TUXModal, [role="dialog"]';
 
 function parseSaveTrafficFlag(raw, defaultValue = false) {
   if (raw === undefined || raw === null || raw === '') return !!defaultValue;

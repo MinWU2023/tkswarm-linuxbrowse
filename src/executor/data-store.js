@@ -187,6 +187,10 @@ async function getNocaptchaKey() {
   return phpApi.get('/node/nocaptcha-key');
 }
 
+async function reportNocaptchaUsage(payload = {}) {
+  return phpApi.post('/node/nocaptcha-key/report-usage', payload);
+}
+
 module.exports = {
   usePhp,
   getSetting,
@@ -207,4 +211,5 @@ module.exports = {
   saveMonitorResult,
   dmIngest,
   getNocaptchaKey,
+  reportNocaptchaUsage,
 };
