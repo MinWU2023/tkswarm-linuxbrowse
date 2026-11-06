@@ -974,6 +974,25 @@ async function executeWorkItem(item) {
     return { status: 'completed', result };
   }
 
+  if (type === 'video_boost') {
+    const { runVideoBoost } = require('./browser/tiktok-video-boost');
+    liveLog(
+      `账号 #${accountId}：视频增值开始（分项=#${payload.itemId || payload.item_id || 0}，任务=#${payload.taskId || payload.task_id || taskId || 0}）`,
+      'info',
+      logCtx
+    );
+    const result = await runVideoBoost(accountId, {
+      ...payload,
+      taskId: Number(payload.taskId || payload.task_id || taskId || 0),
+      itemId: Number(payload.itemId || payload.item_id || 0),
+    });
+    liveLog(`账号 #${accountId}：视频增值完成 状态=${result?.status || ''}`, 'info', logCtx);
+    if (result?.status && result.status !== 'ok' && result.status !== 'completed') {
+      throw new Error(result.error || '视频增值失败');
+    }
+    return { status: 'completed', result };
+  }
+
   if (type === 'auto_follow') {
     const { runAutoFollow } = require('./browser/tiktok-auto-follow');
     liveLog(

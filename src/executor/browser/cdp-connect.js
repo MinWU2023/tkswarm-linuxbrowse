@@ -136,7 +136,14 @@ async function settlePage(page) {
   if (!page.isClosed?.()) {
     try {
       const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
-      await solveRotateCaptchaIfPresent(page);
+      const r1 = await solveRotateCaptchaIfPresent(page);
+      if (!r1?.detected) {
+        const t = setTimeout(() => {
+          if (!page || page.isClosed?.() || page.__tkNoCaptchaSolving) return;
+          solveRotateCaptchaIfPresent(page).catch(() => {});
+        }, 1200);
+        t.unref?.();
+      }
     } catch { /* ignore */ }
   }
 }
