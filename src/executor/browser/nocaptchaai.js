@@ -252,6 +252,7 @@ async function inspectRotateCaptchaInContext(target) {
     };
 
     const containerSelectors = [
+      '.TUXModal.captcha-verify-container',
       '#captcha-verify-container',
       '.captcha_verify_container',
       '[class*="captcha-verify-container" i]',
@@ -266,11 +267,15 @@ async function inspectRotateCaptchaInContext(target) {
     for (const sel of containerSelectors) {
       const list = Array.from(document.querySelectorAll(sel)).filter(vis);
       for (const el of list) {
-        const imgs = Array.from(el.querySelectorAll('img')).filter(vis);
+        const imgs = Array.from(el.querySelectorAll('img'));
         const text = String(el.innerText || '');
+        const hasSlideBtn = Boolean(
+          el.querySelector('#captcha_slide_button, .secsdk-captcha-drag-icon, div.cap-flex.cap-absolute')
+        );
         if (
-          imgs.length >= 2
-          || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块|完成拼图|调整角度/i.test(text)
+          hasSlideBtn
+          || imgs.filter(vis).length >= 2
+          || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块|完成拼图|调整角度|verify to continue|安全验证|人机验证/i.test(text)
         ) {
           container = el;
           break;
@@ -283,6 +288,13 @@ async function inspectRotateCaptchaInContext(target) {
     if (!root) return { detected: false };
 
     const rootText = String(root.innerText || '').slice(0, 4000);
+    const hasRotateHint = Boolean(
+      container
+      && (
+        root.querySelector('#captcha_slide_button, .secsdk-captcha-drag-icon, div.cap-flex.cap-absolute')
+        || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块.*拼图|调整角度/i.test(rootText)
+      )
+    );
     const allImgs = Array.from(root.querySelectorAll('img')).filter((img) => {
       if (!vis(img)) return false;
       const src = String(img.currentSrc || img.src || '');
@@ -327,7 +339,7 @@ async function inspectRotateCaptchaInContext(target) {
           const big = ra.width >= rb.width ? { el: a, r: ra } : { el: b, r: rb };
           const small = ra.width >= rb.width ? { el: b, r: rb } : { el: a, r: ra };
           // 同心圆：中心距离很小，且外圈比内圈大（或者大小相近重叠）
-          if (centerDist <= Math.max(36, big.r.width * 0.25) && big.r.width >= small.r.width * 1.05) {
+          if (centerDist <= Math.max(36, big.r.width * 0.25) && big.r.width >= small.r.width) {
             if (centerDist < bestScore) {
               bestScore = centerDist;
               bestPair = { outer: big.el, inner: small.el };
@@ -364,11 +376,25 @@ async function inspectRotateCaptchaInContext(target) {
     }
 
     if (!outerImg || !innerImg) {
-      return { detected: false };
+      const containerPending = Boolean(
+        hasRotateHint
+        || container
+        || /drag the slider to fit the puzzle|rotate|旋转|拖动滑块|完成拼图|调整角度|verify you are human|人机验证/i.test(rootText)
+      );
+      return { detected: false, containerPending };
+    }
+
+    if (
+      (outerImg.complete === false || innerImg.complete === false)
+      || (outerImg.naturalWidth === 0 || innerImg.naturalWidth === 0)
+    ) {
+      return { detected: false, containerPending: true, reason: 'captcha_images_incomplete' };
     }
 
     // 寻找滑块按钮与滑轨
     const handleSelectors = [
+      '#captcha_slide_button',
+      'div.cap-flex.cap-absolute',
       '.secsdk-captcha-drag-icon',
       '[class*="captcha_verify_slide--slidebar" i] [class*="icon" i]',
       '[class*="secsdk-captcha-drag-icon" i]',
@@ -407,7 +433,14 @@ async function inspectRotateCaptchaInContext(target) {
     }
 
     if (!handleEl) {
-      return { detected: false, reason: 'found_images_but_no_slider_handle' };
+      return { detected: false, containerPending: true, reason: 'found_images_but_no_slider_handle' };
+    }
+
+    if (handleEl.getBoundingClientRect().width < 34 && handleEl.parentElement) {
+      const pr = handleEl.parentElement.getBoundingClientRect();
+      if (pr.width >= 36 && pr.width <= 92 && pr.height >= 28 && pr.height <= 85) {
+        handleEl = handleEl.parentElement;
+      }
     }
 
     const handleRect = handleEl.getBoundingClientRect();
@@ -437,7 +470,7 @@ async function inspectRotateCaptchaInContext(target) {
       let p = handleEl.parentElement;
       while (p && p !== document.body) {
         const r = p.getBoundingClientRect();
-        if (r.width >= Math.max(160, outerRect.width * 0.75) && r.width <= 520 && r.height <= 90) {
+        if (r.width >= Math.max(180, outerRect.width * 0.85) && r.width <= 520 && r.height <= 90) {
           trackEl = p;
           break;
         }
@@ -445,16 +478,19 @@ async function inspectRotateCaptchaInContext(target) {
       }
     }
 
+    const defaultSlideDist = window.innerWidth < 640 ? 224 : 284;
     const trackRect = trackEl
       ? trackEl.getBoundingClientRect()
       : {
-          left: outerRect.left,
+          left: handleRect.left,
           top: handleRect.top,
-          width: Math.max(outerRect.width, 260),
+          width: defaultSlideDist + handleRect.width,
           height: handleRect.height,
         };
 
-    const maxSlideDistance = Math.max(100, trackRect.width - handleRect.width);
+    const maxSlideDistance = trackEl
+      ? Math.max(100, trackRect.width - handleRect.width)
+      : defaultSlideDist;
 
     return {
       detected: true,
@@ -595,20 +631,49 @@ async function dragSliderByDistance(page, handleRect, distancePx) {
 }
 
 /**
+ * 点击验证码弹框中的「刷新」按钮，用于在图片加载卡死或单次拖动后未自动换图时刷新验证码。
+ */
+async function clickCaptchaRefresh(target) {
+  if (!target) return false;
+  return target.evaluate(() => {
+    const selectors = [
+      '#captcha_refresh_button',
+      '.secsdk_captcha_refresh',
+      '[id*="captcha_refresh" i]',
+      '[class*="secsdk_captcha_refresh" i]',
+      '[class*="captcha" i] [class*="refresh" i]',
+      'button[aria-label*="refresh" i]',
+      'button[aria-label*="刷新" i]',
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && typeof el.click === 'function') {
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  }).catch(() => false);
+}
+
+/**
  * 在 Page（含子 Frame）中定位旋转验证码详情。
  */
 async function detectRotateCaptcha(page) {
   if (!page || page.isClosed?.()) return { detected: false };
   const targets = [page, ...(page.frames?.() || []).filter((f) => f !== page.mainFrame?.())];
+  let anyContainerPending = false;
   for (const target of targets) {
     const info = await inspectRotateCaptchaInContext(target);
+    if (info?.containerPending) anyContainerPending = true;
     if (info?.detected) {
-      // 若在子 iframe 内，转换坐标到主页面视口以便 page.mouse 拖拽
+      // 若在子 iframe 内，先确保 iframe 在视口内，再转换坐标到主页面视口以便 page.mouse 拖拽
       let offsetX = 0;
       let offsetY = 0;
       if (target !== page && typeof target.frameElement === 'function') {
         try {
           const frameEl = await target.frameElement();
+          await frameEl?.scrollIntoViewIfNeeded?.().catch(() => {});
           const box = await frameEl?.boundingBox?.();
           if (box) {
             offsetX = box.x;
@@ -632,7 +697,7 @@ async function detectRotateCaptcha(page) {
       };
     }
   }
-  return { detected: false };
+  return { detected: false, containerPending: anyContainerPending };
 }
 
 /**
@@ -661,38 +726,70 @@ async function solveRotateCaptchaIfPresent(page, {
     return page.__tkNoCaptchaSolving;
   }
 
+  const effectiveAccountId = Number(accountId || page.__tkAccountId || 0);
+  if (effectiveAccountId && !page.__tkAccountId) {
+    page.__tkAccountId = effectiveAccountId;
+  }
+
   const say = (msg, level = 'info') => {
     if (typeof log === 'function') {
       try { log(msg, level); } catch { /* ignore */ }
     }
     liveLog(
-      `[NoCaptchaAI${accountId ? `#${accountId}` : ''}] ${msg}`,
+      `[NoCaptchaAI${effectiveAccountId ? `#${effectiveAccountId}` : ''}] ${msg}`,
       level,
-      accountId ? { accountId } : {}
+      effectiveAccountId ? { accountId: effectiveAccountId } : {}
     );
   };
 
   const runner = (async () => {
+    let pausedSaveTraffic = false;
+    const ensureSaveTrafficPaused = async () => {
+      if (pausedSaveTraffic) return;
+      try {
+        const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
+        await pauseSaveTrafficForCaptcha(page);
+        pausedSaveTraffic = true;
+      } catch { /* ignore */ }
+    };
+
     let firstCheck = await detectRotateCaptcha(page);
+    // 若验证容器/文本刚挂载但双圆环图片或滑块尚未完成渲染，先暂停省流并轮询等待最多 3.2 秒
+    if (!firstCheck.detected && firstCheck.containerPending) {
+      await ensureSaveTrafficPaused();
+      for (let w = 0; w < 6 && !firstCheck.detected; w += 1) {
+        await sleep(520);
+        firstCheck = await detectRotateCaptcha(page);
+        if (!firstCheck.detected && !firstCheck.containerPending && w >= 2) break;
+      }
+    }
     if (!firstCheck.detected) {
+      if (pausedSaveTraffic) {
+        try {
+          const { resumeSaveTrafficAfterCaptcha } = require('./save-traffic');
+          await resumeSaveTrafficAfterCaptcha(page);
+        } catch { /* ignore */ }
+      }
       return { detected: false, solved: false, attempts: 0 };
     }
 
     // 临时关闭省流拦截，保证验证码旋转图片与刷新资源正常加载
-    let pausedSaveTraffic = false;
-    try {
-      const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
-      await pauseSaveTrafficForCaptcha(page);
-      pausedSaveTraffic = true;
-    } catch { /* ignore */ }
+    await ensureSaveTrafficPaused();
 
     let lastError = '';
     let lastAngle = 0;
 
     try {
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        const info = attempt === 1 ? firstCheck : await detectRotateCaptcha(page);
+        let info = attempt === 1 ? firstCheck : await detectRotateCaptcha(page);
+        if (!info.detected && info.containerPending) {
+          for (let w = 0; w < 5 && !info.detected; w += 1) {
+            await sleep(500);
+            info = await detectRotateCaptcha(page);
+          }
+        }
         if (!info.detected) {
+          page.__tkNoCaptchaLastSolvedAt = Date.now();
           say('旋转图片验证已消失，验证通过');
           return { detected: true, solved: true, attempts: attempt - 1, lastAngle };
         }
@@ -706,7 +803,8 @@ async function solveRotateCaptchaIfPresent(page, {
 
         if (!outerBase64 || !innerBase64) {
           lastError = '未能读取旋转验证码内外环图片数据';
-          say(`${lastError}，稍后重试`, 'warn');
+          say(`${lastError}，点击刷新后重试`, 'warn');
+          await clickCaptchaRefresh(info.target || page);
           await sleep(1200);
           continue;
         }
@@ -725,6 +823,7 @@ async function solveRotateCaptchaIfPresent(page, {
         if (!sol.ok || !Number.isFinite(sol.angle)) {
           lastError = sol.error || 'NoCaptchaAI 未返回有效旋转角度';
           say(`识别失败：${lastError}`, 'warn');
+          await clickCaptchaRefresh(info.target || page);
           await sleep(1200);
           continue;
         }
@@ -747,22 +846,37 @@ async function solveRotateCaptchaIfPresent(page, {
         await dragSliderByDistance(page, info.handleRect, distancePx);
 
         // 等待验证结果判定（消失或刷新换新图）
+        let imageChanged = false;
         const checkDeadline = Date.now() + 4800;
         while (Date.now() < checkDeadline) {
           await sleep(600);
           const after = await detectRotateCaptcha(page);
-          if (!after.detected) {
+          if (!after.detected && !after.containerPending) {
+            page.__tkNoCaptchaLastSolvedAt = Date.now();
             say(`旋转图片验证已通过（第 ${attempt} 次尝试）`);
             return { detected: true, solved: true, attempts: attempt, lastAngle };
           }
           // 若图片 src 已变化，说明本次未对齐已自动刷新下一张，提前进入下一轮识别
           if (after.outerSrc && info.outerSrc && after.outerSrc !== info.outerSrc) {
+            imageChanged = true;
             break;
           }
         }
 
+        const finalAfter = await detectRotateCaptcha(page);
+        if (!finalAfter.detected) {
+          page.__tkNoCaptchaLastSolvedAt = Date.now();
+          say(`旋转图片验证已通过（第 ${attempt} 次尝试）`);
+          return { detected: true, solved: true, attempts: attempt, lastAngle };
+        }
+
         say(`第 ${attempt} 次拖动后旋转验证仍存在，准备重试…`, 'warn');
-        await sleep(800);
+        if (!imageChanged && attempt < maxAttempts) {
+          await clickCaptchaRefresh(info.target || page);
+          await sleep(1000);
+        } else {
+          await sleep(800);
+        }
       }
 
       return {
@@ -799,16 +913,38 @@ async function solveRotateCaptchaIfPresent(page, {
  * 自动触发 solveRotateCaptchaIfPresent。
  */
 function attachAutoRotateCaptchaWatcher(page, { accountId = 0, apiKey = '' } = {}) {
-  if (!page || page.isClosed?.() || page.__tkNoCaptchaWatcherAttached) return;
+  if (!page || page.isClosed?.()) return;
+  if (accountId) page.__tkAccountId = Number(accountId);
+  if (apiKey) page.__tkNoCaptchaApiKey = String(apiKey);
+  if (page.__tkNoCaptchaWatcherAttached) return;
   page.__tkNoCaptchaWatcherAttached = true;
 
   let debounceTimer = null;
+  let retryTimer = null;
+  const runSolve = async (isFollowUp = false) => {
+    if (!page || page.isClosed?.() || page.__tkNoCaptchaSolving) return;
+    try {
+      const res = await solveRotateCaptchaIfPresent(page, {
+        accountId: page.__tkAccountId || accountId,
+        apiKey: page.__tkNoCaptchaApiKey || apiKey,
+      });
+      // 若首次触发时验证弹层/图片尚在异步加载中，延迟 1.5s 再补检一次
+      if (!isFollowUp && !res?.detected) {
+        if (retryTimer) clearTimeout(retryTimer);
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          runSolve(true).catch(() => {});
+        }, 1500);
+        retryTimer.unref?.();
+      }
+    } catch { /* ignore */ }
+  };
+
   const triggerCheck = () => {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
-      if (!page || page.isClosed?.() || page.__tkNoCaptchaSolving) return;
-      solveRotateCaptchaIfPresent(page, { accountId, apiKey }).catch(() => {});
+      runSolve(false).catch(() => {});
     }, 650);
     debounceTimer.unref?.();
   };
@@ -818,7 +954,7 @@ function attachAutoRotateCaptchaWatcher(page, { accountId = 0, apiKey = '' } = {
       const url = String(resp.url?.() || '');
       if (!url) return;
       if (
-        /captcha|verify[-_]?center|secsdk|whirl|rotate[-_]?verify|p\d+-captcha/i.test(url)
+        /captcha|verify[-_]?center|secsdk|whirl|rotate[-_]?verify|rc-captcha|p\d+-captcha|p\d+-security/i.test(url)
         && resp.status?.() === 200
       ) {
         triggerCheck();
@@ -829,6 +965,7 @@ function attachAutoRotateCaptchaWatcher(page, { accountId = 0, apiKey = '' } = {
   page.on?.('response', onResponse);
   page.once?.('close', () => {
     if (debounceTimer) clearTimeout(debounceTimer);
+    if (retryTimer) clearTimeout(retryTimer);
     try { page.off?.('response', onResponse); } catch { /* ignore */ }
   });
 }

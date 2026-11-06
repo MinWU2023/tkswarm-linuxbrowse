@@ -24,6 +24,10 @@ async function syncVideos(accountId, limit = 100) {
   try {
     const page = connection.page;
     await page.waitForTimeout(2500);
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page, { accountId });
+    } catch { /* ignore */ }
     const uname = account.username || '';
     const links = await page.locator(`a[href*="/@${uname}/video/"]`).evaluateAll((els, max) => els.slice(0, max).map((el) => ({
       url: el.href, text: (el.innerText || el.getAttribute('aria-label') || '').trim(),

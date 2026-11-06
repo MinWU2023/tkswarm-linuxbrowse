@@ -14,15 +14,33 @@ function automationDir() {
 }
 
 async function inspectPage(page) {
+  let rotSolved = false;
   try {
     const { solveRotateCaptchaIfPresent } = require('./browser/nocaptchaai');
-    await solveRotateCaptchaIfPresent(page);
+    const rot = await solveRotateCaptchaIfPresent(page);
+    if (rot?.solved) rotSolved = true;
   } catch { /* ignore */ }
+  if (rotSolved) {
+    await page.waitForTimeout?.(900).catch(() => {});
+  }
   const url = page.url();
-  const body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
-  const inputText = await page.locator('input,button').allTextContents().catch(() => []);
-  const text = `${url}\n${body}\n${inputText.join('\n')}`;
-  const matched = SECURITY_PATTERNS.find(pattern => pattern.test(text));
+  let body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+  let inputText = await page.locator('input,button').allTextContents().catch(() => []);
+  let text = `${url}\n${body}\n${inputText.join('\n')}`;
+  let matched = SECURITY_PATTERNS.find(pattern => pattern.test(text));
+  if (matched && !rotSolved && /captcha|verify|verification|人机验证|安全验证|设备验证|滑块|slider/i.test(matched.source)) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./browser/nocaptchaai');
+      const rot2 = await solveRotateCaptchaIfPresent(page);
+      if (rot2?.solved) {
+        await page.waitForTimeout?.(900).catch(() => {});
+        body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+        inputText = await page.locator('input,button').allTextContents().catch(() => []);
+        text = `${url}\n${body}\n${inputText.join('\n')}`;
+        matched = SECURITY_PATTERNS.find(pattern => pattern.test(text));
+      }
+    } catch { /* ignore */ }
+  }
   return { blocked: Boolean(matched), reason: matched ? matched.source : '', url };
 }
 
@@ -31,19 +49,37 @@ async function inspectPage(page) {
  * 不应与验证码/全局风控混为一谈。
  */
 async function inspectPageForDm(page) {
+  let rotSolved = false;
   try {
     const { solveRotateCaptchaIfPresent } = require('./browser/nocaptchaai');
-    await solveRotateCaptchaIfPresent(page);
+    const rot = await solveRotateCaptchaIfPresent(page);
+    if (rot?.solved) rotSolved = true;
   } catch { /* ignore */ }
+  if (rotSolved) {
+    await page.waitForTimeout?.(900).catch(() => {});
+  }
   const url = String(page.url() || '');
   const isMsgShell = /business-suite\/messages|\/messages(?:\?|$)/i.test(url);
-  const body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
-  const inputText = await page.locator('input,button').allTextContents().catch(() => []);
-  const text = `${url}\n${body}\n${inputText.join('\n')}`;
+  let body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+  let inputText = await page.locator('input,button').allTextContents().catch(() => []);
+  let text = `${url}\n${body}\n${inputText.join('\n')}`;
   const patterns = isMsgShell
     ? SECURITY_PATTERNS.filter((p) => !/something went wrong/i.test(String(p.source || '')))
     : SECURITY_PATTERNS;
-  const matched = patterns.find((pattern) => pattern.test(text));
+  let matched = patterns.find((pattern) => pattern.test(text));
+  if (matched && !rotSolved && /captcha|verify|verification|人机验证|安全验证|设备验证|滑块|slider/i.test(matched.source)) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./browser/nocaptchaai');
+      const rot2 = await solveRotateCaptchaIfPresent(page);
+      if (rot2?.solved) {
+        await page.waitForTimeout?.(900).catch(() => {});
+        body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+        inputText = await page.locator('input,button').allTextContents().catch(() => []);
+        text = `${url}\n${body}\n${inputText.join('\n')}`;
+        matched = patterns.find((pattern) => pattern.test(text));
+      }
+    } catch { /* ignore */ }
+  }
   return { blocked: Boolean(matched), reason: matched ? matched.source : '', url };
 }
 

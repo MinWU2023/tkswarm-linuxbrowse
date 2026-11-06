@@ -1,4 +1,4 @@
-﻿const WebSocket = require('ws');
+const WebSocket = require('ws');
 const { nowChinaIso } = require('../utils/china-time');
 
 function command(wsUrl, method, params = {}, timeoutMs = 15000) {
@@ -353,6 +353,10 @@ async function inspectTikTokSession(wsUrl, page = null, options = {}) {
   let apiProbe = null;
   let gateProbe = null;
   if (page) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     uiLoggedOut = await pageLooksLoggedOut(page);
     topRight = await topRightAuthState(page).catch(() => null);
     // 服务端真相：问 TikTok 这个 session 还有效吗（能识破「Cookie 还在但已退出登录」）

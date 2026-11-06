@@ -90,16 +90,25 @@ app.whenReady().then(async () => {
   // 省流（服务器浏览器默认强制开）：不加载图片/视频/音频/字体/SVG；验证码相关资源放行。
   // TKSWARM_SERVER_SAVE_TRAFFIC=0 可关闭。只拦 http(s)，主文档/XHR/脚本/样式不动。
   if (String(process.env.TKSWARM_SERVER_SAVE_TRAFFIC || '1').trim() !== '0') {
-    const ALLOW = /captcha|\/verify(?:\/|$|\?)|verify[-_]?(?:center|image)|secsdk|security[-_]?check|slide[-_]?verify|slider|puzzle|geetest|hcaptcha|recaptcha|arkose|funcaptcha/i;
+    const ALLOW = /captcha|\/verify(?:\/|$|\?)|verify[-_]?(?:center|image)|secsdk|security[-_]?check|slide[-_]?verify|slider|puzzle|whirl|rotate[-_]?verify|rc-captcha|geetest|hcaptcha|recaptcha|arkose|funcaptcha|(?:^|\.)(?:ibyteimg|byteimg|byteoversea|ibytedtos|ttwstatic)\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk)|p\d+-(?:rc-)?captcha|p\d+-security|sf\d+-website-login|tiktokcdn[^/]*\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|secsdk|eden)/i;
+    const CAPTCHA_TRIGGER = /captcha|verify[-_]?(?:center|image)|secsdk|whirl|rotate[-_]?verify|rc-captcha|security[-_]?check/i;
     const BLOCK_TYPES = new Set(['image', 'media']);
     const BLOCK_URL = /\.(?:woff2?|ttf|otf|eot)(?:\?|$)|fonts\.(?:googleapis|gstatic)\.com|\.svg(?:\?|$|#)|\/svg(?:\/|$|\?)|format=svg|\.(?:png|jpe?g|gif|webp|bmp|ico|avif)(?:\?|$)|\.(?:mp4|webm|m4v|mov|mkv|mp3|wav|ogg|m4a|aac)(?:\?|$)/i;
     let blocked = 0;
+    let captchaGraceUntil = 0;
     try {
       ses.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
         try {
           const url = String(details.url || '');
           const type = String(details.resourceType || '');
+          if (CAPTCHA_TRIGGER.test(url)) {
+            captchaGraceUntil = Math.max(captchaGraceUntil, Date.now() + 30000);
+          }
           if (type === 'mainFrame' || type === 'subFrame' || type === 'webSocket' || ALLOW.test(url)) {
+            return callback({});
+          }
+          // 验证码触发后的 30s 窗口期内放行图片资源，确保旋转双圆环与刷新新图 100% 加载成功
+          if (type === 'image' && Date.now() < captchaGraceUntil) {
             return callback({});
           }
           // 脚本/样式/XHR 不按 URL 关键字拦（路径里带 svg/png 的 JS 分包与接口会被误杀，页面停在骨架屏）
@@ -112,7 +121,7 @@ app.whenReady().then(async () => {
         } catch { /* fall through */ }
         callback({});
       });
-      console.log('[electron-env] 省流模式已开启（图片/视频/字体/SVG 不加载）');
+      console.log('[electron-env] 省流模式已开启（图片/视频/字体/SVG 不加载，验证码资源与触发期图片自动放行）');
     } catch (e) {
       console.warn('[electron-env] 省流拦截挂载失败:', e.message || e);
     }

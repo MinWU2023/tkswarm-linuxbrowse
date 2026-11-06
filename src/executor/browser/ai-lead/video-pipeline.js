@@ -159,6 +159,14 @@ async function waitForVideoResults(page, { timeoutMs = 70000 } = {}) {
     countCards,
     isEmpty,
     isCaptcha,
+    onCaptcha: async (p, aid) => {
+      try {
+        const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+        const rot = await solveRotateCaptchaIfPresent(p, { accountId: aid });
+        if (rot?.detected && rot?.solved) return 'cleared';
+      } catch { /* ignore */ }
+      return 'absent';
+    },
     log: (m) => liveLog(`AI拓客 ${m}`, 'info'),
   });
   return !!result.ok;
@@ -184,6 +192,10 @@ async function collectVideosUntilExhausted(page, minViews, {
   for (let round = 0; round < maxRounds; round += 1) {
     rounds = round + 1;
     if (leadId) assertLeadActive(leadId);
+    try {
+      const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     const batch = await collectSearchVideosFromPage(page);
     let newRaw = 0;
     for (const v of batch || []) {

@@ -1371,6 +1371,10 @@ async function applyEditProfileChanges(page, {
 
 /** 关闭 Cookie / 提示遮罩，避免挡住编辑按钮 */
 async function dismissOverlays(page) {
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   const labels = [
     /^(Accept all|Accept|Allow all|I agree|Got it|OK|Agree|允许全部|同意|接受|知道了)$/i,
     /Accept cookies|接受 Cookie/i,
@@ -1589,6 +1593,18 @@ async function openEditProfile(page, handle, log = () => {}) {
   let state = await waitForProfileActionable(page, 15000);
   if (state) {
     log(`profile page: edit=${state.editBtn} follow=${state.followBtn} login=${state.loginWall} notFound=${state.notFound} captcha=${state.captcha} title=${state.title || '-'}`);
+  }
+  if (state?.captcha) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      const rot = await solveRotateCaptchaIfPresent(page);
+      if (rot?.detected && rot?.solved) {
+        log('profile page: NoCaptchaAI 已自动通过旋转图片验证，重新检测主页状态');
+        await page.waitForTimeout(1500);
+        await dismissOverlays(page);
+        state = await waitForProfileActionable(page, 12000);
+      }
+    } catch { /* ignore */ }
   }
   if (state?.captcha) {
     throw new Error(`TikTok 出现人机/安全验证，无法进入编辑资料（${state.url}），请先在浏览器里人工处理验证`);

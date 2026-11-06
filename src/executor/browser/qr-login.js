@@ -98,6 +98,11 @@ async function createQrSession({ groupId = null, proxyId = null, accountId = nul
     await page.goto('https://www.tiktok.com/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
   });
   await page.waitForTimeout(1500);
+  try {
+    const { attachAutoRotateCaptchaWatcher, solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    attachAutoRotateCaptchaWatcher(page, { accountId: Number(account?.id || 0) });
+    await solveRotateCaptchaIfPresent(page, { accountId: Number(account?.id || 0) });
+  } catch { /* ignore */ }
   const shot = await captureQr(page);
   const id = `qr_${Date.now().toString(36)}`;
   const expiresAt = Date.now() + 5 * 60 * 1000;

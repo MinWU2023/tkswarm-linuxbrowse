@@ -644,6 +644,10 @@ async function findFileInput(page, waitMs = 15000) {
 async function waitStudioUploadReady(page, timeoutMs = 30000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     const url = page.url() || '';
     if (!/tiktokstudio\/upload|tiktok\.com\/upload/i.test(url)) {
       await page.goto('https://www.tiktok.com/tiktokstudio/upload', {
@@ -2009,6 +2013,10 @@ async function clearStuckPublishMask(page, log = () => {}) {
  * Never click Cancel. Uses force click to pierce dim layers.
  */
 async function dismissPublishDialogs(page, log = () => {}) {
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   const clicked = [];
   const tryLabels = async (patterns, label) => {
     for (const re of patterns) {
@@ -2692,18 +2700,41 @@ async function waitManualVerify(page, handle, log = () => {}) {
     await st.pauseSaveTrafficForCaptcha(page);
     paused = true;
   } catch { /* ignore */ }
-  log(`@${handle} 主页返回 403（疑似人机验证/风控）：已停止自动重载并临时关闭省流，请在 VNC 里完成验证，最多等 ${Math.round(DM_MANUAL_WAIT_MS / 60000)} 分钟`);
+  const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(handle)}`;
+  log(`@${handle} 主页返回 403（疑似人机验证/风控）：已临时关闭省流并尝试自动恢复/识别旋转验证，最多等 ${Math.round(DM_MANUAL_WAIT_MS / 60000)} 分钟`);
   const end = Date.now() + DM_MANUAL_WAIT_MS;
   let result = 'timeout';
+  let triedSoftRecover = false;
   while (Date.now() < end) {
     if (page.isClosed?.()) break;
     try {
       const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
-      await solveRotateCaptchaIfPresent(page, { log });
+      const rot = await solveRotateCaptchaIfPresent(page, { log });
+      if (rot?.detected && rot?.solved) {
+        await page.waitForTimeout(1200).catch(() => {});
+      }
     } catch { /* ignore */ }
     if (await dmEditorVisible(page, true).catch(() => false)) { result = 'ready'; break; }
     if (await dmMessageButton(page).catch(() => null)) { result = 'loaded'; break; }
     if (await profileLooksLoaded(page).catch(() => false)) { result = 'loaded'; break; }
+    // 网关 403 空页面没有任何 DOM 与验证码脚本：关闭省流后先做一次首页预热再重新进主页，让前端能正常拉起验证弹层或主页
+    if (!triedSoftRecover) {
+      triedSoftRecover = true;
+      const bodyKids = await page.evaluate(() => document.body?.childElementCount || 0).catch(() => 0);
+      const bodyLen = await page.evaluate(() => (document.body?.innerText || '').trim().length).catch(() => 0);
+      if (bodyKids <= 1 && bodyLen < 120) {
+        log(`@${handle} 403 页面为空（子元素=${bodyKids}, 文本=${bodyLen}），尝试回首页预热后重进主页以唤起验证或页面`);
+        await page.goto('https://www.tiktok.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(2000).catch(() => {});
+        try {
+          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+          await solveRotateCaptchaIfPresent(page, { log });
+        } catch { /* ignore */ }
+        await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(2000).catch(() => {});
+        continue;
+      }
+    }
     await page.waitForTimeout(2000).catch(() => {});
   }
   if (paused) {
@@ -4351,6 +4382,10 @@ async function deleteTikTokVideo(accountId, options = {}) {
       log(`打开 Studio 列表 ${studioUrl}`);
       await page.goto(studioUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
       for (let i = 0; i < 20; i++) {
+        try {
+          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+          await solveRotateCaptchaIfPresent(page, { accountId });
+        } catch { /* ignore */ }
         const ready = await page.evaluate(() => {
           const t = (document.body?.innerText || '').slice(0, 8000);
           return /Posts\s*\(Created on\)|Search for post description|Views[\s\S]{0,40}Likes|Privacy/i.test(t)

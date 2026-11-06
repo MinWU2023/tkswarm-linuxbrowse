@@ -426,6 +426,10 @@ async function runSyncFans(accountId, payload = {}) {
     const detectList = async (timeoutMs) => {
       const end = Date.now() + timeoutMs;
       while (Date.now() < end) {
+        try {
+          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+          await solveRotateCaptchaIfPresent(pg, { accountId: aid });
+        } catch { /* ignore */ }
         const hit = await pg.evaluate(({ sel, self }) => {
           const vis = (el) => {
             const r = el.getBoundingClientRect();
@@ -488,6 +492,10 @@ async function runSyncFans(accountId, payload = {}) {
     const users = [];
     const seen = new Set();
     for (let round = 0; round < 25 && users.length < maxPerRun; round += 1) {
+      try {
+        const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+        await solveRotateCaptchaIfPresent(connection.page, { accountId: aid });
+      } catch { /* ignore */ }
       const batch = await connection.page.evaluate(({ sel, self }) => {
         const out = [];
         // 只在列表弹窗内取，不碰页面其它区域

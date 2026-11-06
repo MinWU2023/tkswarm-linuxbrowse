@@ -369,6 +369,10 @@ async function countSearchUserSignals(page) {
 async function clickUsersTab(page) {
   await humanPause(600, 0.15);
   for (let round = 0; round < 4; round += 1) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     const tab = await firstVisible(page, SELECTORS.usersTab, 2500);
     if (tab) {
       await tab.click({ timeout: 5000 }).catch(() => tab.click({ force: true }).catch(() => {}));
@@ -595,6 +599,10 @@ async function scrollSearchResults(page, {
     'div[class*="DivSearchUserItemContainer"] a[href*="/@"]',
   ],
 } = {}) {
+  try {
+    const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   for (const sel of lastItemSelectors) {
     const lastItem = page.locator(sel).last();
     if (await lastItem.count().catch(() => 0)) {

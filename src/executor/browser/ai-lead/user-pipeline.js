@@ -370,6 +370,10 @@ async function collectUsersUntilExhausted(page, limits, {
   while (round < maxRounds && countCardQualified() < maxUsers) {
     round += 1;
     if (leadId) assertLeadActive(leadId);
+    try {
+      const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     const batch = await collectRawUsersFromPage(page);
     let newRaw = 0;
     for (const row of batch || []) {
@@ -465,13 +469,30 @@ async function collectUsersUntilExhausted(page, limits, {
 async function waitForUserResults(page, { timeoutMs = 35000 } = {}) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+      const rot = await solveRotateCaptchaIfPresent(page);
+      if (rot?.detected && rot?.solved) {
+        await humanPause(1000, 0.15);
+      }
+    } catch { /* ignore */ }
     const n = await countSearchUserSignals(page);
     if (n >= 1) return true;
     const blocked = await page.evaluate(() => {
       const t = (document.body?.innerText || '').slice(0, 4000);
       return /verify you.?re (a )?human|security check|captcha|something went wrong|unusual traffic|登录|log in to tiktok/i.test(t);
     }).catch(() => false);
-    if (blocked) return false;
+    if (blocked) {
+      try {
+        const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+        const rot2 = await solveRotateCaptchaIfPresent(page);
+        if (rot2?.detected && rot2?.solved) {
+          await humanPause(1000, 0.15);
+          continue;
+        }
+      } catch { /* ignore */ }
+      return false;
+    }
     await dismissSearchOverlays(page);
     await humanPause(900, 0.2);
   }
@@ -486,6 +507,10 @@ async function scrapeProfileStats(page, username) {
     afterMs: 4500,
   });
   await humanPause(1500, 0.15);
+  try {
+    const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
 
   const stats = await page.evaluate(({ parseFnSource, pickFnSource }) => {
     const parseMetricCount = eval(`(${parseFnSource})`);
@@ -729,6 +754,10 @@ async function scrapeProfileVideos(page, creatorUsername, minViews) {
   const seen = new Set();
   const maxRounds = 6;
   for (let round = 0; round < maxRounds; round += 1) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     const batch = await collectProfileVideoRows(page, minViews);
     for (const v of batch) {
       const key = String(v.videoUrl || '').split('?')[0];
@@ -926,6 +955,10 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
 
     const maxRounds = targets.size > 6 ? 14 : 10;
     for (let round = 0; round < maxRounds; round += 1) {
+      try {
+        const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+        await solveRotateCaptchaIfPresent(page);
+      } catch { /* ignore */ }
       mergeApi();
       mergeDom(await collectProfileVideoRows(page, 0));
       const matchedTargets = targets.size
@@ -995,6 +1028,10 @@ async function isVideoBrowseOpen(page, videoId = '') {
 
 async function waitForVideoBrowseOpen(page, videoId, rounds = 10) {
   for (let i = 0; i < rounds; i += 1) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     if (await isVideoBrowseOpen(page, videoId)) return true;
     await humanPause(i === 0 ? 1200 : 900, 0.12);
   }
@@ -1070,6 +1107,10 @@ async function openVideoViaProfileClick(pageOrConn, videoUrl, creatorUsername) {
 }
 
 async function ensureCommentPanelOpen(page) {
+  try {
+    const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
   const ready = await firstVisible(page, SELECTORS.commentPanelReady, 2500);
   if (ready) return true;
 
@@ -1086,6 +1127,11 @@ async function ensureCommentPanelOpen(page) {
     }
   }
 
+  try {
+    const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+    await solveRotateCaptchaIfPresent(page);
+  } catch { /* ignore */ }
+
   // 空白侧栏时再点一次评论图标
   let ok = await firstVisible(page, SELECTORS.commentPanelReady, 6000);
   if (!ok) {
@@ -1093,6 +1139,10 @@ async function ensureCommentPanelOpen(page) {
     if (again) {
       await again.click({ force: true }).catch(() => {});
       await humanPause(1500, 0.2);
+      try {
+        const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+        await solveRotateCaptchaIfPresent(page);
+      } catch { /* ignore */ }
       ok = await firstVisible(page, SELECTORS.commentPanelReady, 5000);
     }
   }
@@ -1296,6 +1346,10 @@ async function scrapeVideoComments(pageOrConn, videoUrl, creatorUsername, option
   const seen = new Set();
 
   for (let round = 0; round < MAX_COMMENT_ROUNDS; round += 1) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('../nocaptchaai');
+      await solveRotateCaptchaIfPresent(page);
+    } catch { /* ignore */ }
     const batch = await page.evaluate((author) => {
       const out = [];
       const seenLocal = new Set();

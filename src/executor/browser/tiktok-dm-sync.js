@@ -409,11 +409,19 @@ async function fetchInboxViaBit(accountId, opts = {}) {
     }
 
     for (let i = 0; i < Math.min(conversations.length, maxConversations); i += 1) {
+      try {
+        const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+        await solveRotateCaptchaIfPresent(connection.page, { accountId });
+      } catch { /* ignore */ }
       const conv = conversations[i];
       const beforeCount = captured.length;
       const opened = await openConversationInList(connection.page, conv);
       if (!opened) continue;
       await connection.page.waitForTimeout(1200);
+      try {
+        const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+        await solveRotateCaptchaIfPresent(connection.page, { accountId });
+      } catch { /* ignore */ }
       for (let j = beforeCount; j < captured.length; j += 1) {
         const msgs = normalizeMessagesPayload(captured[j].data);
         if (msgs.length) conv.messages = mergeMessages(conv.messages || [], msgs);

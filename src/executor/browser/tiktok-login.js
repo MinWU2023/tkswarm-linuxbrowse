@@ -898,6 +898,10 @@ async function dismissLoginOverlay(page) {
 
 async function openEmailCredentialForm(page, accountId, proxyHint = '') {
   await assertPageNetworkOk(page, { accountId, proxyHint });
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page, { accountId });
+  } catch { /* ignore */ }
   if (await hasCredentialForm(page)) return true;
 
   // 首页弹层也带 “Log in to TikTok”，会被当成 hub；必须先清罩再硬跳独立邮箱登录页
@@ -908,6 +912,10 @@ async function openEmailCredentialForm(page, accountId, proxyHint = '') {
     await safeLoginGoto(page, 'https://www.tiktok.com/login/phone-or-email/email', { accountId, proxyHint });
     await page.waitForTimeout(1000);
     await dismissLoginOverlay(page);
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page, { accountId });
+    } catch { /* ignore */ }
   }
   if (await hasCredentialForm(page)) return true;
 
@@ -916,6 +924,10 @@ async function openEmailCredentialForm(page, accountId, proxyHint = '') {
     liveLog(`账号 #${accountId}：点击「手机 / 邮箱 / 用户名」`, 'info', { accountId });
     const clicked = await clickPhoneEmailUsernameEntry(page);
     if (clicked) await page.waitForTimeout(1200);
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page, { accountId });
+    } catch { /* ignore */ }
   }
   await assertPageNetworkOk(page, { accountId, proxyHint });
   if (await hasCredentialForm(page)) return true;
@@ -933,6 +945,10 @@ async function openEmailCredentialForm(page, accountId, proxyHint = '') {
   await dismissLoginOverlay(page);
   await safeLoginGoto(page, 'https://www.tiktok.com/login/phone-or-email/email', { accountId, proxyHint });
   await page.waitForTimeout(1200);
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page, { accountId });
+  } catch { /* ignore */ }
   // 输入框偶发晚挂载
   for (let i = 0; i < 8 && !(await hasCredentialForm(page)); i += 1) {
     await page.waitForTimeout(400);
@@ -1894,11 +1910,37 @@ async function runLoginAssist(accountId, {
     });
     if (clickRes.clicked) {
       submitted = true;
+      let captchaStrike = 0;
+      let resubmitAfterCaptcha = false;
       for (let i = 0; i < 80; i += 1) {
         assertNotCancelled(run);
         await page.waitForTimeout(500);
         if (await findAttemptLimitMessage(page)) break;
-        if (await hasCaptcha()) { captcha = true; break; }
+        const solvedAtBefore = Number(page.__tkNoCaptchaLastSolvedAt || 0);
+        const stillBlocked = await hasCaptcha();
+        const solvedAtAfter = Number(page.__tkNoCaptchaLastSolvedAt || 0);
+        if (solvedAtAfter > solvedAtBefore && !resubmitAfterCaptcha) {
+          resubmitAfterCaptcha = true;
+          await page.waitForTimeout(900).catch(() => {});
+          // 旋转验证通过后，若仍停留在登录表单且未自动跳转，补点一次登录提交按钮
+          if (await hasCredentialForm(page).catch(() => false)) {
+            await clickLoginSubmitWhenEnabled(page, {
+              timeoutMs: 4000,
+              accountId,
+              username: account.username,
+              password,
+            }).catch(() => {});
+          }
+        }
+        if (stillBlocked) {
+          captchaStrike += 1;
+          if (captchaStrike >= 4) {
+            captcha = true;
+            break;
+          }
+        } else {
+          captchaStrike = 0;
+        }
         if (await isTwoStepVerificationPage(page)) {
           twoFactorRequired = true;
           if (totpSecret) {
