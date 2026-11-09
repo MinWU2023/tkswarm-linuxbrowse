@@ -2671,9 +2671,17 @@ async function dmEditorVisible(page, loose = false) {
   return page.locator('textarea, [contenteditable="true"]').first().isVisible().catch(() => false);
 }
 
+/** 左侧导航 / 顶栏 / 收件箱图标里的 "Messages" 不是资料页的私信按钮，点了会跳 /business-suite/messages 营销壳 */
+async function dmButtonInNav(loc) {
+  return loc.evaluate((el) => !!el.closest(
+    'nav, aside, header, [data-e2e="nav-messages"], [data-e2e="inbox-icon"], [data-e2e="inbox-bar"], [class*="DivSideNav"], [class*="SideNav"]'
+  )).catch(() => false);
+}
+
 async function dmMessageButton(page) {
-  const btn = page.getByRole('button', { name: /^(Message|Messages|Send message|私信|发私信|发消息)$/i }).first();
-  if (await btn.count().catch(() => 0) && await btn.isVisible().catch(() => false)) return btn;
+  // 只认单数 Message（资料页按钮）；不再匹配 Messages（左侧导航入口）
+  const btn = page.getByRole('button', { name: /^(Message|Send message|私信|发私信|发消息)$/i }).first();
+  if (await btn.count().catch(() => 0) && await btn.isVisible().catch(() => false) && !(await dmButtonInNav(btn))) return btn;
   // 兜底：按钮可能是链接或带 data-e2e 的元素
   const alt = page.locator([
     '[data-e2e="message-button"]',
@@ -2683,10 +2691,10 @@ async function dmMessageButton(page) {
     'a:text-is("Message")',
     'a:text-is("私信")',
     'a:text-is("发私信")',
-    'button[aria-label*="Message" i]',
-    'a[aria-label*="Message" i]',
+    'button[aria-label="Message" i]',
+    'a[aria-label="Message" i]',
   ].join(', ')).first();
-  if (await alt.count().catch(() => 0) && await alt.isVisible().catch(() => false)) return alt;
+  if (await alt.count().catch(() => 0) && await alt.isVisible().catch(() => false) && !(await dmButtonInNav(alt))) return alt;
   return null;
 }
 
@@ -2980,6 +2988,18 @@ async function openViaMessagesInbox(page, handle, log = () => {}) {
 
   await page.waitForTimeout(2000).catch(() => {});
   if (await dmPageLoadFailed(page)) return 'failed';
+
+  // /messages 会被 302 到 /business-suite/messages 营销壳（无会话列表、无输入框），在壳上滚动/搜索只是白等；
+  // 没有任何收件箱元素就直接放弃，让主流程回到「主页点 Message」路径
+  if (/business-suite/i.test(String(page.url() || ''))) {
+    const hasInbox = await page.locator(
+      '[data-e2e*="chat-list"], [data-e2e="message-input-area"], [class*="DivConversation"], [class*="conversation-item"]'
+    ).first().isVisible().catch(() => false);
+    if (!hasInbox) {
+      log('/messages 被重定向到 business-suite 营销壳（无会话列表），放弃收件箱路径');
+      return 'miss';
+    }
+  }
 
   // 1) 先在左侧会话列表查找是否已有 @handle 的会话项（支持滚动 3 屏）
   for (let scrollRound = 0; scrollRound < 3; scrollRound += 1) {
