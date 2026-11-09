@@ -2989,15 +2989,42 @@ async function openViaMessagesInbox(page, handle, log = () => {}) {
   await page.waitForTimeout(2000).catch(() => {});
   if (await dmPageLoadFailed(page)) return 'failed';
 
-  // /messages 会被 302 到 /business-suite/messages 营销壳（无会话列表、无输入框），在壳上滚动/搜索只是白等；
-  // 没有任何收件箱元素就直接放弃，让主流程回到「主页点 Message」路径
+  // business-suite/messages 是 TikTok 新版私信页（点资料页 Message 后会带 &u=<用户ID> 跳到这里），不是营销壳。
+  // 失败现场里它只渲染出页脚文字（脚本/接口被中断），所以：先等渲染；不行就临时关省流并刷新一次；仍无则放弃。
   if (/business-suite/i.test(String(page.url() || ''))) {
-    const hasInbox = await page.locator(
-      '[data-e2e*="chat-list"], [data-e2e="message-input-area"], [class*="DivConversation"], [class*="conversation-item"]'
-    ).first().isVisible().catch(() => false);
-    if (!hasInbox) {
-      log('/messages 被重定向到 business-suite 营销壳（无会话列表），放弃收件箱路径');
+    const inboxSel = '[data-e2e*="chat-list"], [data-e2e="message-input-area"], [class*="DivConversation"], [class*="conversation-item"]';
+    const waitInboxRendered = async (ms) => {
+      const until = Date.now() + ms;
+      while (Date.now() < until) {
+        if (await dmEditorVisible(page, true).catch(() => false)) return true;
+        if (await page.locator(inboxSel).first().isVisible().catch(() => false)) return true;
+        if (await dmPageLoadFailed(page)) return false;
+        await page.waitForTimeout(500).catch(() => {});
+      }
+      return false;
+    };
+    let rendered = await waitInboxRendered(12000);
+    if (!rendered) {
+      log('business-suite 私信页未渲染出会话/输入框，临时关闭省流并刷新一次');
+      let paused = false;
+      try {
+        await require('./save-traffic').pauseSaveTrafficForCaptcha(page);
+        paused = true;
+      } catch { /* ignore */ }
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      rendered = await waitInboxRendered(15000);
+      if (paused) {
+        try { await require('./save-traffic').resumeSaveTrafficAfterCaptcha(page); } catch { /* ignore */ }
+      }
+    }
+    if (!rendered) {
+      log('business-suite 私信页刷新后仍未渲染，放弃收件箱路径');
       return 'miss';
+    }
+    // 带 u=<用户ID> 的页面已直接指向目标会话，输入框出现即可
+    if (/[?&]u=\d+/.test(String(page.url() || '')) && await dmEditorVisible(page, true).catch(() => false)) {
+      log(`已通过 business-suite 私信页打开 @${cleanHandle} 的会话`);
+      return 'ready';
     }
   }
 
