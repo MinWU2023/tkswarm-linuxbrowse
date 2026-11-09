@@ -540,7 +540,16 @@ async function inspectRotateCaptchaInContext(target) {
 
     if (!outerImg || !innerImg) {
       if (hasRotateHint) {
-        return { detected: false, loading: true, reason: 'captcha_container_images_loading' };
+        const failedImg = Array.from(root.querySelectorAll('img')).some(
+          (img) => img.complete === true && img.naturalWidth === 0
+        );
+        const widgetErr = /something went wrong|couldn'?t load|network error|try again|刷新|重试/i.test(rootText);
+        return {
+          detected: false,
+          loading: true,
+          failedLoad: Boolean(failedImg || widgetErr),
+          reason: widgetErr ? 'captcha_widget_error' : 'captcha_container_images_loading',
+        };
       }
       return { detected: false };
     }
@@ -549,7 +558,14 @@ async function inspectRotateCaptchaInContext(target) {
       (outerImg.complete === false || innerImg.complete === false)
       || (outerImg.naturalWidth === 0 || innerImg.naturalWidth === 0)
     ) {
-      return { detected: false, loading: true, reason: 'captcha_images_incomplete' };
+      const failedLoad = (outerImg.complete === true && outerImg.naturalWidth === 0)
+        || (innerImg.complete === true && innerImg.naturalWidth === 0);
+      return {
+        detected: false,
+        loading: true,
+        failedLoad,
+        reason: failedLoad ? 'captcha_images_broken' : 'captcha_images_incomplete',
+      };
     }
 
     const handleSelectors = [
@@ -851,18 +867,62 @@ async function solveRotateAngleByLocalCanvas(target, {
       const SIZE = 320;
       const HALF = SIZE / 2;
 
+      // 计算图像真实非空白包围盒中心（防止 PNG 透明边距不对称导致裁剪偏心）
+      const findOpaqueCircleCenter = (img) => {
+        const w = img.naturalWidth || SIZE;
+        const h = img.naturalHeight || SIZE;
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let minX = w; let maxX = -1; let minY = h; let maxY = -1;
+        let hasAlphaHole = false;
+        for (let y = 0; y < h; y += 1) {
+          for (let x = 0; x < w; x += 1) {
+            const a = data[(y * w + x) * 4 + 3];
+            if (a < 250) hasAlphaHole = true;
+            if (a > 24) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (hasAlphaHole && maxX > minX + 10 && maxY > minY + 10) {
+          return {
+            cx: (minX + maxX + 1) / 2,
+            cy: (minY + maxY + 1) / 2,
+            span: Math.max(maxX - minX + 1, maxY - minY + 1),
+            w,
+            h,
+          };
+        }
+        return { cx: w / 2, cy: h / 2, span: Math.max(w, h), w, h };
+      };
+
+      const oBox = findOpaqueCircleCenter(outerImg);
+      const iBox = findOpaqueCircleCenter(innerImg);
+
+      // 外图居中偏移补偿（使外圆质心严格落在 HALF, HALF）
+      const oScale = SIZE / (outerImg.naturalWidth || SIZE);
+      const oShiftX = HALF - oBox.cx * oScale;
+      const oShiftY = HALF - oBox.cy * oScale;
+
       const cOuter = document.createElement('canvas');
       cOuter.width = SIZE;
       cOuter.height = SIZE;
       const ctxOuter = cOuter.getContext('2d', { willReadFrequently: true });
       ctxOuter.clearRect(0, 0, SIZE, SIZE);
-      ctxOuter.drawImage(outerImg, 0, 0, SIZE, SIZE);
+      ctxOuter.drawImage(outerImg, oShiftX, oShiftY, SIZE, SIZE);
       const outerPixels = ctxOuter.getImageData(0, 0, SIZE, SIZE).data;
 
       // 计算内图相对于外图的绘制尺寸：
       // 1) 若页面 DOM 上内外图尺寸有显著比例（如内圆 128px / 外圆 210px），按 DOM 比例居中绘制；
       // 2) 否则若 naturalWidth 有显著比例，按 naturalWidth 比例；
-      // 3) 若两张都是同尺寸透明底图，则 1:1 绘制。
+      // 3) 若两张都是同尺寸透明底图，则 1:1 绘制（再结合中心探测微调）。
       const natRatio = (outerImg.naturalWidth > 0 && innerImg.naturalWidth > 0)
         ? (innerImg.naturalWidth / outerImg.naturalWidth)
         : 1;
@@ -871,14 +931,16 @@ async function solveRotateAngleByLocalCanvas(target, {
         : ((natRatio > 0.25 && natRatio < 0.96) ? natRatio : 1);
 
       const innerDrawSize = SIZE * scaleRatio;
-      const innerOffset = (SIZE - innerDrawSize) / 2;
+      const iScale = innerDrawSize / (innerImg.naturalWidth || SIZE);
+      const innerOffsetX = HALF - iBox.cx * iScale;
+      const innerOffsetY = HALF - iBox.cy * iScale;
 
       const cInner = document.createElement('canvas');
       cInner.width = SIZE;
       cInner.height = SIZE;
       const ctxInner = cInner.getContext('2d', { willReadFrequently: true });
       ctxInner.clearRect(0, 0, SIZE, SIZE);
-      ctxInner.drawImage(innerImg, innerOffset, innerOffset, innerDrawSize, innerDrawSize);
+      ctxInner.drawImage(innerImg, innerOffsetX, innerOffsetY, innerDrawSize, innerDrawSize);
       const innerPixels = ctxInner.getImageData(0, 0, SIZE, SIZE).data;
 
       // 双线性插值读取像素 (R, G, B, A, 灰度 L)
@@ -905,61 +967,72 @@ async function solveRotateAngleByLocalCanvas(target, {
         return { r, g, b, a, l };
       };
 
-      // 自动探测同心圆交界半径 R_seam
-      const detectSeamRadius = () => {
-        const dirs = 36;
-        const radii = [];
-        const maxSearchR = Math.min(HALF - 6, Math.round(innerDrawSize / 2) + 4);
-        const minSearchR = Math.max(28, Math.round(SIZE * 0.16));
+      // 自动探测同心圆交界半径（同时独立探测内圆外沿 R_in 与外环内孔 R_out，彻底规避 DOM/CSS 边框误差导致的采样半径偏离）
+      const detectSeamRadii = () => {
+        const dirs = 48;
+        const inRadii = [];
+        const outRadii = [];
+        const maxSearchR = Math.min(HALF - 5, Math.round(SIZE * 0.48));
+        const minSearchR = Math.max(24, Math.round(SIZE * 0.14));
 
         for (let d = 0; d < dirs; d += 1) {
           const rad = (d * 2 * Math.PI) / dirs;
           const cos = Math.cos(rad);
           const sin = Math.sin(rad);
 
-          // 优先找内圆从不透明变为透明（或纯白/纯黑背景）的跳变半径
-          let foundR = 0;
-          for (let r = maxSearchR; r >= minSearchR; r -= 1) {
+          // 1) 探测内圆外边界：从大到小找首个不透明像素（alpha > 180 且外侧 3px 透明）
+          let rIn = 0;
+          for (let r = Math.min(maxSearchR, Math.round(innerDrawSize / 2) + 8); r >= minSearchR; r -= 1) {
             const pIn = samplePixel(innerPixels, HALF + r * cos, HALF + r * sin);
             const pOut = samplePixel(innerPixels, HALF + (r + 3) * cos, HALF + (r + 3) * sin);
-            if (pIn.a > 200 && pOut.a < 90) {
-              foundR = r;
+            if (pIn.a > 190 && pOut.a < 80) {
+              rIn = r;
               break;
             }
           }
-          // 若内图无透明通道（例如方形图被 CSS border-radius 裁圆），检测外图中心透明/纯色孔洞边界
-          if (!foundR) {
-            for (let r = minSearchR; r <= maxSearchR; r += 1) {
-              const pHole = samplePixel(outerPixels, HALF + (r - 3) * cos, HALF + (r - 3) * sin);
-              const pRing = samplePixel(outerPixels, HALF + (r + 2) * cos, HALF + (r + 2) * sin);
-              if (pHole.a < 90 && pRing.a > 200) {
-                foundR = r;
-                break;
-              }
+          if (rIn >= minSearchR) inRadii.push(rIn);
+
+          // 2) 探测外环内孔边界：从小到大找首个从透明跳变为不透明的半径
+          let rOut = 0;
+          for (let r = minSearchR; r <= maxSearchR; r += 1) {
+            const pHole = samplePixel(outerPixels, HALF + (r - 3) * cos, HALF + (r - 3) * sin);
+            const pRing = samplePixel(outerPixels, HALF + (r + 2) * cos, HALF + (r + 2) * sin);
+            if (pHole.a < 80 && pRing.a > 190) {
+              rOut = r;
+              break;
             }
           }
-          if (foundR >= minSearchR && foundR <= maxSearchR) {
-            radii.push(foundR);
-          }
+          if (rOut >= minSearchR) outRadii.push(rOut);
         }
 
-        if (radii.length >= 8) {
-          radii.sort((a, b) => a - b);
-          return radii[Math.floor(radii.length / 2)];
+        const median = (arr) => {
+          if (!arr.length) return 0;
+          const s = [...arr].sort((a, b) => a - b);
+          return s[Math.floor(s.length / 2)];
+        };
+
+        let rInFinal = inRadii.length >= 10 ? median(inRadii) : 0;
+        let rOutFinal = outRadii.length >= 10 ? median(outRadii) : 0;
+
+        // 若内图无 alpha 透明边（例如被 CSS border-radius: 50% 裁圆的方形图）：内半径 = innerDrawSize / 2
+        if (!rInFinal) {
+          rInFinal = scaleRatio < 0.95 ? Math.round(innerDrawSize / 2) : Math.round(SIZE * 0.305);
         }
-        if (scaleRatio < 0.95) {
-          return Math.round(innerDrawSize / 2);
+        // 若外环无中心透明孔（极少见）：取与内圆同半径
+        if (!rOutFinal) {
+          rOutFinal = rInFinal;
         }
-        // 兜底：扫描径向方差跳变点或取 TikTok 标准比例 (~0.305 * SIZE = 98px)
-        return Math.round(SIZE * 0.305);
+        return { rIn: rInFinal, rOut: rOutFinal };
       };
 
-      const seamR = detectSeamRadius();
+      const { rIn: seamInR, rOut: seamOutR } = detectSeamRadii();
+      const seamR = Math.round((seamInR + seamOutR) * 0.5);
 
-      // 在交界线内外两侧各取 3 条紧邻同心采样环（避开最边缘 1.5px 抗锯齿伪影）
-      const innerBands = [Math.max(16, seamR - 2.2), Math.max(15, seamR - 3.8), Math.max(14, seamR - 5.5)];
-      const outerBands = [Math.min(HALF - 3, seamR + 2.2), Math.min(HALF - 2, seamR + 3.8), Math.min(HALF - 1, seamR + 5.5)];
-      const bandWeights = [0.52, 0.31, 0.17];
+      // 分别在内圆真实外沿内侧（seamInR - δ）与外环真实内孔外侧（seamOutR + δ）采样，
+      // 避开交界 2px 的抗锯齿混合像素，且彻底消除两张图存在微弱尺寸/padding 差异时的径向错位！
+      const innerBands = [Math.max(14, seamInR - 2.0), Math.max(13, seamInR - 3.6), Math.max(12, seamInR - 5.4), Math.max(11, seamInR - 7.5)];
+      const outerBands = [Math.min(HALF - 4, seamOutR + 2.0), Math.min(HALF - 3, seamOutR + 3.6), Math.min(HALF - 2, seamOutR + 5.4), Math.min(HALF - 1, seamOutR + 7.5)];
+      const bandWeights = [0.42, 0.28, 0.18, 0.12];
 
       const STEPS = 720; // 0.5° 分辨率
       const inR = new Float32Array(STEPS);
@@ -990,45 +1063,85 @@ async function solveRotateAngleByLocalCanvas(target, {
         outR[i] = or; outG[i] = og; outB[i] = ob; outL[i] = ol;
       }
 
-      // 计算环向切线梯度（抗内外环整体亮度偏移）
+      // 局部均值滤波平滑采样序列，抑制 JPEG 块效应与单像素噪点，再计算环向切线梯度
+      const smoothCircular = (arr) => {
+        const out = new Float32Array(STEPS);
+        for (let i = 0; i < STEPS; i += 1) {
+          const p = (i - 1 + STEPS) % STEPS;
+          const n = (i + 1) % STEPS;
+          out[i] = arr[p] * 0.25 + arr[i] * 0.5 + arr[n] * 0.25;
+        }
+        return out;
+      };
+      const sInR = smoothCircular(inR);
+      const sInG = smoothCircular(inG);
+      const sInB = smoothCircular(inB);
+      const sInL = smoothCircular(inL);
+      const sOutR = smoothCircular(outR);
+      const sOutG = smoothCircular(outG);
+      const sOutB = smoothCircular(outB);
+      const sOutL = smoothCircular(outL);
+
+      // 计算环向切线梯度（三通道合并 + 亮度，抗内外环整体亮度偏移及彩色纯色边缘）
       const inGrad = new Float32Array(STEPS);
       const outGrad = new Float32Array(STEPS);
       const inGradR = new Float32Array(STEPS);
       const outGradR = new Float32Array(STEPS);
+      const inGradG = new Float32Array(STEPS);
+      const outGradG = new Float32Array(STEPS);
+      const inGradB = new Float32Array(STEPS);
+      const outGradB = new Float32Array(STEPS);
       let inGradNorm = 0;
       let outGradNorm = 0;
 
       for (let i = 0; i < STEPS; i += 1) {
         const prev = (i - 2 + STEPS) % STEPS;
         const next = (i + 2) % STEPS;
-        const ig = (inL[next] - inL[prev]) * 0.5;
-        const og = (outL[next] - outL[prev]) * 0.5;
+        const ig = (sInL[next] - sInL[prev]) * 0.5;
+        const og = (sOutL[next] - sOutL[prev]) * 0.5;
         inGrad[i] = ig;
         outGrad[i] = og;
-        inGradR[i] = (inR[next] - inR[prev]) * 0.5;
-        outGradR[i] = (outR[next] - outR[prev]) * 0.5;
+        inGradR[i] = (sInR[next] - sInR[prev]) * 0.5;
+        outGradR[i] = (sOutR[next] - sOutR[prev]) * 0.5;
+        inGradG[i] = (sInG[next] - sInG[prev]) * 0.5;
+        outGradG[i] = (sOutG[next] - sOutG[prev]) * 0.5;
+        inGradB[i] = (sInB[next] - sInB[prev]) * 0.5;
+        outGradB[i] = (sOutB[next] - sOutB[prev]) * 0.5;
         inGradNorm += ig * ig;
         outGradNorm += og * og;
       }
       const gradDenom = Math.sqrt(inGradNorm * outGradNorm) || 1;
 
-      // 去均值颜色序列（用于 RGB 零均值归一化互相关 ZNCC）
+      // 去均值颜色序列（用于亮度 + RGB 三通道独立 ZNCC，避免同亮度不同颜色的色块误匹配）
       let meanInL = 0; let meanOutL = 0;
+      let meanInR = 0; let meanOutR = 0;
+      let meanInG = 0; let meanOutG = 0;
+      let meanInB = 0; let meanOutB = 0;
       for (let i = 0; i < STEPS; i += 1) {
-        meanInL += inL[i];
-        meanOutL += outL[i];
+        meanInL += sInL[i]; meanOutL += sOutL[i];
+        meanInR += sInR[i]; meanOutR += sOutR[i];
+        meanInG += sInG[i]; meanOutG += sOutG[i];
+        meanInB += sInB[i]; meanOutB += sOutB[i];
       }
-      meanInL /= STEPS;
-      meanOutL /= STEPS;
+      meanInL /= STEPS; meanOutL /= STEPS;
+      meanInR /= STEPS; meanOutR /= STEPS;
+      meanInG /= STEPS; meanOutG /= STEPS;
+      meanInB /= STEPS; meanOutB /= STEPS;
 
       let varInL = 0; let varOutL = 0;
+      let varInRgb = 0; let varOutRgb = 0;
       for (let i = 0; i < STEPS; i += 1) {
-        const di = inL[i] - meanInL;
-        const do0 = outL[i] - meanOutL;
+        const di = sInL[i] - meanInL;
+        const do0 = sOutL[i] - meanOutL;
         varInL += di * di;
         varOutL += do0 * do0;
+        const dir = sInR[i] - meanInR; const dig = sInG[i] - meanInG; const dib = sInB[i] - meanInB;
+        const dor = sOutR[i] - meanOutR; const dog = sOutG[i] - meanOutG; const dob = sOutB[i] - meanOutB;
+        varInRgb += dir * dir + dig * dig + dib * dib;
+        varOutRgb += dor * dor + dog * dog + dob * dob;
       }
       const lumaDenom = Math.sqrt(varInL * varOutL) || 1;
+      const rgbDenom = Math.sqrt(varInRgb * varOutRgb) || 1;
 
       // 遍历全部旋转步长 s ∈ [0, STEPS)
       // 定义：当内圆顺时针旋转 angleDeg (= s * 0.5°) 时，原先在 (i - s) 处的内圆像素转到了位置 i，与外环位置 i 对齐
@@ -1042,17 +1155,23 @@ async function solveRotateAngleByLocalCanvas(target, {
         let sadSum = 0;
         let gradDot = 0;
         let lumaDot = 0;
+        let rgbDot = 0;
 
         for (let i = 0; i < STEPS; i += 1) {
           const j = (i - s + STEPS) % STEPS;
-          const dr = Math.abs(outR[i] - inR[j]);
-          const dg = Math.abs(outG[i] - inG[j]);
-          const db = Math.abs(outB[i] - inB[j]);
-          const dgrad = Math.abs(outGrad[i] - inGrad[j]) + 0.5 * Math.abs(outGradR[i] - inGradR[j]);
-          sadSum += (dr + dg + db) * 0.3333 + dgrad * 0.85;
+          const dr = Math.abs(sOutR[i] - sInR[j]);
+          const dg = Math.abs(sOutG[i] - sInG[j]);
+          const db = Math.abs(sOutB[i] - sInB[j]);
+          const dgrad = Math.abs(outGrad[i] - inGrad[j])
+            + 0.35 * (Math.abs(outGradR[i] - inGradR[j]) + Math.abs(outGradG[i] - inGradG[j]) + Math.abs(outGradB[i] - inGradB[j]));
+          // 使用平方根阻尼抑制个别坏点/压缩毛刺，同时保留边缘匹配敏感度
+          sadSum += (dr + dg + db) * 0.3333 + dgrad * 0.72;
 
           gradDot += outGrad[i] * inGrad[j];
-          lumaDot += (outL[i] - meanOutL) * (inL[j] - meanInL);
+          lumaDot += (sOutL[i] - meanOutL) * (sInL[j] - meanInL);
+          rgbDot += (sOutR[i] - meanOutR) * (sInR[j] - meanInR)
+            + (sOutG[i] - meanOutG) * (sInG[j] - meanInG)
+            + (sOutB[i] - meanOutB) * (sInB[j] - meanInB);
         }
 
         const sad = sadSum / STEPS;
@@ -1062,20 +1181,21 @@ async function solveRotateAngleByLocalCanvas(target, {
 
         const gradNcc = gradDot / gradDenom;
         const lumaNcc = lumaDot / lumaDenom;
-        nccArr[s] = gradNcc * 0.6 + lumaNcc * 0.4;
+        const rgbNcc = rgbDot / rgbDenom;
+        nccArr[s] = gradNcc * 0.45 + rgbNcc * 0.35 + lumaNcc * 0.20;
       }
 
       const sadSpan = Math.max(1e-5, maxSad - minSad);
       let bestStep = 0;
       let bestScore = -Infinity;
 
-      // 跳过极小角度（< 10° 或 > 350°），因为旋转验证码初始偏角永远不会是 0°
-      const minValidStep = Math.round(10 * (STEPS / 360));
+      // 跳过极小角度（< 8° 或 > 352°），因为旋转验证码初始偏角永远不会几乎对齐
+      const minValidStep = Math.round(8 * (STEPS / 360));
       const maxValidStep = STEPS - minValidStep;
 
       for (let s = 0; s < STEPS; s += 1) {
         const normSadScore = 1 - (sadArr[s] - minSad) / sadSpan; // 越大越好 [0, 1]
-        const combined = normSadScore * 0.58 + nccArr[s] * 0.42;
+        const combined = normSadScore * 0.52 + nccArr[s] * 0.48;
         scores[s] = combined;
         if (s >= minValidStep && s <= maxValidStep && combined > bestScore) {
           bestScore = combined;
@@ -1095,6 +1215,24 @@ async function solveRotateAngleByLocalCanvas(target, {
         }
       }
 
+      // 从高分候选峰中做局部二次精化验证：在主峰 ±2°（±4步）内微调寻优
+      const refinePeak = (centerStep) => {
+        let bStep = centerStep;
+        let bScore = -Infinity;
+        for (let off = -4; off <= 4; off += 1) {
+          const idx = (centerStep + off + STEPS) % STEPS;
+          if (idx >= minValidStep && idx <= maxValidStep && scores[idx] > bScore) {
+            bScore = scores[idx];
+            bStep = idx;
+          }
+        }
+        return { step: bStep, score: bScore };
+      };
+
+      const p1 = refinePeak(bestStep);
+      bestStep = p1.step;
+      bestScore = p1.score;
+
       // 抛物线三点亚像素插值精化角度
       const sPrev = scores[(bestStep - 1 + STEPS) % STEPS];
       const sCurr = scores[bestStep];
@@ -1112,6 +1250,8 @@ async function solveRotateAngleByLocalCanvas(target, {
         secondAngle: Number(secondAngle.toFixed(2)),
         confidence: Number(confidence.toFixed(3)),
         seamRadius: seamR,
+        seamInR,
+        seamOutR,
         elapsedMs: Math.round(performance.now() - t0),
       };
     } catch (err) {
@@ -1199,61 +1339,84 @@ async function dragSliderWithAngularCalibration(page, target, info, targetAngleD
   await page.mouse.down();
   await sleep(55 + Math.floor(Math.random() * 65));
 
-  // 先试探性滑动一小段（约 24px），实测 DOM 中内外环每像素真实相对旋转角速度
-  const probePx = Math.min(28, Math.max(14, distancePx * 0.35));
-  const probeSteps = 6;
-  for (let i = 1; i <= probeSteps; i += 1) {
-    const p = i / probeSteps;
-    await page.mouse.move(
-      startX + probePx * p,
-      startY + (Math.random() * 1.6 - 0.8)
-    );
-    await sleep(10);
-  }
-  await sleep(35);
-
-  const measuredDeg = await readRelativeRotationDeg();
-  if (measuredDeg != null && measuredDeg > 2.5 && measuredDeg < 160 && probePx >= 12) {
-    const degPerPx = measuredDeg / probePx;
-    if (degPerPx > 0.35 && degPerPx < 4.5) {
-      distancePx = Math.max(4, Math.min(maxSlide, targetAngleDeg / degPerPx));
-    }
-  }
-
-  const remainingPx = distancePx - probePx;
-  const steps = Math.max(14, Math.min(40, Math.round(Math.abs(remainingPx) / 4)));
-  const overshoot = distancePx > 28 && distancePx < maxSlide - 6 ? (Math.random() * 2.6 + 1.0) : 0;
-
-  for (let i = 1; i <= steps; i += 1) {
-    const progress = i / steps;
-    const eased = 1 - Math.pow(1 - progress, 3);
-    const curX = startX + probePx + (remainingPx + overshoot) * eased;
-    const curY = startY + Math.sin(progress * Math.PI) * (Math.random() * 2.2 - 1.1);
-    await page.mouse.move(curX, curY);
-    await sleep(8 + Math.floor(Math.random() * 12));
-  }
-
-  const targetX = startX + distancePx;
-  if (overshoot > 0) {
-    await sleep(65 + Math.floor(Math.random() * 55));
-    await page.mouse.move(targetX, startY + (Math.random() * 1.4 - 0.7), { steps: 4 });
-  }
-
-  // 松手前做一次微调闭环校准（若与目标角偏差 > 1.8°，顺滑微调 1~2 步）
-  const finalDeg = await readRelativeRotationDeg();
-  if (finalDeg != null && finalDeg > 3 && distancePx > 10) {
-    let errDeg = targetAngleDeg - finalDeg;
-    if (errDeg > 180) errDeg -= 360;
-    if (errDeg < -180) errDeg += 360;
-    if (Math.abs(errDeg) >= 1.5 && Math.abs(errDeg) <= 35) {
-      const degPerPx = finalDeg / distancePx;
-      if (degPerPx > 0.35 && degPerPx < 4.5) {
-        const fineX = startX + Math.max(4, Math.min(maxSlide, distancePx + errDeg / degPerPx));
-        await page.mouse.move(fineX, startY, { steps: 3 });
-        await sleep(45);
+      // 自动探测旋转方向：极短试探性滑动后读取 DOM 中内圆与外环真实的增量旋转方向，
+      // 防止少数新弹窗出现反向旋转导致角度互补（360 - θ）失败，同时精确标定角速度 deg/px
+      const initRel = await readRelativeRotationDeg();
+      const probePx = Math.min(28, Math.max(14, distancePx * 0.35));
+      const probeSteps = 6;
+      for (let i = 1; i <= probeSteps; i += 1) {
+        const p = i / probeSteps;
+        await page.mouse.move(
+          startX + probePx * p,
+          startY + (Math.random() * 1.6 - 0.8)
+        );
+        await sleep(10);
       }
-    }
-  }
+      await sleep(35);
+
+      const measuredDegRaw = await readRelativeRotationDeg();
+      let effectiveTargetDeg = targetAngleDeg;
+      if (measuredDegRaw != null && probePx >= 12) {
+        let deltaDeg = initRel != null ? (measuredDegRaw - initRel) : measuredDegRaw;
+        // 规范化到 [-180, 180]
+        if (deltaDeg > 180) deltaDeg -= 360;
+        if (deltaDeg < -180) deltaDeg += 360;
+        // 若向右拖动滑块时相对角度是逆时针减小的（deltaDeg < -2°），说明需要对齐的角度应取互补角 (360 - targetAngleDeg)
+        if (deltaDeg < -2.5) {
+          effectiveTargetDeg = (360 - targetAngleDeg) % 360;
+        }
+        const absDelta = Math.abs(deltaDeg);
+        if (absDelta > 2.5 && absDelta < 160) {
+          const degPerPx = absDelta / probePx;
+          if (degPerPx > 0.35 && degPerPx < 4.5) {
+            distancePx = Math.max(4, Math.min(maxSlide, effectiveTargetDeg / degPerPx));
+          }
+        }
+      }
+
+      const remainingPx = distancePx - probePx;
+      const steps = Math.max(14, Math.min(40, Math.round(Math.abs(remainingPx) / 4)));
+      const overshoot = distancePx > 28 && distancePx < maxSlide - 6 ? (Math.random() * 2.6 + 1.0) : 0;
+
+      for (let i = 1; i <= steps; i += 1) {
+        const progress = i / steps;
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const curX = startX + probePx + (remainingPx + overshoot) * eased;
+        const curY = startY + Math.sin(progress * Math.PI) * (Math.random() * 2.2 - 1.1);
+        await page.mouse.move(curX, curY);
+        await sleep(8 + Math.floor(Math.random() * 12));
+      }
+
+      const targetX = startX + distancePx;
+      if (overshoot > 0) {
+        await sleep(65 + Math.floor(Math.random() * 55));
+        await page.mouse.move(targetX, startY + (Math.random() * 1.4 - 0.7), { steps: 4 });
+      }
+
+      // 松手前做闭环微调校准（最多 2 轮，确保实际旋转角度与目标角度偏差 < 0.9°）
+      for (let fineRound = 0; fineRound < 2; fineRound += 1) {
+        const curRel = await readRelativeRotationDeg();
+        if (curRel == null || distancePx <= 10) break;
+        let actualMoved = initRel != null ? (curRel - initRel) : curRel;
+        actualMoved = ((actualMoved % 360) + 360) % 360;
+        // 如果之前探测为反向，实际累积变化量用反方向衡量
+        if (effectiveTargetDeg !== targetAngleDeg) {
+          actualMoved = (360 - actualMoved) % 360;
+        }
+        const desiredMoved = effectiveTargetDeg !== targetAngleDeg ? effectiveTargetDeg : targetAngleDeg;
+        let errDeg = desiredMoved - actualMoved;
+        if (errDeg > 180) errDeg -= 360;
+        if (errDeg < -180) errDeg += 360;
+        if (Math.abs(errDeg) < 0.9 || Math.abs(errDeg) > 45) break;
+        const degPerPx = actualMoved > 3 ? (actualMoved / distancePx) : (360 / maxSlide);
+        if (degPerPx > 0.35 && degPerPx < 4.5) {
+          distancePx = Math.max(4, Math.min(maxSlide, distancePx + errDeg / degPerPx));
+          await page.mouse.move(startX + distancePx, startY, { steps: 3 });
+          await sleep(40);
+        } else {
+          break;
+        }
+      }
 
   await sleep(85 + Math.floor(Math.random() * 95));
   await page.mouse.up();
@@ -1306,6 +1469,7 @@ async function clickCaptchaRefresh(target) {
       '[id*="captcha_refresh" i]',
       '[class*="secsdk_captcha_refresh" i]',
       '[class*="captcha" i] [class*="refresh" i]',
+      '[class*="cap-" i] [class*="refresh" i]',
       'button[aria-label*="refresh" i]',
       'button[aria-label*="刷新" i]',
     ];
@@ -1313,6 +1477,20 @@ async function clickCaptchaRefresh(target) {
       const el = document.querySelector(sel);
       if (el && typeof el.click === 'function') {
         el.click();
+        return true;
+      }
+    }
+    const scopes = Array.from(document.querySelectorAll(
+      '#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="secsdk" i], .TUXModal, [role="dialog"]'
+    ));
+    for (const scope of scopes) {
+      const btns = Array.from(scope.querySelectorAll('button, [role="button"], a'));
+      const hit = btns.find((b) => {
+        const txt = String(b.innerText || b.getAttribute('aria-label') || '').trim();
+        return /^(Refresh|Try again|Retry|Reload|刷新|重试)$/i.test(txt);
+      });
+      if (hit && typeof hit.click === 'function') {
+        hit.click();
         return true;
       }
     }
@@ -1413,13 +1591,18 @@ async function solveRotateCaptchaIfPresent(page, {
 
     if (!firstCheck.detected && firstCheck.loading) {
       let refreshedWhileLoading = false;
+      if (firstCheck.failedLoad) {
+        refreshedWhileLoading = true;
+        await clickCaptchaRefresh(firstCheck.target || page).catch(() => {});
+        await sleep(650);
+      }
       const loadWaitStart = Date.now();
       const loadWaitEnd = loadWaitStart + 10000;
       while (Date.now() < loadWaitEnd) {
         await sleep(450);
         firstCheck = await detectRotateCaptcha(page);
         if (firstCheck.detected || !firstCheck.loading) break;
-        if (!refreshedWhileLoading && Date.now() - loadWaitStart > 3200) {
+        if ((!refreshedWhileLoading && Date.now() - loadWaitStart > 3200) || (firstCheck.failedLoad && !refreshedWhileLoading)) {
           refreshedWhileLoading = true;
           await clickCaptchaRefresh(firstCheck.target || page).catch(() => {});
         }
@@ -1505,13 +1688,71 @@ async function solveRotateCaptchaIfPresent(page, {
 
         const rawAngle = Number(sol.angle);
         const angle = ((rawAngle % 360) + 360) % 360;
+        const prevAngle = lastAngle;
         lastAngle = angle;
+
+        // 若页面上的图片初始状态非 0°（或上次拖动残留），计算相对目标还差的角度；
+        // canvas.drawImage 仅绘制原始图像不含 CSS transform，故这里必须扣除当前 DOM 相对偏移
+        const baseCssRelDeg = await (info.target || page).evaluate(({ oSrc, iSrc }) => {
+          const parseOwnDeg = (el) => {
+            if (!el) return null;
+            const inlineTf = String(el.style?.transform || '');
+            const mInline = inlineTf.match(/rotate\(([-\d.]+)deg\)/i);
+            if (mInline) return Number(mInline[1]) || 0;
+            const st = window.getComputedStyle?.(el);
+            const tf = String(st?.transform || '');
+            if (!tf || tf === 'none') return null;
+            const m = tf.match(/matrix\(([^)]+)\)/i);
+            if (!m) return null;
+            const parts = m[1].split(',').map((v) => Number(v.trim()));
+            if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+              if (Math.abs(parts[0] - 1) < 1e-4 && Math.abs(parts[1]) < 1e-4) return null;
+              let deg = Math.atan2(parts[1], parts[0]) * (180 / Math.PI);
+              if (deg < 0) deg += 360;
+              return deg;
+            }
+            return null;
+          };
+          const parseDeg = (el) => {
+            let cur = el;
+            for (let d = 0; d < 3 && cur && cur !== document.body; d += 1) {
+              const v = parseOwnDeg(cur);
+              if (v !== null) return v;
+              cur = cur.parentElement;
+            }
+            return 0;
+          };
+          const imgs = Array.from(document.querySelectorAll('img'));
+          const outer = imgs.find((im) => (im.currentSrc || im.src) === oSrc)
+            || document.querySelector('[data-e2e="captcha-whirl-outer"], img[class*="whirl-outer" i]');
+          const inner = imgs.find((im) => (im.currentSrc || im.src) === iSrc)
+            || document.querySelector('[data-e2e="captcha-whirl-inner"], img[class*="whirl-inner" i]');
+          if (!outer && !inner) return 0;
+          return ((parseDeg(inner) - parseDeg(outer)) % 360 + 360) % 360;
+        }, { oSrc: info.outerSrc || '', iSrc: info.innerSrc || '' }).catch(() => 0);
+
+        const effectiveAngle = ((angle - (Number(baseCssRelDeg) || 0)) % 360 + 360) % 360;
+
+        // 若同一张图连续尝试未通过（prevAngle === angle）且存在有效次峰、且置信度不算极高，则偶数次改试次优角提高兜底命中率
+        let chosenAngle = effectiveAngle > 3 ? effectiveAngle : angle;
+        if (
+          attempt >= 2
+          && prevAngle === angle
+          && sol.secondAngle != null
+          && Number(sol.confidence ?? 1) < 0.85
+          && Math.abs(((Number(sol.secondAngle) - angle + 540) % 360) - 180) > 15
+          && attempt % 2 === 0
+        ) {
+          const altEff = ((Number(sol.secondAngle) - (Number(baseCssRelDeg) || 0)) % 360 + 360) % 360;
+          chosenAngle = altEff > 3 ? altEff : Number(sol.secondAngle);
+          say(`同图上次主峰未过(置信度=${Number(sol.confidence ?? 0).toFixed(2)})，尝试次优峰角度=${Number(sol.secondAngle).toFixed(1)}°`);
+        }
 
         const usedDistancePx = await dragSliderWithAngularCalibration(
           page,
           info.target || page,
           info,
-          angle
+          chosenAngle
         );
 
         say(
@@ -1623,20 +1864,32 @@ function attachAutoRotateCaptchaWatcher(page, { accountId = 0, apiKey = '' } = {
     try {
       const url = String(resp.url?.() || '');
       if (!url) return;
+      const status = Number(resp.status?.() || 0);
       if (
-        /captcha|verify[-_]?center|secsdk|whirl|rotate[-_]?verify|rc-captcha|p\d+-captcha|p\d+-security/i.test(url)
-        && resp.status?.() === 200
+        /captcha|verify[-_]?center|verification|secsdk|security[-_]?check|whirl|rotate[-_]?verify|rc[-_]?captcha|rc[-_]?verification|p\d+-(?:rc-)?cap|p\d+-security|get_captcha|verify_captcha/i.test(url)
+        && (status === 0 || (status >= 200 && status < 400))
       ) {
         triggerCheck();
       }
     } catch { /* ignore */ }
   };
 
+  const onFrameNav = (frame) => {
+    try {
+      const fUrl = String(frame?.url?.() || '');
+      if (fUrl && /captcha|verify[-_]?center|verification|secsdk|whirl|rc[-_]?captcha|rc[-_]?verification/i.test(fUrl)) {
+        triggerCheck();
+      }
+    } catch { /* ignore */ }
+  };
+
   page.on?.('response', onResponse);
+  page.on?.('framenavigated', onFrameNav);
   page.once?.('close', () => {
     if (debounceTimer) clearTimeout(debounceTimer);
     if (retryTimer) clearTimeout(retryTimer);
     try { page.off?.('response', onResponse); } catch { /* ignore */ }
+    try { page.off?.('framenavigated', onFrameNav); } catch { /* ignore */ }
   });
 }
 

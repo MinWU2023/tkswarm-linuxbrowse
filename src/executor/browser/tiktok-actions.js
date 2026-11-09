@@ -2229,6 +2229,55 @@ async function clickPostButton(page, log = () => {}) {
   return false;
 }
 
+async function recoverPublishSomethingWentWrong(page, initialCheck, {
+  log = () => {},
+  allowReload = false,
+  reloadUrl = '',
+} = {}) {
+  let cur = initialCheck;
+  if (!cur?.blocked || !/something went wrong/i.test(String(cur.reason || ''))) {
+    return cur;
+  }
+  log(`检测到页面提示 "${cur.reason}"，尝试取消省流/刷新验证并重试恢复…`);
+  try {
+    const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
+    await pauseSaveTrafficForCaptcha(page);
+  } catch { /* ignore */ }
+
+  const clickedRetry = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
+    const hit = btns.find((b) => {
+      const txt = String(b.innerText || b.getAttribute('aria-label') || '').trim();
+      return /^(Refresh|Try again|Retry|Reload|刷新|重试)$/i.test(txt);
+    });
+    if (hit && typeof hit.click === 'function') {
+      hit.click();
+      return true;
+    }
+    return false;
+  }).catch(() => false);
+
+  await page.waitForTimeout(clickedRetry ? 1500 : 1200).catch(() => {});
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page, { log });
+  } catch { /* ignore */ }
+  cur = await inspectPage(page);
+  if (!cur.blocked) return cur;
+
+  if (allowReload && reloadUrl && /something went wrong/i.test(String(cur.reason || ''))) {
+    log(`"${cur.reason}" 仍存在，重载上传页再试一次…`);
+    await page.goto(reloadUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(2200).catch(() => {});
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page, { log });
+    } catch { /* ignore */ }
+    cur = await inspectPage(page);
+  }
+  return cur;
+}
+
 /**
  * After primary Post: hammer confirm dialogs, clear mask, retry Post if still on upload.
  */
@@ -2239,6 +2288,7 @@ async function drivePublishConfirmations(page, timeoutMs = 120000, log = () => {
   } catch { /* ignore */ }
   const end = Date.now() + timeoutMs;
   let postRetries = 0;
+  let somethingWrongRetries = 0;
   let postCaptchaSolvedRetries = 0;
   let lastSolvedStamp = Number(page.__tkNoCaptchaLastSolvedAt || 0);
   // 点击 Post 后先留出短暂窗口让可能弹出的旋转验证码或二次确认框挂载，避免瞬间 Escape 把弹框打成白屏
@@ -2316,20 +2366,24 @@ async function drivePublishConfirmations(page, timeoutMs = 120000, log = () => {
 
     const security = await inspectPage(page);
     if (security.blocked) {
-      // 若触发的是 something went wrong 且仍在上传页，先尝试解决可能刚弹出的旋转验证码并重试点击一次 Post，避免误挂起人工
-      if (/something went wrong/i.test(String(security.reason || '')) && /upload/i.test(url) && postRetries < 3) {
-        log(`页面提示 "${security.reason}"，尝试检测旋转验证码并重试点击发布…`);
-        await page.waitForTimeout(1200).catch(() => {});
-        try {
-          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
-          await solveRotateCaptchaIfPresent(page, { log });
-        } catch { /* ignore */ }
-        const retried = await clickPostButton(page, log);
-        if (retried) {
-          postRetries += 1;
-          await page.waitForTimeout(2000).catch(() => {});
+      // 若触发的是 something went wrong 且仍在上传页，先尝试刷新验证弹框/解决旋转验证码并重试点击发布，避免误挂起人工
+      if (/something went wrong/i.test(String(security.reason || '')) && /upload/i.test(url) && somethingWrongRetries < 3) {
+        somethingWrongRetries += 1;
+        log(`页面提示 "${security.reason}"（第 ${somethingWrongRetries}/3 次恢复），尝试刷新验证弹框并重试发布…`);
+        const rec = await recoverPublishSomethingWentWrong(page, security, { log, allowReload: false });
+        if (!rec.blocked) {
+          await page.waitForTimeout(1000).catch(() => {});
           continue;
         }
+        if (!(await hasActiveOrLoadingCaptchaModal(page))) {
+          const retried = await clickPostButton(page, log);
+          if (retried) {
+            await page.waitForTimeout(2000).catch(() => {});
+            continue;
+          }
+        }
+        await page.waitForTimeout(1200).catch(() => {});
+        continue;
       }
       return { status: 'security_paused', reason: security.reason };
     }
@@ -3638,7 +3692,14 @@ async function preparePublish(accountId, materialId, title='', caption='', optio
     }
     await require('../data-store').updateLoginStatus(accountId, 'online').catch(() => {});
     const before = saveTraffic ? null : await capture(connection.page, accountId, 'publish', 'before');
-    const security = await inspectPage(connection.page);
+    let security = await inspectPage(connection.page);
+    if (security.blocked && /something went wrong/i.test(String(security.reason || ''))) {
+      security = await recoverPublishSomethingWentWrong(connection.page, security, {
+        log,
+        allowReload: true,
+        reloadUrl: startUrl,
+      });
+    }
     if (security.blocked) {
       keepOpen = true;
       return { status: 'security_paused', reason: security.reason, screenshot: before || '', manualRequired: true };
@@ -3707,7 +3768,13 @@ async function preparePublish(accountId, materialId, title='', caption='', optio
       log('警告：任务与素材均无分享标题/文案/标签，将保留 Studio 默认文件名描述');
     }
     const prepared = await capture(connection.page, accountId, 'publish', 'prepared');
-    const after = await inspectPage(connection.page);
+    let after = await inspectPage(connection.page);
+    if (after.blocked && /something went wrong/i.test(String(after.reason || ''))) {
+      after = await recoverPublishSomethingWentWrong(connection.page, after, {
+        log,
+        allowReload: false,
+      });
+    }
     if (after.blocked) {
       keepOpen = true;
       return { status: 'security_paused', reason: after.reason, screenshot: prepared, manualRequired: true };
@@ -3901,7 +3968,12 @@ async function resumePublish(accountId, options = {}) {
       await connection.page.goto('https://www.tiktok.com/upload', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
       await connection.page.waitForTimeout(saveTraffic ? 2000 : 4000);
     }
-    const security = await inspectPage(connection.page);
+    let security = await inspectPage(connection.page);
+    if (security.blocked && /something went wrong/i.test(String(security.reason || ''))) {
+      security = await recoverPublishSomethingWentWrong(connection.page, security, {
+        allowReload: false,
+      });
+    }
     if (security.blocked) {
       keepOpen = true;
       return { status: 'security_paused', reason: security.reason, manualRequired: true };

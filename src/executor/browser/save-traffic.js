@@ -7,12 +7,13 @@
 
 const BLOCK_RESOURCE_TYPES = new Set(['image', 'media', 'font']);
 
-/** 人机验证 / 安全校验资源：永不拦截（含拼图底图、滑块块、验证码图） */
+/** 人机验证 / 安全校验资源：永不拦截（含拼图底图、滑块块、验证码图、校验接口、样式与字体） */
 const ALLOW_URL_RE = [
   /captcha/i,
   /\/verify(?:\/|$|\?)/i,
   /verify[-_]?center/i,
   /verify[-_]?image/i,
+  /verification/i,
   /secsdk/i,
   /security[-_]?check/i,
   /slide[-_]?verify/i,
@@ -20,23 +21,26 @@ const ALLOW_URL_RE = [
   /puzzle/i,
   /whirl/i,
   /rotate[-_]?verify/i,
-  /rc-captcha/i,
+  /rc[-_]?captcha/i,
   /geetest/i,
   /hcaptcha/i,
   /recaptcha/i,
   /arkose/i,
   /funcaptcha/i,
-  /(?:^|\.)byteoversea\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk)/i,
-  /(?:^|\.)(?:ibyteimg|byteimg|ibytedtos|ttwstatic)\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|tos-|obj\/)/i,
-  /p\d+-(?:rc-)?captcha/i,
+  /(?:^|\.)byteoversea\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|tos-|obj\/)/i,
+  /(?:^|\.)(?:ibyteimg|byteimg|ibytedtos|ttwstatic)\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|tos-|obj\/|eden)/i,
+  /p\d+-(?:rc-)?cap(?:tcha)?/i,
   /p\d+-security/i,
-  /sf\d+-website-login/i,
-  /captcha[-.].*\.(?:tiktok|bytedance|byteoversea)/i,
-  /verification[-.].*\.(?:tiktok|byte)/i,
-  /tiktokcdn[^/]*\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|secsdk|eden)/i,
-  /rc-verification/i,
+  /sf\d+-(?:website-login|secsdk|captcha)/i,
+  /captcha[-.].*\.(?:tiktok|bytedance|byteoversea|tiktokv|capcut)/i,
+  /verification[-.].*\.(?:tiktok|byte|tiktokv|capcut)/i,
+  /tiktokcdn[^/]*\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|eden|tos-)/i,
+  /rc[-_]?verification/i,
   /secsdk-captcha/i,
+  /get_captcha|check_captcha|verify_captcha/i,
 ];
+
+const CAPTCHA_FRAME_URL_RE = /captcha|verify[-_]?center|verification|secsdk|security[-_]?check|rc[-_]?captcha|rc[-_]?verification|whirl|puzzle|geetest|hcaptcha|recaptcha|arkose|p\d+-(?:rc-)?cap|get_captcha|verify_captcha/i;
 
 /** 广告 / 追踪 / 图标字体 / 媒体等 URL 特征 */
 const BLOCK_URL_RE = [
@@ -83,7 +87,7 @@ svg, svg * {
 img[src*=".svg" i],
 img[src^="data:image/svg" i],
 img[src*="image/svg" i],
-image {
+svg image {
   opacity: 0 !important;
 }
 /* 人机验证弹框内必须可见 */
@@ -97,8 +101,16 @@ image {
 [class*="captcha" i] svg *,
 [class*="Captcha"] svg,
 [class*="Captcha"] svg *,
+[id*="verify" i] svg,
+[id*="verify" i] svg *,
+[class*="verify" i] svg,
+[class*="verify" i] svg *,
 [class*="secsdk" i] svg,
 [class*="secsdk" i] svg *,
+[id*="secsdk" i] svg,
+[id*="secsdk" i] svg *,
+[class*="cap-"] svg,
+[class*="cap-"] svg *,
 [aria-label*="captcha" i] svg,
 [aria-label*="verify" i] svg,
 .TUXModal svg,
@@ -109,6 +121,11 @@ image {
 .captcha_verify_container img,
 [id*="captcha" i] img,
 [class*="captcha" i] img,
+[id*="verify" i] img,
+[class*="verify" i] img,
+[class*="secsdk" i] img,
+[id*="secsdk" i] img,
+[class*="cap-"] img,
 .TUXModal img,
 [role="dialog"] img {
   opacity: 1 !important;
@@ -118,7 +135,7 @@ image {
 }
 `.trim();
 
-const CAPTCHA_CLOSEST = '#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="Captcha"], [class*="secsdk" i], .TUXModal, [role="dialog"]';
+const CAPTCHA_CLOSEST = '#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="Captcha"], [id*="verify" i], [class*="verify" i], [class*="secsdk" i], [id*="secsdk" i], [class*="cap-"], .TUXModal, [role="dialog"]';
 
 function parseSaveTrafficFlag(raw, defaultValue = false) {
   if (raw === undefined || raw === null || raw === '') return !!defaultValue;
@@ -167,19 +184,109 @@ function saveTrafficUrlFilter(url) {
   }
 }
 
+function isRequestFromCaptchaBypassOrFrame(request) {
+  try {
+    const headers = typeof request?.headers === 'function' ? request.headers() : (request?.headers || {});
+    const ref = String(headers?.referer || headers?.referrer || headers?.origin || '');
+    if (ref && CAPTCHA_FRAME_URL_RE.test(ref)) return true;
+
+    const frame = typeof request?.frame === 'function' ? request.frame() : null;
+    if (frame) {
+      const fUrl = String(frame.url?.() || '');
+      if (fUrl && CAPTCHA_FRAME_URL_RE.test(fUrl)) return true;
+      const page = typeof frame.page === 'function' ? frame.page() : null;
+      const pUrl = String(page?.url?.() || '');
+      if (pUrl && CAPTCHA_FRAME_URL_RE.test(pUrl)) return true;
+      if (page?.__tkNoCaptchaSolving) return true;
+      const ctx = typeof page?.context === 'function' ? page.context() : null;
+      if (ctx) {
+        if (!ctx.__saveTrafficEnabled) return true;
+        if (ctx.__saveTrafficCaptchaBypass) {
+          // 防止极端情况下 bypass 一直卡住：仅当超过 120s 且没有正在求解才自动过期
+          const age = Date.now() - Number(ctx.__saveTrafficCaptchaBypassAt || 0);
+          if (age < 120000 || page?.__tkNoCaptchaSolving) return true;
+          ctx.__saveTrafficCaptchaBypass = false;
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
+async function hasCaptchaModalInDomCached(page) {
+  if (!page || page.isClosed?.()) return false;
+  if (page.__tkNoCaptchaSolving) return true;
+  const now = Date.now();
+  const cached = page.__tkCaptchaDomBypassCache;
+  if (cached && now - cached.at < 260) {
+    return cached.active;
+  }
+  const active = await page.evaluate(() => {
+    try {
+      const sels = [
+        '#captcha-verify-container',
+        '.captcha_verify_container',
+        '[class*="captcha-verify-container" i]',
+        '[class*="captcha_verify_container" i]',
+        '[id*="captcha-verify" i]',
+        '[class*="secsdk-captcha" i]',
+        '[class*="secsdk_captcha" i]',
+        'iframe[src*="captcha" i]',
+        'iframe[src*="verify" i]',
+        'iframe[src*="secsdk" i]',
+        '#captcha_slide_button',
+        'img[data-e2e="captcha-whirl-outer"]',
+        'img[data-e2e="captcha-whirl-inner"]',
+      ];
+      for (const s of sels) {
+        const nodes = document.querySelectorAll(s);
+        for (const el of nodes) {
+          const st = window.getComputedStyle?.(el);
+          if (st && (st.display === 'none' || st.visibility === 'hidden')) continue;
+          const r = el.getBoundingClientRect?.() || { width: 0, height: 0 };
+          if (r.width > 8 && r.height > 8) return true;
+        }
+      }
+      const dialogs = document.querySelectorAll('.TUXModal, [role="dialog"]');
+      for (const d of dialogs) {
+        const st = window.getComputedStyle?.(d);
+        if (!st || st.display === 'none' || st.visibility === 'hidden') continue;
+        const r = d.getBoundingClientRect?.() || { width: 0, height: 0 };
+        if (r.width <= 40 || r.height <= 40) continue;
+        const txt = String(d.innerText || '');
+        const cls = `${d.id || ''} ${d.className || ''}`;
+        if (
+          /captcha|secsdk|verify/i.test(cls)
+          || /drag the slider|fit the puzzle|verify to continue|verify you are human|拖动滑块|完成拼图|旋转|安全验证|人机验证/i.test(txt)
+          || d.querySelector('[class*="cap-"], [class*="captcha" i], [id*="captcha" i], [class*="secsdk" i]')
+        ) {
+          return true;
+        }
+      }
+    } catch {}
+    return false;
+  }).catch(() => false);
+  page.__tkCaptchaDomBypassCache = { at: Date.now(), active };
+  return active;
+}
+
 function shouldAbortRequest(request) {
   const url = String(request.url?.() || request.url || '');
   if (!url || isShellOrLocalUrl(url)) {
     return false;
   }
+  if (isRequestFromCaptchaBypassOrFrame(request)) {
+    return false;
+  }
+  if (isAllowedCaptchaUrl(url)) return false;
+
   // data:image/svg 常被用作图标，省流时拦截；其它 data: 已由 isShellOrLocalUrl 放行
   if (/^data:image\/svg\+xml/i.test(url) || /^data:image\/svg/i.test(url)) {
     return true;
   }
-  if (isAllowedCaptchaUrl(url)) return false;
 
   const type = String(request.resourceType?.() || request.resourceType || '').toLowerCase();
-  // 主文档绝不 abort（避免白屏/诊断页被毁）
+  // 主文档/子框架/长连接绝不 abort（避免验证 iframe 或页面白屏）
   if (type === 'document' || type === 'websocket' || type === 'eventsource') return false;
   // 脚本/样式/接口请求不按 URL 关键字拦（avatar、icon、analytics 等会误伤站点 JS 分包和 API，导致页面白屏）
   if (['script', 'stylesheet', 'xhr', 'fetch', 'manifest', 'texttrack'].includes(type)) return false;
@@ -201,7 +308,34 @@ async function saveTrafficRouteHandler(route, request) {
       }
       return;
     }
+
+    // 检测到人机验证脚本/接口/iframe 请求时，立刻同步开启验证码旁路并移除隐藏样式，确保随后的拼图图片永不被拦截
+    const frame = typeof req.frame === 'function' ? req.frame() : null;
+    const page = typeof frame?.page === 'function' ? frame.page() : null;
+    const ctx = typeof page?.context === 'function' ? page.context() : null;
+    if (CAPTCHA_FRAME_URL_RE.test(url)) {
+      if (ctx && ctx.__saveTrafficEnabled) {
+        ctx.__saveTrafficDesired = true;
+        ctx.__saveTrafficCaptchaBypass = true;
+        ctx.__saveTrafficCaptchaBypassAt = Date.now();
+        if (page) removeHideSvgOnPage(page).catch(() => {});
+      }
+      await route.continue().catch(() => route.fallback().catch(() => {}));
+      return;
+    }
+
     if (shouldAbortRequest(req)) {
+      // 兜底检查：若当前页面 DOM 已经挂出人机验证弹框，即使图片走随机哈希 CDN URL 也绝不拦截
+      if (page && await hasCaptchaModalInDomCached(page)) {
+        if (ctx && ctx.__saveTrafficEnabled) {
+          ctx.__saveTrafficDesired = true;
+          ctx.__saveTrafficCaptchaBypass = true;
+          ctx.__saveTrafficCaptchaBypassAt = Date.now();
+          removeHideSvgOnPage(page).catch(() => {});
+        }
+        await route.continue().catch(() => route.fallback().catch(() => {}));
+        return;
+      }
       await route.abort('blockedbyclient');
       return;
     }
@@ -226,6 +360,8 @@ function buildHideSvgInjector() {
       const href = String(location.href || '');
       if (/^(data:|blob:|about:|file:|chrome:|chrome-error:)/i.test(href)) return;
       if (!/^https?:/i.test(href)) return;
+      if (/captcha|verify|secsdk|whirl|puzzle|rc-verification/i.test(href)) return;
+      if (window.__tkSaveTrafficSvgDisabled) return;
     } catch { return; }
     const CSS = ${JSON.stringify(HIDE_SVG_CSS)};
     const CAP = ${JSON.stringify(CAPTCHA_CLOSEST)};
@@ -242,17 +378,19 @@ function buildHideSvgInjector() {
 
       const hideOne = (el) => {
         try {
-          if (!el || !el.style) return;
+          if (!el || !el.style || window.__tkSaveTrafficSvgDisabled) return;
           if (el.closest && el.closest(CAP)) {
             el.style.setProperty('opacity', '1', 'important');
             return;
           }
+          el.setAttribute('data-tk-svg-hidden', '1');
           el.style.setProperty('opacity', '0', 'important');
         } catch {}
       };
 
       const sweep = () => {
         try {
+          if (window.__tkSaveTrafficSvgDisabled) return;
           document.querySelectorAll('svg').forEach(hideOne);
           document.querySelectorAll('img[src*=".svg" i], img[src^="data:image/svg" i]').forEach(hideOne);
         } catch {}
@@ -262,7 +400,7 @@ function buildHideSvgInjector() {
       if (!window.__tkSaveTrafficSvgObs) {
         let t = 0;
         window.__tkSaveTrafficSvgObs = new MutationObserver(() => {
-          if (t) return;
+          if (window.__tkSaveTrafficSvgDisabled || t) return;
           t = setTimeout(() => { t = 0; sweep(); }, 80);
         });
         try {
@@ -281,16 +419,45 @@ function buildHideSvgInjector() {
   })()`;
 }
 
-async function injectHideSvgOnPage(page) {
+async function removeHideSvgOnPage(page) {
   if (!page || page.isClosed?.()) return;
   try {
     const href = String(page.url?.() || '');
     if (isShellOrLocalUrl(href)) return;
   } catch { /* ignore */ }
-  const src = buildHideSvgInjector();
+  await page.evaluate(() => {
+    try {
+      window.__tkSaveTrafficSvgDisabled = true;
+      if (window.__tkSaveTrafficSvgTimer) {
+        clearInterval(window.__tkSaveTrafficSvgTimer);
+        window.__tkSaveTrafficSvgTimer = null;
+      }
+      if (window.__tkSaveTrafficSvgObs) {
+        try { window.__tkSaveTrafficSvgObs.disconnect(); } catch {}
+        window.__tkSaveTrafficSvgObs = null;
+      }
+      const st = document.getElementById('tkswarm-save-traffic-svg');
+      if (st) st.remove();
+      document.querySelectorAll('[data-tk-svg-hidden]').forEach((el) => {
+        try {
+          el.style.removeProperty('opacity');
+          el.removeAttribute('data-tk-svg-hidden');
+        } catch {}
+      });
+    } catch {}
+  }).catch(() => {});
+}
+
+async function injectHideSvgOnPage(page) {
+  if (!page || page.isClosed?.()) return;
   try {
-    await page.addStyleTag({ content: HIDE_SVG_CSS }).catch(() => {});
+    const href = String(page.url?.() || '');
+    if (isShellOrLocalUrl(href) || CAPTCHA_FRAME_URL_RE.test(href)) return;
+    const ctx = page.context?.();
+    if (ctx && (ctx.__saveTrafficCaptchaBypass || !ctx.__saveTrafficEnabled)) return;
   } catch { /* ignore */ }
+  await page.evaluate(() => { try { window.__tkSaveTrafficSvgDisabled = false; } catch {} }).catch(() => {});
+  const src = buildHideSvgInjector();
   try {
     await page.evaluate(src);
   } catch {
@@ -318,78 +485,56 @@ async function injectHideSvgOnPage(page) {
   }
 }
 
+function attachCaptchaBypassResponseHook(page, context) {
+  if (!page || !context || page.__tkSaveTrafficCaptchaRespHooked) return;
+  page.__tkSaveTrafficCaptchaRespHooked = true;
+  const onResp = (resp) => {
+    try {
+      const url = String(resp?.url?.() || '');
+      if (!url) return;
+      if (CAPTCHA_FRAME_URL_RE.test(url) || /p\d+-(?:rc-)?captcha|p\d+-security|get_captcha|verify_captcha/i.test(url)) {
+        if (context.__saveTrafficEnabled) {
+          context.__saveTrafficDesired = true;
+          context.__saveTrafficCaptchaBypass = true;
+          context.__saveTrafficCaptchaBypassAt = Date.now();
+          removeHideSvgOnPage(page).catch(() => {});
+        }
+      }
+    } catch { /* ignore */ }
+  };
+  page.on?.('response', onResp);
+  page.once?.('close', () => {
+    try { page.off?.('response', onResp); } catch { /* ignore */ }
+  });
+}
+
 async function ensureHideSvgStyle(context) {
   if (!context) return;
-  const css = HIDE_SVG_CSS;
-  const cap = CAPTCHA_CLOSEST;
 
-  // 每个新文档自动注入（跳过 data:/file: 诊断壳；必须等 document.head，避免打断解析导致 CSS 原文上屏）
-  if (!context.__saveTrafficSvgInit) {
-    try {
-      await context.addInitScript(({ cssText, capSel }) => {
-        try {
-          const href = String(location.href || '');
-          if (/^(data:|blob:|about:|file:|chrome:|chrome-error:)/i.test(href)) return;
-          if (!/^https?:/i.test(href)) return;
-        } catch { return; }
-        const run = () => {
-          try {
-            const head = document.head;
-            if (!head) return;
-            let style = document.getElementById('tkswarm-save-traffic-svg');
-            if (!style) {
-              style = document.createElement('style');
-              style.id = 'tkswarm-save-traffic-svg';
-              head.appendChild(style);
-            }
-            style.textContent = cssText;
-            const hide = (el) => {
-              if (!el?.style) return;
-              if (el.closest?.(capSel)) {
-                el.style.setProperty('opacity', '1', 'important');
-                return;
-              }
-              el.style.setProperty('opacity', '0', 'important');
-            };
-            const sweep = () => {
-              document.querySelectorAll('svg').forEach(hide);
-              document.querySelectorAll('img[src*=".svg" i], img[src^="data:image/svg" i]').forEach(hide);
-            };
-            sweep();
-            if (!window.__tkSaveTrafficSvgObs) {
-              let t = 0;
-              window.__tkSaveTrafficSvgObs = new MutationObserver(() => {
-                if (t) return;
-                t = setTimeout(() => { t = 0; sweep(); }, 80);
-              });
-              window.__tkSaveTrafficSvgObs.observe(document.documentElement, {
-                childList: true,
-                subtree: true,
-              });
-            }
-            if (!window.__tkSaveTrafficSvgTimer) {
-              window.__tkSaveTrafficSvgTimer = setInterval(sweep, 1500);
-            }
-          } catch { /* ignore */ }
-        };
-        if (document.head) run();
-        else document.addEventListener('DOMContentLoaded', run, { once: true });
-      }, { cssText: css, capSel: cap });
-      context.__saveTrafficSvgInit = true;
-    } catch { /* ignore */ }
-  }
+  const hookPageSvg = (page) => {
+    if (!page) return;
+    attachCaptchaBypassResponseHook(page, context);
+    if (page.__tkSaveTrafficSvgHooked) return;
+    page.__tkSaveTrafficSvgHooked = true;
+    const syncSvgState = () => {
+      if (context.__saveTrafficEnabled && !context.__saveTrafficCaptchaBypass) {
+        injectHideSvgOnPage(page).catch(() => {});
+      } else {
+        removeHideSvgOnPage(page).catch(() => {});
+      }
+    };
+    page.on('domcontentloaded', syncSvgState);
+    page.on('load', syncSvgState);
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) syncSvgState();
+    });
+  };
 
-  // 已打开页面立刻注入，并在导航后重注
+  // 已打开页面立刻注入，并在导航后按实时状态同步
   try {
     for (const page of context.pages?.() || []) {
+      hookPageSvg(page);
       await injectHideSvgOnPage(page);
-      if (!page.__tkSaveTrafficSvgHooked) {
-        page.__tkSaveTrafficSvgHooked = true;
-        page.on('load', () => { injectHideSvgOnPage(page).catch(() => {}); });
-        page.on('framenavigated', (frame) => {
-          if (frame === page.mainFrame()) injectHideSvgOnPage(page).catch(() => {});
-        });
-      }
     }
   } catch { /* ignore */ }
 
@@ -398,11 +543,10 @@ async function ensureHideSvgStyle(context) {
     context.__saveTrafficPageHook = true;
     try {
       context.on('page', (page) => {
-        injectHideSvgOnPage(page).catch(() => {});
-        page.on('load', () => { injectHideSvgOnPage(page).catch(() => {}); });
-        page.on('framenavigated', (frame) => {
-          if (frame === page.mainFrame()) injectHideSvgOnPage(page).catch(() => {});
-        });
+        hookPageSvg(page);
+        if (context.__saveTrafficEnabled && !context.__saveTrafficCaptchaBypass) {
+          injectHideSvgOnPage(page).catch(() => {});
+        }
       });
     } catch { /* ignore */ }
   }
@@ -437,6 +581,11 @@ async function applySaveTraffic(context, enabled) {
   context.__saveTrafficEnabled = on;
   if (!on) {
     context.__saveTrafficCaptchaBypass = false;
+    try {
+      for (const page of context.pages?.() || []) {
+        await removeHideSvgOnPage(page);
+      }
+    } catch { /* ignore */ }
     return { ok: true, enabled: false, changed: prev !== false };
   }
 
@@ -488,10 +637,18 @@ async function pauseSaveTrafficForCaptcha(pageOrContext) {
   const wasEnabled = !!context.__saveTrafficEnabled || !!context.__saveTrafficDesired;
   context.__saveTrafficDesired = wasEnabled || !!context.__saveTrafficDesired;
   context.__saveTrafficCaptchaBypass = true;
+  context.__saveTrafficCaptchaBypassAt = Date.now();
   if (context.__saveTrafficEnabled) {
     await applySaveTraffic(context, false);
+  } else {
+    try {
+      for (const p of context.pages?.() || []) {
+        await removeHideSvgOnPage(p);
+      }
+    } catch { /* ignore */ }
   }
   context.__saveTrafficCaptchaBypass = true;
+  context.__saveTrafficCaptchaBypassAt = Date.now();
   return { paused: true, wasEnabled: !!context.__saveTrafficDesired };
 }
 
@@ -503,6 +660,12 @@ async function resumeSaveTrafficAfterCaptcha(pageOrContext, { force = false } = 
   if (!context) return { resumed: false };
   const want = force || !!context.__saveTrafficDesired;
   context.__saveTrafficCaptchaBypass = false;
+  context.__saveTrafficCaptchaBypassAt = 0;
+  try {
+    for (const p of context.pages?.() || []) {
+      p.__tkCaptchaDomBypassCache = null;
+    }
+  } catch { /* ignore */ }
   if (want) {
     await applySaveTraffic(context, true);
     return { resumed: true };
@@ -521,6 +684,7 @@ module.exports = {
   pauseSaveTrafficForCaptcha,
   resumeSaveTrafficAfterCaptcha,
   injectHideSvgOnPage,
+  removeHideSvgOnPage,
   BLOCK_RESOURCE_TYPES,
   ALLOW_URL_RE,
 };
