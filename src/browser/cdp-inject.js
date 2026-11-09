@@ -163,9 +163,10 @@ function sendEmulationOnWs(wsUrl, {
       if (userAgent) {
         const primaryLang = String(locale || 'en-US').split(',')[0].trim() || 'en-US';
         const baseLang = primaryLang.split('-')[0] || 'en';
+        // CDP 的 acceptLanguage 不带权重，Chromium 自行追加 ;q=0.9（否则变成 ;q=0.9;q=0.9）
         const acceptLanguage = primaryLang.includes('-') && baseLang.toLowerCase() !== primaryLang.toLowerCase()
-          ? `${primaryLang},${baseLang};q=0.9`
-          : `${primaryLang};q=0.9`;
+          ? `${primaryLang},${baseLang}`
+          : primaryLang;
         const uaParams = {
           userAgent: String(userAgent),
           acceptLanguage,

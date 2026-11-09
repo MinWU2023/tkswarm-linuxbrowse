@@ -151,6 +151,12 @@ app.whenReady().then(async () => {
             }
           }
         }
+        // 兜底：折叠畸形 Accept-Language 权重（en-US,en;q=0.9;q=0.9 → en-US,en;q=0.9）
+        for (const k of Object.keys(requestHeaders)) {
+          if (k.toLowerCase() === 'accept-language') {
+            requestHeaders[k] = String(requestHeaders[k]).replace(/(;\s*q=[0-9.]+)(?:\s*;\s*q=[0-9.]+)+/gi, '$1');
+          }
+        }
         // 主文档直跳 TikTok 子路径（如 /@handle）若无 Referer，自动补齐首页 Referer，避免无来源直跳被网关 403 拦截
         const url = String(details.url || '');
         if (details.resourceType === 'mainFrame' && /^https:\/\/(?:www\.)?tiktok\.com\/[^?#]+/i.test(url)) {
@@ -190,6 +196,13 @@ app.whenReady().then(async () => {
           const type = String(details.resourceType || '');
           if (CAPTCHA_TRIGGER.test(url)) {
             captchaGraceUntil = Math.max(captchaGraceUntil, Date.now() + 30000);
+          }
+          // 私信收件箱（business-suite/messages、/messages）整页放行：Playwright 侧的「暂停省流」管不到本钩子，
+          // 拦截图片/字体会让收件箱只渲染页脚、永远出不来输入框
+          let hostPageUrl = '';
+          try { hostPageUrl = String(details.webContents?.getURL?.() || details.referrer || ''); } catch { /* ignore */ }
+          if (/tiktok\.com\/(?:business-suite\/messages|messages)/i.test(hostPageUrl) || /tiktok\.com\/(?:business-suite\/messages|messages)/i.test(url)) {
+            return callback({});
           }
           if (type === 'mainFrame' || type === 'subFrame' || type === 'webSocket' || ALLOW.test(url)) {
             return callback({});

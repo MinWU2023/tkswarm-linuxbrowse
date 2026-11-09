@@ -192,9 +192,11 @@ async function ensureConsistentUaAndClientHints(page, openedMeta = null) {
       const uaPlatformVersion = isMac ? '14.5.0' : '10.0.0';
       const primaryLang = String(lang || 'en-US').split(',')[0].trim() || 'en-US';
       const baseLang = primaryLang.split('-')[0] || 'en';
+      // CDP 的 acceptLanguage 只接受不带权重的语言列表（如 en-US,en）；
+      // Chromium 会自行追加 ;q=0.9，若这里再写 ;q=0.9 会发出畸形头 "en-US,en;q=0.9;q=0.9"
       const acceptLanguage = primaryLang.includes('-') && baseLang.toLowerCase() !== primaryLang.toLowerCase()
-        ? `${primaryLang},${baseLang};q=0.9`
-        : `${primaryLang};q=0.9`;
+        ? `${primaryLang},${baseLang}`
+        : primaryLang;
       const userAgentMetadata = {
         brands: [
           { brand: 'Not-A.Brand', version: '99' },
