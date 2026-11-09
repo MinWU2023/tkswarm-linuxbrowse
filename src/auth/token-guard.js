@@ -48,6 +48,22 @@ async function validateTokenRemote(token) {
     const denied = res.status === 401 || res.status === 403
       || json.success === false
       || (json.message && /未登录|token|失效|过期|unauthorized/i.test(String(json.message)));
+    const body = json.data || json;
+    const remoteUser = body?.user || body?.loginUser || null;
+    if (ok && !denied && remoteUser && Number(remoteUser.id) > 0) {
+      try {
+        db.saveUser({
+          id: Number(remoteUser.id),
+          username: remoteUser.username,
+          nickname: remoteUser.nickname,
+          role_name: remoteUser.role || remoteUser.roleName || remoteUser.role_name,
+          is_super: remoteUser.isSuper || Number(remoteUser.role_id) === 1 ? 1 : 0,
+          browser_env_quota: remoteUser.browserEnvQuota ?? remoteUser.browser_env_quota,
+          browser_env_used: remoteUser.browserEnvUsed ?? remoteUser.browser_env_used,
+          preserveLoginTime: true,
+        });
+      } catch { /* ignore */ }
+    }
     const result = (!ok || denied)
       ? { ok: false, reason: json.message || `HTTP ${res.status}` }
       : { ok: true };
@@ -137,6 +153,8 @@ async function adoptRemoteToken(token) {
       role_name: role,
       is_super: isSuper ? 1 : 0,
       parent_id: 0,
+      browser_env_quota: user.browserEnvQuota ?? user.browser_env_quota,
+      browser_env_used: user.browserEnvUsed ?? user.browser_env_used,
     });
     db.upsertSession({ token: t, userId: id });
     cache.set(t, { ok: true, at: Date.now() });

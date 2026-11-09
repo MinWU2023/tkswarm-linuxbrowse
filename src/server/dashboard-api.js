@@ -93,14 +93,23 @@ router.get('/api/vnc-config', async (req, res) => {
 router.get('/api/dashboard/stats', async (req, res) => {
   const user = await requireUser(req, res);
   if (!user) return;
-  const self = db.statsForOwner(user.id);
+  await auth.fetchChildrenStats(user).catch(() => []);
+  const freshUser = db.getUserById(user.id) || user;
+  const self = db.statsForOwner(freshUser.id);
   res.json({
     ok: true,
-    user: { id: user.id, username: user.username, nickname: user.nickname, role: user.role_name },
+    user: {
+      id: freshUser.id,
+      username: freshUser.username,
+      nickname: freshUser.nickname,
+      role: freshUser.role_name,
+      browserEnvQuota: freshUser.browser_env_quota,
+      browserEnvUsed: freshUser.browser_env_used,
+    },
     self,
     children: [],
-    windows: filterWindowsForUser(user, manager.listWindows()),
-    sessions: Number(user.is_super) === 1 ? db.listSessions() : undefined,
+    windows: filterWindowsForUser(freshUser, manager.listWindows()),
+    sessions: Number(freshUser.is_super) === 1 ? db.listSessions() : undefined,
   });
 });
 
@@ -108,17 +117,26 @@ router.get('/api/dashboard/stats/async', async (req, res) => {
   const user = await requireUser(req, res);
   if (!user) return;
   const children = await auth.fetchChildrenStats(user);
+  const freshUser = db.getUserById(user.id) || user;
   const resources = collectHealthExtras();
   res.json({
     ok: true,
     hostId: HOST_ID,
-    user: { id: user.id, username: user.username, nickname: user.nickname, role: user.role_name, is_super: user.is_super },
-    token: user.token || req.authToken || '',
-    self: db.statsForOwner(user.id),
+    user: {
+      id: freshUser.id,
+      username: freshUser.username,
+      nickname: freshUser.nickname,
+      role: freshUser.role_name,
+      is_super: freshUser.is_super,
+      browserEnvQuota: freshUser.browser_env_quota,
+      browserEnvUsed: freshUser.browser_env_used,
+    },
+    token: freshUser.token || req.authToken || '',
+    self: db.statsForOwner(freshUser.id),
     children,
-    windows: filterWindowsForUser(user, manager.listWindows()),
-    sessions: Number(user.is_super) === 1 ? db.listSessions() : [],
-    usersOnline: Number(user.is_super) === 1 ? db.listUsers().filter((u) => u.hasToken) : undefined,
+    windows: filterWindowsForUser(freshUser, manager.listWindows()),
+    sessions: Number(freshUser.is_super) === 1 ? db.listSessions() : [],
+    usersOnline: Number(freshUser.is_super) === 1 ? db.listUsers().filter((u) => u.hasToken) : undefined,
     resources,
   });
 });

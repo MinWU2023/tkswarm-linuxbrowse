@@ -1,9 +1,15 @@
 const db = require('../db');
 const { TKSWARM_API_BASE } = require('../config');
-const { writeSettings } = require('../settings');
+const { readSettings, writeSettings } = require('../settings');
+
+function normalizeApiBase(raw) {
+  const fallback = String(TKSWARM_API_BASE).replace(/\/+$/, '');
+  const saved = String(readSettings().apiBase || '').trim().replace(/\/+$/, '');
+  return String(raw || saved || process.env.TKSWARM_API_BASE || fallback).trim().replace(/\/+$/, '') || fallback;
+}
 
 async function login({ apiBase, username, password, captcha, captchaKey }) {
-  const base = String(apiBase || TKSWARM_API_BASE).replace(/\/+$/, '');
+  const base = normalizeApiBase(apiBase);
   const res = await fetch(`${base}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -26,6 +32,8 @@ async function login({ apiBase, username, password, captcha, captchaKey }) {
     role_name: role,
     is_super: user.isSuper || user.roleId === 1 ? 1 : 0,
     parent_id: 0,
+    browser_env_quota: user.browserEnvQuota ?? user.browser_env_quota,
+    browser_env_used: user.browserEnvUsed ?? user.browser_env_used,
   });
   if (token) {
     db.upsertSession({ token, userId: saved.id });
@@ -48,20 +56,41 @@ function logout(token) {
 
 async function fetchChildrenStats(user) {
   if (!user?.token) return [];
-  const base = String(process.env.TKSWARM_API_BASE || TKSWARM_API_BASE).replace(/\/+$/, '');
+  const base = normalizeApiBase();
   try {
     const res = await fetch(`${base}/auth/status`, {
       headers: { Authorization: `Bearer ${user.token}`, Accept: 'application/json' },
     });
     const json = await res.json().catch(() => ({}));
     const body = json.data || json;
+    const remoteUser = body.user || body.loginUser || null;
+    if (remoteUser && Number(remoteUser.id) === Number(user.id)) {
+      db.saveUser({
+        id: Number(user.id),
+        username: remoteUser.username || user.username,
+        nickname: remoteUser.nickname ?? user.nickname,
+        token: user.token,
+        role_name: remoteUser.role || user.role_name,
+        is_super: remoteUser.isSuper || Number(remoteUser.roleId) === 1 ? 1 : user.is_super,
+        browser_env_quota: remoteUser.browserEnvQuota ?? remoteUser.browser_env_quota,
+        browser_env_used: remoteUser.browserEnvUsed ?? remoteUser.browser_env_used,
+        preserveLoginTime: true,
+      });
+    }
     const children = body.children || [];
-    return children.map((c) => ({
-      id: c.id,
-      username: c.username,
-      nickname: c.nickname || c.username,
-      ...db.statsForOwner(c.id),
-    }));
+    return children.map((c) => {
+      const localStat = db.statsForOwner(c.id, c.browserEnvQuota ?? c.browser_env_quota);
+      const remoteUsed = Number(c.browserEnvUsed ?? c.browser_env_used);
+      const used = Number.isFinite(remoteUsed) && remoteUsed >= 0 ? Math.max(localStat.used, remoteUsed) : localStat.used;
+      return {
+        id: c.id,
+        username: c.username,
+        nickname: c.nickname || c.username,
+        ...localStat,
+        used,
+        remaining: Math.max(0, localStat.limit - used),
+      };
+    });
   } catch {
     return [];
   }

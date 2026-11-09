@@ -36,15 +36,24 @@ function readOnly(fn) {
 function upsertUser(user) {
   return withStore((data) => {
     const idx = data.users.findIndex((u) => Number(u.id) === Number(user.id));
+    const prev = idx >= 0 ? data.users[idx] : {};
+    const rawQuota = user.browser_env_quota ?? user.browserEnvQuota ?? prev.browser_env_quota;
+    const rawUsed = user.browser_env_used ?? user.browserEnvUsed ?? prev.browser_env_used;
     const row = {
       id: Number(user.id),
-      username: user.username,
-      nickname: user.nickname || '',
-      token: user.token || '',
-      role_name: user.role_name || '',
-      is_super: user.is_super ? 1 : 0,
-      parent_id: Number(user.parent_id || 0),
-      logged_in_at: new Date().toISOString(),
+      username: user.username ?? prev.username ?? '',
+      nickname: user.nickname ?? prev.nickname ?? '',
+      token: user.token ?? prev.token ?? '',
+      role_name: user.role_name ?? prev.role_name ?? '',
+      is_super: (user.is_super !== undefined ? user.is_super : prev.is_super) ? 1 : 0,
+      parent_id: Number(user.parent_id ?? prev.parent_id ?? 0),
+      browser_env_quota: rawQuota !== undefined && rawQuota !== null && Number.isFinite(Number(rawQuota))
+        ? Math.max(0, Math.floor(Number(rawQuota)))
+        : undefined,
+      browser_env_used: rawUsed !== undefined && rawUsed !== null && Number.isFinite(Number(rawUsed))
+        ? Math.max(0, Math.floor(Number(rawUsed)))
+        : undefined,
+      logged_in_at: user.preserveLoginTime && prev.logged_in_at ? prev.logged_in_at : new Date().toISOString(),
     };
     if (idx >= 0) data.users[idx] = { ...data.users[idx], ...row };
     else data.users.push(row);
