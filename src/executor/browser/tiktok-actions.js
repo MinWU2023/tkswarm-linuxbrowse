@@ -2690,7 +2690,10 @@ async function clickSendButton(page) {
 }
 
 async function fillMessageEditor(page, content) {
+  // 先用跨 frame / 多形态的查找（iframe、role=textbox、plaintext-only 都认），再退回旧选择器
+  const found = await dmFindEditor(page, true).catch(() => null);
   const editors = [
+    ...(found ? [found] : []),
     page.locator('[data-e2e="message-input-area"] [contenteditable="true"]').last(),
     page.locator('[contenteditable="true"]').last(),
     page.locator('textarea').last(),
@@ -2703,6 +2706,12 @@ async function fillMessageEditor(page, content) {
       await page.keyboard.press('Control+A').catch(() => {});
       await page.keyboard.type(content, { delay: typeDelay(80, 160) });
     });
+    // fill 对 React/Draft 类编辑器可能"成功"但内容没进状态：核对一次，没写进去就用 insertText 兜底
+    const landed = await editor.evaluate((el) => String(el.value ?? el.innerText ?? el.textContent ?? '').trim()).catch(() => 'unknown');
+    if (!landed) {
+      await editor.click({ timeout: 3000 }).catch(() => {});
+      await page.keyboard.insertText(content).catch(() => {});
+    }
     return true;
   }
   return false;
@@ -2715,14 +2724,39 @@ const DM_NAV_TIMEOUT_MS = 90000;
 const DM_LOAD_RETRIES = 3;
 const DM_LOAD_FAIL_RE = /something went wrong|something'?s wrong|please try again|couldn'?t load|failed to load|网络异常|加载失败|出错了|oops/i;
 
-async function dmEditorVisible(page, loose = false) {
-  const scoped = page.locator(
-    '[data-e2e="message-input-area"] [contenteditable="true"], [data-e2e="message-input-area"] textarea, [data-e2e="dm-input"]'
-  ).first();
-  if (await scoped.isVisible().catch(() => false)) return true;
+/**
+ * 在主页面和所有 iframe 里找私信输入框，返回第一个可见的 Locator（找不到返回 null）。
+ * 认 data-e2e 容器、contenteditable（true / plaintext-only）、role=textbox、textarea；
+ * 排除搜索框。非精确选择器只在 /messages 页面或 loose 模式下启用，避免在资料页误把别的输入框当私信框。
+ */
+async function dmFindEditor(page, loose = false) {
   const onMessages = /messages/i.test(String(page.url() || ''));
-  if (!loose && !onMessages) return false;
-  return page.locator('textarea, [contenteditable="true"]').first().isVisible().catch(() => false);
+  const strict = [
+    '[data-e2e="message-input-area"] [contenteditable]:not([contenteditable="false"])',
+    '[data-e2e="message-input-area"] textarea',
+    '[data-e2e="message-input-area"] [role="textbox"]',
+    '[data-e2e="dm-input"]',
+  ];
+  const broad = [
+    'div[contenteditable="true"][role="textbox"]',
+    '[contenteditable="plaintext-only"]',
+    'div[role="textbox"]',
+    '[contenteditable="true"]:not([placeholder*="search" i]):not([aria-label*="search" i])',
+    'textarea:not([placeholder*="search" i]):not([aria-label*="search" i])',
+  ];
+  const selectors = (loose || onMessages) ? [...strict, ...broad] : strict;
+  const roots = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+  for (const root of roots) {
+    for (const sel of selectors) {
+      const loc = root.locator(sel).last();
+      if (await loc.isVisible().catch(() => false)) return loc;
+    }
+  }
+  return null;
+}
+
+async function dmEditorVisible(page, loose = false) {
+  return !!(await dmFindEditor(page, loose).catch(() => null));
 }
 
 /** 左侧导航 / 顶栏 / 收件箱图标里的 "Messages" 不是资料页的私信按钮，点了会跳 /business-suite/messages 营销壳 */
