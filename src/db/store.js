@@ -342,7 +342,10 @@ function statsForOwner(ownerId, overrideLimit) {
   const oid = Number(ownerId || 0);
   const user = oid > 0 ? readOnly((d) => (d.users || []).find((u) => Number(u.id) === oid)) : null;
   const remoteUsed = Number(user?.browser_env_used);
-  const used = Number.isFinite(remoteUsed) && remoteUsed >= 0 ? Math.max(localUsed, remoteUsed) : localUsed;
+  // 已创建数以中心库（account_browser_envs / register_envs 去重统计）为准，与 Node 管理用户列表一致；
+  // 仅在尚未从中心库拿到数据（离线/未登录）时才回退到本机统计。
+  const hasRemote = Number.isFinite(remoteUsed) && remoteUsed >= 0;
+  const used = hasRemote ? remoteUsed : localUsed;
   const limit = resolveEnvLimit(ownerId, overrideLimit);
   return {
     ownerId,

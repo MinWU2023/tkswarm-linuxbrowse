@@ -81,7 +81,8 @@ async function fetchChildrenStats(user) {
     return children.map((c) => {
       const localStat = db.statsForOwner(c.id, c.browserEnvQuota ?? c.browser_env_quota);
       const remoteUsed = Number(c.browserEnvUsed ?? c.browser_env_used);
-      const used = Number.isFinite(remoteUsed) && remoteUsed >= 0 ? Math.max(localStat.used, remoteUsed) : localStat.used;
+      // 已创建数以中心库统计为准（与 Node 管理用户列表一致），拿不到才回退本机统计
+      const used = Number.isFinite(remoteUsed) && remoteUsed >= 0 ? remoteUsed : localStat.localUsed;
       return {
         id: c.id,
         username: c.username,
