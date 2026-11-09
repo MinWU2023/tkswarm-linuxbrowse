@@ -133,7 +133,17 @@ function injectOnPageWs(pageWsUrl, scriptSource) {
   });
 }
 
-function sendEmulationOnWs(wsUrl, { timezone, locale, latitude, longitude, accuracy, reload }) {
+function sendEmulationOnWs(wsUrl, {
+  timezone,
+  locale,
+  latitude,
+  longitude,
+  accuracy,
+  reload,
+  userAgent,
+  platform,
+  userAgentMetadata,
+}) {
   const Ws = globalThis.WebSocket;
   const hasGeo = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))
     && (Number(latitude) !== 0 || Number(longitude) !== 0);
@@ -150,6 +160,21 @@ function sendEmulationOnWs(wsUrl, { timezone, locale, latitude, longitude, accur
       ws.send(JSON.stringify({ id: msgId, method, params }));
     };
     ws.onopen = () => {
+      if (userAgent) {
+        const primaryLang = String(locale || 'en-US').split(',')[0].trim() || 'en-US';
+        const baseLang = primaryLang.split('-')[0] || 'en';
+        const acceptLanguage = primaryLang.includes('-') && baseLang.toLowerCase() !== primaryLang.toLowerCase()
+          ? `${primaryLang},${baseLang};q=0.9`
+          : `${primaryLang};q=0.9`;
+        const uaParams = {
+          userAgent: String(userAgent),
+          acceptLanguage,
+          platform: String(platform || 'Win32'),
+          ...(userAgentMetadata ? { userAgentMetadata } : {}),
+        };
+        send('Emulation.setUserAgentOverride', uaParams);
+        send('Network.setUserAgentOverride', uaParams);
+      }
       if (timezone) send('Emulation.setTimezoneOverride', { timezoneId: timezone });
       if (locale) send('Emulation.setLocaleOverride', { locale });
       if (hasGeo) {

@@ -91,7 +91,7 @@ async function createQrSession({ groupId = null, proxyId = null, accountId = nul
   });
   const label = provider.backendLabel || (backend === 'tkswarm' ? '第一页自研浏览器' : '本地浏览器');
   if (!connection?.ws) throw new Error(`${label}未返回 CDP WebSocket 地址`);
-  const browser = await chromium.connectOverCDP(connection.ws);
+  const browser = await chromium.connectOverCDP(connection.ws, { isLocal: true });
   const context = browser.contexts()[0] || await browser.newContext();
   const page = context.pages()[0] || await context.newPage();
   await page.goto('https://www.tiktok.com/login/qrcode', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(async () => {
@@ -147,7 +147,7 @@ async function checkQrSession(id) {
 
   let username = '';
   try {
-    const browser = await chromium.connectOverCDP(connection.ws);
+    const browser = await chromium.connectOverCDP(connection.ws, { isLocal: true });
     const page = browser.contexts()[0]?.pages()?.[0];
     if (page) {
       username = await page.evaluate(() => {

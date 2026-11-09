@@ -301,6 +301,15 @@ async function startVnc(profileId, display) {
     try { fs.closeSync(logFd); } catch { /* */ }
   }
   proc.unref?.();
+  // 先占位登记：x11vnc 就绪前 GC（reclaimOrphanX11vnc 按 activePorts 判定）不得把它当孤儿杀掉
+  vncByProfile.set(id, {
+    display,
+    rfbPort,
+    proc,
+    viewUrl: `/vnc.html?id=${encodeURIComponent(id)}`,
+    bindHost: VNC_BIND_HOST,
+    starting: true,
+  });
   proc.on('exit', (code, signal) => {
     console.warn(`[vnc] x11vnc 退出 profile=${id.slice(0, 8)}… code=${code} signal=${signal} log=${logFile}`);
     const cur = vncByProfile.get(id);
@@ -310,12 +319,14 @@ async function startVnc(profileId, display) {
   const ready = await waitPortOpen(rfbPort, 10000);
   if (!ready || (proc.exitCode != null && proc.exitCode !== 0)) {
     try { proc.kill('SIGKILL'); } catch { /* */ }
+    if (vncByProfile.get(id)?.rfbPort === rfbPort) vncByProfile.delete(id);
     console.warn(`[vnc] x11vnc 未在 :${rfbPort} 就绪，请看日志 ${logFile}`);
     return null;
   }
   // 再确认进程没秒退（密码文件错误时常见）
   await new Promise((r) => setTimeout(r, 300));
   if (proc.exitCode != null || proc.killed) {
+    if (vncByProfile.get(id)?.rfbPort === rfbPort) vncByProfile.delete(id);
     console.warn(`[vnc] x11vnc 启动后立即退出，请看日志 ${logFile}`);
     return null;
   }

@@ -5,7 +5,7 @@ const http = require('node:http');
 const net = require('node:net');
 const { PROFILES_DIR, CHROME_NO_SANDBOX } = require('../config');
 const { resolveChromeExecutable } = require('./chrome-path');
-const { mergeFingerprint, parseResolution, buildUserAgent } = require('./fingerprint');
+const { mergeFingerprint, parseResolution, buildUserAgent, buildUserAgentMetadata } = require('./fingerprint');
 const { buildInjectScript } = require('./fp-inject');
 const { injectFingerprintOnNewDocument, applyEmulation } = require('./cdp-inject');
 const { resolveChromeProxy } = require('./proxy-auth');
@@ -114,6 +114,7 @@ async function launchProfile(profile, options = {}) {
     // WebRTC：禁止非代理 UDP，降低真实 IP 泄露
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--enforce-webrtc-ip-permission-check',
+    '--disable-blink-features=AutomationControlled',
     `--window-size=${width},${height}`,
     `--lang=${locale}`,
     `--user-agent=${userAgent}`,
@@ -175,8 +176,10 @@ async function launchProfile(profile, options = {}) {
   await waitForPageTarget(port, 15000);
 
   // Canvas / WebGL / WebRTC 深度指纹：CDP 注入（失败则短重试）
+  const userAgentMetadata = buildUserAgentMetadata(fp);
   const injectSrc = buildInjectScript(profile.id, {
     ...fp,
+    userAgent,
     languages: locale,
     os: fp.os,
   });
@@ -186,7 +189,15 @@ async function launchProfile(profile, options = {}) {
     injected = Boolean(r?.ok);
     if (!injected) await new Promise((r) => setTimeout(r, 300));
   }
-  await applyEmulation(port, { timezone, locale, latitude, longitude }).catch(() => null);
+  await applyEmulation(port, {
+    timezone,
+    locale,
+    latitude,
+    longitude,
+    userAgent,
+    platform: fp.os,
+    userAgentMetadata,
+  }).catch(() => null);
 
   return {
     pid: child.pid,

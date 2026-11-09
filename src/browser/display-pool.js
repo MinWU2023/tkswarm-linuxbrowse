@@ -65,7 +65,8 @@ async function acquireDisplay(profileId) {
 
   const num = pickFreeDisplayNum();
   const display = `:${num}`;
-  const proc = spawn('Xvfb', [display, '-screen', '0', '1920x1080x24', '-ac', '-nolisten', 'tcp'], {
+  // -noreset：最后一个 X 客户端断开时不重置服务（x11vnc/Electron 重连时避免画面清空变黑）
+  const proc = spawn('Xvfb', [display, '-screen', '0', '1920x1080x24', '-ac', '-nolisten', 'tcp', '-noreset'], {
     detached: true,
     stdio: 'ignore',
   });
@@ -75,7 +76,15 @@ async function acquireDisplay(profileId) {
     if (cur?.display === display) profileDisplays.delete(id);
   });
   profileDisplays.set(id, { display, proc });
-  await waitPortGone(350);
+  // 等 X socket 真正就绪（最多 6s），而不是固定睡 350ms；否则 Electron / x11vnc 可能抢在 Xvfb 前连上
+  const sockPath = `/tmp/.X11-unix/X${num}`;
+  const sockDeadline = Date.now() + 6000;
+  while (Date.now() < sockDeadline) {
+    if (fs.existsSync(sockPath)) break;
+    if (proc.exitCode != null) break;
+    await waitPortGone(100);
+  }
+  await waitPortGone(200);
   return display;
 }
 

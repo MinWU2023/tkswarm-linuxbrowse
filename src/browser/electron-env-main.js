@@ -54,6 +54,10 @@ if (cfg.softwareRender) {
   } catch { /* ignore */ }
 }
 
+try {
+  app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+} catch { /* ignore */ }
+
 if (process.platform === 'linux') {
   try {
     app.commandLine.appendSwitch('no-sandbox');
@@ -64,18 +68,101 @@ if (process.platform === 'linux') {
 
 // 清掉上次残留的 ready 标记
 try { fs.unlinkSync(path.join(userDataDir, '.cdp-page-ready')); } catch { /* */ }
+try { fs.unlinkSync(path.join(userDataDir, '.cdp-fp-ready')); } catch { /* */ }
+
+function setHeaderCaseInsensitive(headers, name, value) {
+  if (!headers || !value) return;
+  const lower = name.toLowerCase();
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === lower && k !== name) {
+      delete headers[k];
+    }
+  }
+  headers[name] = value;
+}
+
+function hasHeaderCaseInsensitive(headers, name) {
+  if (!headers) return false;
+  const lower = name.toLowerCase();
+  return Object.keys(headers).some((k) => k.toLowerCase() === lower && String(headers[k] || '').trim() !== '');
+}
 
 app.whenReady().then(async () => {
   const locale = String(cfg.locale || 'en-US');
   const userAgent = String(cfg.userAgent || '');
+  const clientHintHeaders = cfg.clientHintHeaders && typeof cfg.clientHintHeaders === 'object'
+    ? cfg.clientHintHeaders
+    : null;
   const width = Number(cfg.width || 1280) || 1280;
   const height = Number(cfg.height || 720) || 720;
   const headless = Boolean(cfg.headless);
   const startUrl = String(cfg.startUrl || 'https://www.tiktok.com');
 
+  let preloadPath = '';
+  if (cfg.injectScript && typeof cfg.injectScript === 'string') {
+    try {
+      preloadPath = path.join(userDataDir, '.tkswarm-fp-preload.js');
+      const preloadCode = `try { const { webFrame } = require('electron'); webFrame.executeJavaScript(${JSON.stringify(cfg.injectScript)}); } catch (e) {}\n`;
+      fs.writeFileSync(preloadPath, preloadCode, 'utf8');
+    } catch {
+      preloadPath = '';
+    }
+  }
+
   const ses = session.defaultSession;
   if (userAgent) {
-    try { ses.setUserAgent(userAgent); } catch { /* ignore */ }
+    try { ses.setUserAgent(userAgent, locale); } catch {
+      try { ses.setUserAgent(userAgent); } catch { /* ignore */ }
+    }
+  }
+
+  // 统一补齐 HTTP 请求头中的 User-Agent / Sec-CH-UA* / Accept-Language，
+  // 修复 Electron setUserAgent 后 Chromium 抑制 Sec-CH-UA（导致 sec-ch-ua=- platform=- 触发 TikTok TLB 403）的问题
+  try {
+    ses.webRequest.onBeforeSendHeaders({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
+      const requestHeaders = details.requestHeaders || {};
+      try {
+        if (userAgent) {
+          setHeaderCaseInsensitive(requestHeaders, 'User-Agent', userAgent);
+        }
+        if (clientHintHeaders) {
+          if (clientHintHeaders['sec-ch-ua']) {
+            setHeaderCaseInsensitive(requestHeaders, 'sec-ch-ua', clientHintHeaders['sec-ch-ua']);
+          }
+          if (clientHintHeaders['sec-ch-ua-mobile']) {
+            setHeaderCaseInsensitive(requestHeaders, 'sec-ch-ua-mobile', clientHintHeaders['sec-ch-ua-mobile']);
+          }
+          if (clientHintHeaders['sec-ch-ua-platform']) {
+            setHeaderCaseInsensitive(requestHeaders, 'sec-ch-ua-platform', clientHintHeaders['sec-ch-ua-platform']);
+          }
+          if (clientHintHeaders['accept-language'] && !hasHeaderCaseInsensitive(requestHeaders, 'accept-language')) {
+            setHeaderCaseInsensitive(requestHeaders, 'Accept-Language', clientHintHeaders['accept-language']);
+          }
+          for (const hk of [
+            'sec-ch-ua-full-version-list',
+            'sec-ch-ua-full-version',
+            'sec-ch-ua-platform-version',
+            'sec-ch-ua-arch',
+            'sec-ch-ua-bitness',
+            'sec-ch-ua-model',
+          ]) {
+            if (clientHintHeaders[hk] && hasHeaderCaseInsensitive(requestHeaders, hk)) {
+              setHeaderCaseInsensitive(requestHeaders, hk, clientHintHeaders[hk]);
+            }
+          }
+        }
+        // 主文档直跳 TikTok 子路径（如 /@handle）若无 Referer，自动补齐首页 Referer，避免无来源直跳被网关 403 拦截
+        const url = String(details.url || '');
+        if (details.resourceType === 'mainFrame' && /^https:\/\/(?:www\.)?tiktok\.com\/[^?#]+/i.test(url)) {
+          if (!hasHeaderCaseInsensitive(requestHeaders, 'referer')) {
+            setHeaderCaseInsensitive(requestHeaders, 'Referer', 'https://www.tiktok.com/');
+          }
+        }
+      } catch { /* ignore */ }
+      callback({ requestHeaders });
+    });
+  } catch (e) {
+    console.warn('[electron-env] onBeforeSendHeaders failed:', e.message || e);
   }
 
   const proxyServer = String(cfg.proxyServer || '').trim();
@@ -136,6 +223,7 @@ app.whenReady().then(async () => {
     title: String(cfg.title || `TkSwarm Env ${profileId}`),
     webPreferences: {
       session: ses,
+      ...(preloadPath ? { preload: preloadPath } : {}),
       contextIsolation: true,
       nodeIntegration: false,
       // Linux + --no-sandbox 下再开 sandbox 易导致渲染进程起不来 → CDP 无 page
@@ -155,6 +243,7 @@ app.whenReady().then(async () => {
 
   win.on('closed', () => {
     try { fs.unlinkSync(path.join(userDataDir, '.cdp-page-ready')); } catch { /* */ }
+    try { fs.unlinkSync(path.join(userDataDir, '.cdp-fp-ready')); } catch { /* */ }
     app.quit();
   });
 
@@ -184,6 +273,14 @@ app.whenReady().then(async () => {
     console.warn('[electron-env] load about:blank:', e.message || e);
   }
   markPageReady('about:blank');
+
+  // 等待父进程完成 CDP 指纹注入与 Emulation 覆盖后再导航业务 URL（最多 3.5s）
+  const fpReadyFile = path.join(userDataDir, '.cdp-fp-ready');
+  const fpWaitEnd = Date.now() + 3500;
+  while (Date.now() < fpWaitEnd) {
+    if (fs.existsSync(fpReadyFile)) break;
+    await new Promise((r) => setTimeout(r, 60));
+  }
 
   // 2) 再进业务页（失败也不清 ready，父进程仍可连上空白页再 goto）
   try {

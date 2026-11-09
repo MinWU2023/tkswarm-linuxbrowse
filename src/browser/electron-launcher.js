@@ -5,7 +5,13 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { PROFILES_DIR, DATA_ROOT, CHROME_NO_SANDBOX } = require('../config');
-const { mergeFingerprint, parseResolution, buildUserAgent } = require('./fingerprint');
+const {
+  mergeFingerprint,
+  parseResolution,
+  buildUserAgent,
+  buildUserAgentMetadata,
+  buildClientHintHeaders,
+} = require('./fingerprint');
 const { resolveChromeProxy } = require('./proxy-auth');
 const { reclaimBeforeOpen, writePid, clearPid } = require('./process-guard');
 const { acquireDisplay } = require('./display-pool');
@@ -65,6 +71,15 @@ async function launchProfileElectron(profile, options = {}) {
     ? String(proxy.proxyArg).replace(/^--proxy-server=/i, '')
     : '';
 
+  const userAgentMetadata = buildUserAgentMetadata(fp);
+  const clientHintHeaders = buildClientHintHeaders(fp, locale);
+  const injectSrc = buildInjectScript(profile.id, {
+    ...fp,
+    userAgent,
+    languages: locale,
+    os: fp.os,
+  });
+
   const envConfig = {
     profileId: String(profile.id),
     name: profile.name || profile.id,
@@ -73,6 +88,9 @@ async function launchProfileElectron(profile, options = {}) {
     width,
     height,
     userAgent,
+    userAgentMetadata,
+    clientHintHeaders,
+    injectScript: injectSrc,
     locale,
     startUrl: profile.platform || 'https://www.tiktok.com',
     title: `${profile.name || profile.id} - TkSwarm Linux Electron`,
@@ -178,17 +196,24 @@ async function launchProfileElectron(profile, options = {}) {
     );
   }
 
-  const injectSrc = buildInjectScript(profile.id, {
-    ...fp,
-    languages: locale,
-    os: fp.os,
-  });
   for (let i = 0; i < 3; i += 1) {
     const r = await injectFingerprintOnNewDocument(port, injectSrc).catch(() => null);
     if (r?.ok) break;
     await new Promise((r) => setTimeout(r, 300));
   }
-  await applyEmulation(port, { timezone, locale, latitude, longitude }).catch(() => null);
+  await applyEmulation(port, {
+    timezone,
+    locale,
+    latitude,
+    longitude,
+    userAgent,
+    platform: fp.os,
+    userAgentMetadata,
+  }).catch(() => null);
+
+  try {
+    fs.writeFileSync(path.join(userDataDir, '.cdp-fp-ready'), `${Date.now()}\n`, 'utf8');
+  } catch { /* ignore */ }
 
   // 注入后 page target 可能刷新，再取一次最新 page ws；若没了再等一轮
   let pageWs = pageTarget.webSocketDebuggerUrl;

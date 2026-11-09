@@ -59,7 +59,9 @@ async function connectPlaywrightOverCDPRaw(opened, {
     || inProcess
     || String(opened?.engine || '').toLowerCase() === 'electron'
   );
-  const opts = { timeout: Math.max(15000, Number(timeoutMs) || 60000) };
+  // isLocal: true —— 浏览器就在本机，Playwright 才会直接传本地文件路径；
+  // 否则按「远程浏览器」处理，setFiles 超过 50MB 会报 Cannot transfer files larger than 50Mb
+  const opts = { timeout: Math.max(15000, Number(timeoutMs) || 60000), isLocal: true };
   const maxAttempts = Math.max(1, Number(retries) || 1);
 
   if (preferPageWs && http) {
@@ -148,18 +150,177 @@ async function settlePage(page) {
   }
 }
 
+/**
+ * 确保当前 Page 的 User-Agent、HTTP Sec-CH-UA* 请求头与 JS navigator.userAgentData 完全一致，
+ * 并保持 CDP Session 常驻（防止临时 WS 断开后 Chromium 重置 Emulation 回 Linux Chromium/130）。
+ */
+async function ensureConsistentUaAndClientHints(page, openedMeta = null) {
+  if (!page || page.isClosed?.()) return;
+  if (page.__tkUaConsistentPromise) {
+    await page.__tkUaConsistentPromise.catch(() => {});
+    return;
+  }
+  const meta = openedMeta || page.__tkOpenedMeta || page.context?.()?.__tkOpenedMeta || null;
+  page.__tkUaConsistentPromise = (async () => {
+    try {
+      let ua = String(meta?.userAgent || '').trim();
+      let lang = String(meta?.locale || meta?.fp?.languages || '').trim();
+      if (!ua || !lang) {
+        const probed = await page.evaluate(() => ({
+          ua: navigator.userAgent || '',
+          lang: navigator.language || 'en-US',
+        })).catch(() => ({ ua: '', lang: 'en-US' }));
+        if (!ua) ua = String(probed.ua || '').trim();
+        if (!lang) lang = String(probed.lang || 'en-US').trim();
+      }
+      const ver = String(
+        meta?.coreVersion
+        || meta?.fp?.coreVersion
+        || (ua.match(/Chrome\/(\d{2,3})/i) || [])[1]
+        || '131'
+      ).trim();
+      const fullVer = `${ver}.0.0.0`;
+      const isMac = meta?.os === 'MacIntel' || meta?.fp?.os === 'MacIntel' || /Macintosh|Mac OS X/i.test(ua);
+      // 若 UA 仍残留 Linux / Electron 字样，规整为标准桌面 Chrome UA
+      if (!ua || /Linux|Electron/i.test(ua)) {
+        ua = isMac
+          ? `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver}.0.0.0 Safari/537.36`
+          : `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ver}.0.0.0 Safari/537.36`;
+      }
+      const navPlatform = isMac ? 'MacIntel' : 'Win32';
+      const uaPlatform = isMac ? 'macOS' : 'Windows';
+      const uaPlatformVersion = isMac ? '14.5.0' : '10.0.0';
+      const primaryLang = String(lang || 'en-US').split(',')[0].trim() || 'en-US';
+      const baseLang = primaryLang.split('-')[0] || 'en';
+      const acceptLanguage = primaryLang.includes('-') && baseLang.toLowerCase() !== primaryLang.toLowerCase()
+        ? `${primaryLang},${baseLang};q=0.9`
+        : `${primaryLang};q=0.9`;
+      const userAgentMetadata = {
+        brands: [
+          { brand: 'Not-A.Brand', version: '99' },
+          { brand: 'Google Chrome', version: String(ver) },
+          { brand: 'Chromium', version: String(ver) },
+        ],
+        fullVersionList: [
+          { brand: 'Not-A.Brand', version: '99.0.0.0' },
+          { brand: 'Google Chrome', version: fullVer },
+          { brand: 'Chromium', version: fullVer },
+        ],
+        fullVersion: fullVer,
+        platform: uaPlatform,
+        platformVersion: uaPlatformVersion,
+        architecture: 'x86',
+        model: '',
+        mobile: false,
+        bitness: '64',
+        wow64: false,
+      };
+      const uaPatchScript = `(() => {
+        try {
+          const def = (obj, key, val) => {
+            try { Object.defineProperty(obj, key, { get: () => val, configurable: true }); } catch (e) {}
+          };
+          const ua = ${JSON.stringify(ua)};
+          const appVer = ua.replace(/^Mozilla\\//i, '');
+          const navPlat = ${JSON.stringify(navPlatform)};
+          const uaPlat = ${JSON.stringify(uaPlatform)};
+          const uaPlatVer = ${JSON.stringify(uaPlatformVersion)};
+          const ver = ${JSON.stringify(ver)};
+          const fullVer = ${JSON.stringify(fullVer)};
+          def(Navigator.prototype, 'webdriver', false);
+          def(Navigator.prototype, 'userAgent', ua);
+          def(Navigator.prototype, 'appVersion', appVer);
+          def(Navigator.prototype, 'vendor', 'Google Inc.');
+          def(Navigator.prototype, 'platform', navPlat);
+          try { delete navigator.webdriver; } catch (e) {}
+          try { delete navigator.userAgent; } catch (e) {}
+          try { delete navigator.platform; } catch (e) {}
+          const brands = Object.freeze([
+            Object.freeze({ brand: 'Not-A.Brand', version: '99' }),
+            Object.freeze({ brand: 'Google Chrome', version: ver }),
+            Object.freeze({ brand: 'Chromium', version: ver }),
+          ]);
+          const fullVersionList = Object.freeze([
+            Object.freeze({ brand: 'Not-A.Brand', version: '99.0.0.0' }),
+            Object.freeze({ brand: 'Google Chrome', version: fullVer }),
+            Object.freeze({ brand: 'Chromium', version: fullVer }),
+          ]);
+          const highEntropyMap = {
+            architecture: 'x86',
+            bitness: '64',
+            brands,
+            formFactors: ['Desktop'],
+            fullVersionList,
+            mobile: false,
+            model: '',
+            platform: uaPlat,
+            platformVersion: uaPlatVer,
+            uaFullVersion: fullVer,
+            wow64: false,
+          };
+          const uaDataObj = {
+            get brands() { return brands; },
+            get mobile() { return false; },
+            get platform() { return uaPlat; },
+            toJSON() { return { brands, mobile: false, platform: uaPlat }; },
+            getHighEntropyValues(hints) {
+              const out = { brands, mobile: false, platform: uaPlat };
+              if (Array.isArray(hints)) {
+                for (const h of hints) {
+                  if (h in highEntropyMap) out[h] = highEntropyMap[h];
+                }
+              }
+              return Promise.resolve(out);
+            },
+          };
+          if (typeof NavigatorUAData === 'function' && NavigatorUAData.prototype) {
+            try { Object.setPrototypeOf(uaDataObj, NavigatorUAData.prototype); } catch (e) {}
+          }
+          def(Navigator.prototype, 'userAgentData', uaDataObj);
+          try { delete navigator.userAgentData; } catch (e) {}
+          if (navigator.userAgentData !== uaDataObj) def(navigator, 'userAgentData', uaDataObj);
+          if (!window.chrome) window.chrome = {};
+          if (!window.chrome.runtime) window.chrome.runtime = {};
+        } catch (e) {}
+      })();`;
+
+      const ctx = page.context?.();
+      if (ctx) {
+        const cdp = await ctx.newCDPSession(page).catch(() => null);
+        if (cdp) {
+          page.__tkUaCdpSession = cdp;
+          const uaParams = {
+            userAgent: ua,
+            acceptLanguage,
+            platform: navPlatform,
+            userAgentMetadata,
+          };
+          await cdp.send('Emulation.setUserAgentOverride', uaParams).catch(() => {});
+          await cdp.send('Network.setUserAgentOverride', uaParams).catch(() => {});
+          await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: uaPatchScript }).catch(() => {});
+        }
+      }
+      await page.addInitScript(uaPatchScript).catch(() => {});
+      await page.evaluate(uaPatchScript).catch(() => {});
+    } catch { /* ignore */ }
+  })();
+  await page.__tkUaConsistentPromise.catch(() => {});
+}
+
 function installPageSettle(page) {
   if (!page) return page;
   try {
     const { attachAutoRotateCaptchaWatcher } = require('./nocaptchaai');
     attachAutoRotateCaptchaWatcher(page);
   } catch { /* ignore */ }
+  ensureConsistentUaAndClientHints(page).catch(() => {});
   if (page.__tkSettleInstalled) return page;
   page.__tkSettleInstalled = true;
   for (const method of ['goto', 'reload']) {
     const orig = typeof page[method] === 'function' ? page[method].bind(page) : null;
     if (!orig) continue;
     page[method] = async (...args) => {
+      await ensureConsistentUaAndClientHints(page).catch(() => {});
       const result = await orig(...args);
       await settlePage(page).catch(() => {});
       return result;
@@ -168,13 +329,21 @@ function installPageSettle(page) {
   return page;
 }
 
-function installBrowserPageSettle(browser) {
+function installBrowserPageSettle(browser, opened = null) {
   try {
+    if (opened) browser.__tkOpenedMeta = opened;
     for (const ctx of browser.contexts()) {
-      ctx.pages().forEach(installPageSettle);
+      if (opened) ctx.__tkOpenedMeta = opened;
+      ctx.pages().forEach((p) => {
+        if (opened) p.__tkOpenedMeta = opened;
+        installPageSettle(p);
+      });
       if (!ctx.__tkSettleInstalled) {
         ctx.__tkSettleInstalled = true;
-        ctx.on('page', installPageSettle);
+        ctx.on('page', (p) => {
+          if (opened) p.__tkOpenedMeta = opened;
+          installPageSettle(p);
+        });
       }
     }
   } catch { /* ignore */ }
@@ -183,12 +352,15 @@ function installBrowserPageSettle(browser) {
 
 async function connectPlaywrightOverCDP(opened, options) {
   const browser = await connectPlaywrightOverCDPRaw(opened, options);
-  return installBrowserPageSettle(browser);
+  return installBrowserPageSettle(browser, opened);
 }
 
 async function ensurePlaywrightPage(browser, options) {
   const page = await ensurePlaywrightPageRaw(browser, options);
-  return installPageSettle(page);
+  if (browser?.__tkOpenedMeta && page) page.__tkOpenedMeta = browser.__tkOpenedMeta;
+  installPageSettle(page);
+  await ensureConsistentUaAndClientHints(page, browser?.__tkOpenedMeta || null).catch(() => {});
+  return page;
 }
 
 function listOpenPages(browser) {
@@ -251,6 +423,7 @@ async function ensurePlaywrightPageRaw(browser, {
       try {
         const alt = await chromium.connectOverCDP(endpoint, {
           timeout: Math.max(15000, Number(timeoutMs) || 45000),
+          isLocal: true,
         });
         page = await waitForPlaywrightPage(alt, {
           timeoutMs: Math.min(12000, Math.max(5000, Number(timeoutMs) || 0)),

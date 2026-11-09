@@ -18,7 +18,18 @@ function buildInjectScript(seedKey, fp = {}) {
   const renderer = String(fp.webglRenderer || 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0)');
   const hardwareConcurrency = Number(fp.hardwareConcurrency || 8);
   const deviceMemory = Number(fp.deviceMemory || 8);
-  const platform = String(fp.os || 'Win32');
+  const isMac = String(fp.os || '') === 'MacIntel';
+  const platform = isMac ? 'MacIntel' : String(fp.os || 'Win32');
+  const coreVersion = (String(fp.coreVersion || '131').match(/^(\d{2,3})/) || [])[1] || '131';
+  const fullVersion = `${coreVersion}.0.0.0`;
+  const userAgent = String(
+    fp.userAgent || (isMac
+      ? `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${coreVersion}.0.0.0 Safari/537.36`
+      : `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${coreVersion}.0.0.0 Safari/537.36`)
+  );
+  const appVersion = userAgent.replace(/^Mozilla\//i, '');
+  const uaDataPlatform = isMac ? 'macOS' : 'Windows';
+  const uaDataPlatformVersion = isMac ? '14.5.0' : '10.0.0';
   const languages = String(fp.languages || 'en-US').split(',').map((x) => x.trim()).filter(Boolean);
   const devicePixelRatio = Number(fp.devicePixelRatio || fp.dpr || 1) || 1;
   const clientRectNoise = (seed % 7) - 3; // -3..3 px 级稳定偏移
@@ -141,11 +152,71 @@ function buildInjectScript(seedKey, fp = {}) {
         Object.defineProperty(obj, key, { get: () => value, configurable: true });
       } catch (e) {}
     };
+    def(Navigator.prototype, 'webdriver', false);
+    def(Navigator.prototype, 'userAgent', ${JSON.stringify(userAgent)});
+    def(Navigator.prototype, 'appVersion', ${JSON.stringify(appVersion)});
+    def(Navigator.prototype, 'vendor', 'Google Inc.');
     def(Navigator.prototype, 'hardwareConcurrency', ${hardwareConcurrency});
     def(Navigator.prototype, 'deviceMemory', ${deviceMemory});
     def(Navigator.prototype, 'platform', ${JSON.stringify(platform)});
     def(Navigator.prototype, 'languages', Object.freeze(${JSON.stringify(languages)}));
     def(Navigator.prototype, 'language', ${JSON.stringify(languages[0] || 'en-US')});
+    try { delete navigator.webdriver; } catch (e) {}
+    try { delete navigator.userAgent; } catch (e) {}
+    try { delete navigator.platform; } catch (e) {}
+
+    // 伪造与 User-Agent 一致的 navigator.userAgentData（消除 Linux Chromium/130 与 Windows Chrome 的矛盾）
+    const brands = Object.freeze([
+      Object.freeze({ brand: 'Not-A.Brand', version: '99' }),
+      Object.freeze({ brand: 'Google Chrome', version: ${JSON.stringify(coreVersion)} }),
+      Object.freeze({ brand: 'Chromium', version: ${JSON.stringify(coreVersion)} }),
+    ]);
+    const fullVersionList = Object.freeze([
+      Object.freeze({ brand: 'Not-A.Brand', version: '99.0.0.0' }),
+      Object.freeze({ brand: 'Google Chrome', version: ${JSON.stringify(fullVersion)} }),
+      Object.freeze({ brand: 'Chromium', version: ${JSON.stringify(fullVersion)} }),
+    ]);
+    const uaPlatformVal = ${JSON.stringify(uaDataPlatform)};
+    const highEntropyMap = {
+      architecture: 'x86',
+      bitness: '64',
+      brands,
+      formFactors: ['Desktop'],
+      fullVersionList,
+      mobile: false,
+      model: '',
+      platform: uaPlatformVal,
+      platformVersion: ${JSON.stringify(uaDataPlatformVersion)},
+      uaFullVersion: ${JSON.stringify(fullVersion)},
+      wow64: false,
+    };
+    const uaDataObj = {
+      get brands() { return brands; },
+      get mobile() { return false; },
+      get platform() { return uaPlatformVal; },
+      toJSON() {
+        return { brands, mobile: false, platform: uaPlatformVal };
+      },
+      getHighEntropyValues(hints) {
+        const out = { brands, mobile: false, platform: uaPlatformVal };
+        if (Array.isArray(hints)) {
+          for (const h of hints) {
+            if (h in highEntropyMap) out[h] = highEntropyMap[h];
+          }
+        }
+        return Promise.resolve(out);
+      },
+    };
+    if (typeof NavigatorUAData === 'function' && NavigatorUAData.prototype) {
+      try { Object.setPrototypeOf(uaDataObj, NavigatorUAData.prototype); } catch (e) {}
+    }
+    def(Navigator.prototype, 'userAgentData', uaDataObj);
+    try { delete navigator.userAgentData; } catch (e) {}
+    if (navigator.userAgentData !== uaDataObj) {
+      def(navigator, 'userAgentData', uaDataObj);
+    }
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) window.chrome.runtime = {};
   } catch (e) {}
 
   // —— DPI ——

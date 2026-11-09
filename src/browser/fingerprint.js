@@ -61,9 +61,65 @@ function buildUserAgent(fp) {
 }
 
 /** Sec-CH-UA 近似串（供后续 CDP Network 覆盖用） */
-function buildSecChUa(fp) {
+function buildSecChUa(fp = {}) {
   const ver = normalizeCoreVersion(fp.coreVersion);
-  return `"Chromium";v="${ver}", "Not_A Brand";v="24", "Google Chrome";v="${ver}"`;
+  return `"Not-A.Brand";v="99", "Google Chrome";v="${ver}", "Chromium";v="${ver}"`;
+}
+
+/**
+ * 构造与 User-Agent 严格一致的 CDP userAgentMetadata，
+ * 避免 Linux Chromium 原生 uaData（Linux / Chromium 130）或空 Sec-CH-UA 暴露真实内核。
+ */
+function buildUserAgentMetadata(fp = {}) {
+  const ver = normalizeCoreVersion(fp.coreVersion);
+  const fullVer = `${ver}.0.0.0`;
+  const isMac = fp.os === 'MacIntel';
+  return {
+    brands: [
+      { brand: 'Not-A.Brand', version: '99' },
+      { brand: 'Google Chrome', version: String(ver) },
+      { brand: 'Chromium', version: String(ver) },
+    ],
+    fullVersionList: [
+      { brand: 'Not-A.Brand', version: '99.0.0.0' },
+      { brand: 'Google Chrome', version: fullVer },
+      { brand: 'Chromium', version: fullVer },
+    ],
+    fullVersion: fullVer,
+    platform: isMac ? 'macOS' : 'Windows',
+    platformVersion: isMac ? '14.5.0' : '10.0.0',
+    architecture: 'x86',
+    model: '',
+    mobile: false,
+    bitness: '64',
+    wow64: false,
+  };
+}
+
+/**
+ * 构造与 User-Agent 一致的 HTTP Client Hints 请求头（供 Electron webRequest 与 CDP 兜底）
+ */
+function buildClientHintHeaders(fp = {}, locale = 'en-US') {
+  const ver = normalizeCoreVersion(fp.coreVersion);
+  const fullVer = `${ver}.0.0.0`;
+  const isMac = fp.os === 'MacIntel';
+  const primaryLang = String(locale || fp.languages || 'en-US').split(',')[0].trim() || 'en-US';
+  const baseLang = primaryLang.split('-')[0] || 'en';
+  const acceptLang = primaryLang.includes('-') && baseLang.toLowerCase() !== primaryLang.toLowerCase()
+    ? `${primaryLang},${baseLang};q=0.9`
+    : `${primaryLang};q=0.9`;
+  return {
+    'sec-ch-ua': `"Not-A.Brand";v="99", "Google Chrome";v="${ver}", "Chromium";v="${ver}"`,
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': isMac ? '"macOS"' : '"Windows"',
+    'sec-ch-ua-platform-version': isMac ? '"14.5.0"' : '"10.0.0"',
+    'sec-ch-ua-arch': '"x86"',
+    'sec-ch-ua-bitness': '"64"',
+    'sec-ch-ua-model': '""',
+    'sec-ch-ua-full-version': `"${fullVer}"`,
+    'sec-ch-ua-full-version-list': `"Not-A.Brand";v="99.0.0.0", "Google Chrome";v="${fullVer}", "Chromium";v="${fullVer}"`,
+    'accept-language': acceptLang,
+  };
 }
 
 module.exports = {
@@ -71,6 +127,8 @@ module.exports = {
   parseResolution,
   buildUserAgent,
   buildSecChUa,
+  buildUserAgentMetadata,
+  buildClientHintHeaders,
   normalizeCoreVersion,
   CORE_VERSIONS,
   DEFAULT_FP,

@@ -2672,10 +2672,20 @@ async function dmEditorVisible(page, loose = false) {
 }
 
 async function dmMessageButton(page) {
-  const btn = page.getByRole('button', { name: /^(Message|私信|发私信)$/i }).first();
+  const btn = page.getByRole('button', { name: /^(Message|Messages|Send message|私信|发私信|发消息)$/i }).first();
   if (await btn.count().catch(() => 0) && await btn.isVisible().catch(() => false)) return btn;
   // 兜底：按钮可能是链接或带 data-e2e 的元素
-  const alt = page.locator('[data-e2e="message-button"], [data-e2e="dm-button"], a[role="button"]:text-is("Message"), a:text-is("Message"), a:text-is("私信")').first();
+  const alt = page.locator([
+    '[data-e2e="message-button"]',
+    '[data-e2e="dm-button"]',
+    '[data-e2e="user-page"] a[href*="/messages"]',
+    'a[role="button"]:text-is("Message")',
+    'a:text-is("Message")',
+    'a:text-is("私信")',
+    'a:text-is("发私信")',
+    'button[aria-label*="Message" i]',
+    'a[aria-label*="Message" i]',
+  ].join(', ')).first();
   if (await alt.count().catch(() => 0) && await alt.isVisible().catch(() => false)) return alt;
   return null;
 }
@@ -2715,25 +2725,310 @@ async function profileLooksLoaded(page) {
   return page.locator('[data-e2e="user-page"], [data-e2e="user-title"], [data-e2e="followers-count"]').first().isVisible().catch(() => false);
 }
 
-/** 主页没有私信入口时走消息页搜索；加载失败返回 failed，找到输入框立刻 ready */
-async function openViaMessagesInbox(page, handle) {
-  await page.goto('https://www.tiktok.com/messages', {
+/**
+ * 从 TikTok 站内以同源链接点击（Sec-Fetch-Site: same-origin + Referer: https://www.tiktok.com/）进入个人主页，
+ * 避免裸 page.goto 直跳 /@handle（Sec-Fetch-Site: none 且无 Referer）触发 TikTok TLB 网关 403。
+ */
+async function navigateToProfileSameOrigin(page, handle, log = () => {}) {
+  const cleanHandle = String(handle || '').replace(/^@/, '').trim();
+  const profilePath = `/@${encodeURIComponent(cleanHandle)}`;
+  const profileUrl = `https://www.tiktok.com${profilePath}`;
+
+  const curState = await page.evaluate(() => ({
+    href: String(location.href || ''),
+    host: String(location.hostname || ''),
+    kids: document.body?.childElementCount || 0,
+  })).catch(() => ({ href: '', host: '', kids: 0 }));
+
+  // 若不在 tiktok.com 或当前处于 403 空文档（kids=0），先回首页拿到正常 200 文档上下文
+  if (!/tiktok\.com$/i.test(curState.host) || curState.kids === 0) {
+    await page.goto('https://www.tiktok.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 45000,
+    }).catch(() => {});
+    await page.waitForTimeout(1500).catch(() => {});
+  }
+
+  // 在当前站内页面注入同源 <a> 并点击，使 Chromium 自动附带 Sec-Fetch-Site: same-origin 与 Referer
+  const clickedSameOrigin = await page.evaluate((targetPath) => {
+    try {
+      if (!document.body) return false;
+      let a = document.getElementById('__tk_same_origin_nav');
+      if (!a) {
+        a = document.createElement('a');
+        a.id = '__tk_same_origin_nav';
+        a.style.cssText = 'position:fixed;top:0;left:0;width:2px;height:2px;opacity:0.01;z-index:2147483647;pointer-events:auto;';
+        document.body.appendChild(a);
+      }
+      a.setAttribute('href', targetPath);
+      a.setAttribute('target', '_self');
+      a.textContent = targetPath;
+      a.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }, profilePath).catch(() => false);
+
+  if (clickedSameOrigin) {
+    const navWaitEnd = Date.now() + 8000;
+    while (Date.now() < navWaitEnd) {
+      const u = String(page.url() || '');
+      if (u.toLowerCase().includes(`/@${cleanHandle.toLowerCase()}`)) {
+        await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+        return;
+      }
+      await page.waitForTimeout(250).catch(() => {});
+    }
+  }
+
+  log(`同源链接未触发跳转，回退带 Referer 导航 @${cleanHandle}`);
+  await page.goto(profileUrl, {
     waitUntil: 'domcontentloaded',
     timeout: DM_NAV_TIMEOUT_MS,
+    referer: 'https://www.tiktok.com/',
   }).catch(() => {});
-  const inbox = await waitDmSurface(page, DM_CHAT_WAIT_MS, true);
-  if (inbox === 'ready') return 'ready';
-  if (inbox === 'failed') return 'failed';
-  const search = page.locator('input[placeholder*="Search"],input[placeholder*="搜索"],input[type="search"]').first();
+}
+
+/**
+ * 通过站内搜索框 / 搜索用户列表点击 React Router <Link> 进入用户主页并打开私信：
+ * 点击站内搜索结果的 <a href="/@handle"> 走的是 SPA 路由（XHR 拉取 /api/user/detail/），
+ * 不请求 /@handle 主文档，可彻底绕过 TLB 对 /@handle 主文档的 403 拦截。
+ * @returns {Promise<'ready'|'loaded'|'miss'>}
+ */
+async function openProfileViaSpaSearch(page, handle, log = () => {}) {
+  const cleanHandle = String(handle || '').replace(/^@/, '').trim();
+  if (!cleanHandle) return 'miss';
+  log(`尝试通过站内搜索进入 @${cleanHandle} 主页（SPA 路由防 403）`);
+
+  const cur = await page.evaluate(() => ({
+    host: String(location.hostname || ''),
+    kids: document.body?.childElementCount || 0,
+  })).catch(() => ({ host: '', kids: 0 }));
+
+  if (!/tiktok\.com$/i.test(cur.host) || cur.kids <= 1) {
+    await page.goto('https://www.tiktok.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 45000,
+    }).catch(() => {});
+    await page.waitForTimeout(1800).catch(() => {});
+  }
+
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page, { log });
+  } catch { /* ignore */ }
+
+  // 1) 优先用顶栏搜索框输入 handle 回车（纯 SPA 路由切换）
+  const searchInput = page.locator([
+    'input[data-e2e="search-user-input"]',
+    '[data-e2e="search-box"] input',
+    'form[action*="/search"] input',
+    'header input[type="search"]',
+    'input[type="search"]',
+    'input[placeholder*="Search" i]',
+    'input[placeholder*="搜索"]',
+  ].join(', ')).first();
+
+  let onSearchPage = false;
+  if (await searchInput.count().catch(() => 0) && await searchInput.isVisible().catch(() => false)) {
+    try {
+      await searchInput.click({ timeout: 3000 });
+      await searchInput.fill(cleanHandle);
+      await page.waitForTimeout(300);
+      const searchBtn = page.locator('[data-e2e="search-box-button"], form[action*="/search"] button[type="submit"]').first();
+      if (await searchBtn.count().catch(() => 0) && await searchBtn.isVisible().catch(() => false)) {
+        await searchBtn.click({ timeout: 3000 }).catch(() => {});
+      } else {
+        await page.keyboard.press('Enter').catch(() => {});
+      }
+      const waitSearchEnd = Date.now() + 8000;
+      while (Date.now() < waitSearchEnd) {
+        if (/\/search/i.test(String(page.url() || ''))) {
+          onSearchPage = true;
+          break;
+        }
+        await page.waitForTimeout(300);
+      }
+    } catch { /* fall through */ }
+  }
+
+  // 2) 若搜索框未跳转到 /search，则通过同源链接进入 /search/user?q=handle
+  if (!onSearchPage) {
+    const searchPath = `/search/user?q=${encodeURIComponent(cleanHandle)}`;
+    await page.evaluate((p) => {
+      if (!document.body) return;
+      const a = document.createElement('a');
+      a.href = p;
+      a.target = '_self';
+      document.body.appendChild(a);
+      a.click();
+    }, searchPath).catch(() => {});
+    await page.waitForTimeout(2500).catch(() => {});
+    if (!/\/search/i.test(String(page.url() || ''))) {
+      await page.goto(`https://www.tiktok.com${searchPath}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 45000,
+        referer: 'https://www.tiktok.com/',
+      }).catch(() => {});
+    }
+  }
+
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page, { log });
+  } catch { /* ignore */ }
+
+  // 若在综合搜索页，尝试点 Users / 用户 Tab
+  if (!/\/search\/user/i.test(String(page.url() || ''))) {
+    const usersTab = page.locator('[data-e2e="search-user-tab"], a[href*="/search/user"]').first();
+    if (await usersTab.count().catch(() => 0) && await usersTab.isVisible().catch(() => false)) {
+      await usersTab.click({ timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(1500).catch(() => {});
+    }
+  }
+
+  // 3) 在搜索结果里找指向 /@handle 的 React <Link> 并点击
+  const findEnd = Date.now() + 12000;
+  let clickedUser = false;
+  while (Date.now() < findEnd) {
+    try {
+      const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+      await solveRotateCaptchaIfPresent(page, { log });
+    } catch { /* ignore */ }
+
+    const matchedHref = await page.evaluate((targetHandle) => {
+      const lower = targetHandle.toLowerCase();
+      const links = Array.from(document.querySelectorAll('a[href*="/@"]'));
+      const exact = links.find((a) => {
+        const m = String(a.getAttribute('href') || '').match(/\/@([^/?#]+)/);
+        return m && decodeURIComponent(m[1]).toLowerCase() === lower;
+      });
+      const candidate = exact || links.find((a) => {
+        const m = String(a.getAttribute('href') || '').match(/\/@([^/?#]+)/);
+        return m && decodeURIComponent(m[1]).toLowerCase().includes(lower);
+      });
+      if (!candidate) return '';
+      document.querySelectorAll('[data-tks-spa-user]').forEach((n) => n.removeAttribute('data-tks-spa-user'));
+      candidate.setAttribute('data-tks-spa-user', '1');
+      return String(candidate.getAttribute('href') || '');
+    }, cleanHandle).catch(() => '');
+
+    if (matchedHref) {
+      const userLink = page.locator('[data-tks-spa-user="1"]').first();
+      await userLink.scrollIntoViewIfNeeded().catch(() => {});
+      await userLink.click({ timeout: 5000 }).catch(async () => {
+        await page.evaluate(() => document.querySelector('[data-tks-spa-user="1"]')?.click()).catch(() => {});
+      });
+      clickedUser = true;
+      log(`已在搜索结果点击 @${cleanHandle} 链接（${matchedHref.slice(0, 50)}）`);
+      break;
+    }
+    await page.waitForTimeout(500).catch(() => {});
+  }
+
+  if (!clickedUser) {
+    log(`站内搜索未找到 @${cleanHandle} 用户卡片`);
+    return 'miss';
+  }
+
+  // 4) 等待 SPA 渲染出用户主页或 Message 按钮
+  const surface = await waitDmSurface(page, DM_CHAT_WAIT_MS);
+  if (surface === 'ready') return 'ready';
+  if (surface === 'button') {
+    const btn = await dmMessageButton(page);
+    if (btn) {
+      await btn.click({ timeout: 8000 }).catch(() => {});
+      const afterClick = await waitDmSurface(page, DM_CHAT_WAIT_MS, true);
+      if (afterClick === 'ready') return 'ready';
+    }
+    return 'loaded';
+  }
+  if (await profileLooksLoaded(page).catch(() => false)) return 'loaded';
+  return 'miss';
+}
+
+/**
+ * 走 /messages 收件箱会话列表或搜索打开与 @handle 的私信窗口
+ * （尤其适用于客服回复 dm_reply 已有历史会话，或主页被 403/无 Message 按钮时兜底）。
+ */
+async function openViaMessagesInbox(page, handle, log = () => {}) {
+  const cleanHandle = String(handle || '').replace(/^@/, '').trim();
+  if (!cleanHandle) return 'miss';
+  log(`尝试从 /messages 消息收件箱打开与 @${cleanHandle} 的会话`);
+
+  if (!/\/messages/i.test(String(page.url() || ''))) {
+    // 优先点击页面上的 Messages 图标（保持 SPA 路由）
+    const navMsg = page.locator('[data-e2e="nav-messages"], [data-e2e="inbox-icon"], a[href*="/messages"]').first();
+    if (await navMsg.count().catch(() => 0) && await navMsg.isVisible().catch(() => false)) {
+      await navMsg.click({ timeout: 4000 }).catch(() => {});
+      await page.waitForTimeout(2000).catch(() => {});
+    }
+    if (!/\/messages/i.test(String(page.url() || ''))) {
+      await page.goto('https://www.tiktok.com/messages', {
+        waitUntil: 'domcontentloaded',
+        timeout: DM_NAV_TIMEOUT_MS,
+        referer: 'https://www.tiktok.com/',
+      }).catch(() => {});
+    }
+  }
+
+  try {
+    const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+    await solveRotateCaptchaIfPresent(page, { log });
+  } catch { /* ignore */ }
+
+  await page.waitForTimeout(2000).catch(() => {});
+  if (await dmPageLoadFailed(page)) return 'failed';
+
+  // 1) 先在左侧会话列表查找是否已有 @handle 的会话项（支持滚动 3 屏）
+  for (let scrollRound = 0; scrollRound < 3; scrollRound += 1) {
+    const hitConv = await page.evaluate((targetHandle) => {
+      const lower = targetHandle.toLowerCase();
+      const items = [
+        ...document.querySelectorAll('[data-e2e*="chat-list"] [data-e2e*="list-item"], [class*="DivConversation"], [class*="conversation-item"], [role="listitem"], li'),
+      ];
+      for (const el of items) {
+        const text = String(el.innerText || '').trim().toLowerCase();
+        const href = String(el.closest('a')?.getAttribute('href') || el.getAttribute('href') || '').toLowerCase();
+        if (text.includes(lower) || href.includes(lower)) {
+          document.querySelectorAll('[data-tks-conv-hit]').forEach((n) => n.removeAttribute('data-tks-conv-hit'));
+          el.setAttribute('data-tks-conv-hit', '1');
+          return true;
+        }
+      }
+      return false;
+    }, cleanHandle).catch(() => false);
+
+    if (hitConv) {
+      const itemLoc = page.locator('[data-tks-conv-hit="1"]').first();
+      await itemLoc.scrollIntoViewIfNeeded().catch(() => {});
+      await itemLoc.click({ timeout: 5000 }).catch(() => {});
+      const afterConv = await waitDmSurface(page, DM_CHAT_WAIT_MS, true);
+      if (afterConv === 'ready') {
+        log(`已在 /messages 会话列表选中 @${cleanHandle}`);
+        return 'ready';
+      }
+    }
+
+    await page.evaluate(() => {
+      const panes = [...document.querySelectorAll('[class*="conversation"],[class*="inbox"],[data-e2e*="chat"],aside,nav')];
+      const el = panes.find((n) => n.scrollHeight > n.clientHeight + 20);
+      if (el) el.scrollTop += 500;
+    }).catch(() => {});
+    await page.waitForTimeout(600).catch(() => {});
+  }
+
+  // 2) 再尝试 /messages 内的搜索框
+  const search = page.locator('input[placeholder*="Search" i],input[placeholder*="搜索"],input[type="search"]').first();
   if (await search.count().catch(() => 0) && await search.isVisible().catch(() => false)) {
-    await search.fill(handle).catch(async () => {
-      await search.click();
-      await page.keyboard.type(handle);
+    await search.fill(cleanHandle).catch(async () => {
+      await search.click().catch(() => {});
+      await page.keyboard.type(cleanHandle).catch(() => {});
     });
-    const hit = page.getByText(handle, { exact: false }).first();
+    const hit = page.getByText(cleanHandle, { exact: false }).first();
     const hitEnd = Date.now() + 8000;
     while (Date.now() < hitEnd) {
-      if (await dmEditorVisible(page, true)) return 'ready';
       if (await dmPageLoadFailed(page)) return 'failed';
       if (await hit.isVisible().catch(() => false)) {
         await hit.click().catch(() => {});
@@ -2742,7 +3037,10 @@ async function openViaMessagesInbox(page, handle) {
       await page.waitForTimeout(400);
     }
     const after = await waitDmSurface(page, DM_CHAT_WAIT_MS, true);
-    if (after === 'ready') return 'ready';
+    if (after === 'ready') {
+      log(`已在 /messages 搜索选中 @${cleanHandle}`);
+      return 'ready';
+    }
     if (after === 'failed') return 'failed';
   }
   if (await dmPageLoadFailed(page)) return 'failed';
@@ -2829,7 +3127,10 @@ async function openRecipientChat(page, recipient, log = () => {}) {
 const DM_MANUAL_WAIT_MS = Number(process.env.TKSWARM_DM_MANUAL_WAIT_MS || 300000) || 300000;
 
 /**
- * 主文档 403（疑似人机验证/风控）时：不再重载，临时关闭省流，等人工在 VNC 里完成验证。
+ * 主文档 403（疑似网关风控 / 人机验证）时：
+ * 1) 临时关闭省流；
+ * 2) 若是 TLB 403 空白文档（body子节点<=1），绝不原地死等 5 分钟，而是立即回首页通过「站内搜索 SPA 路由」或「/messages 消息收件箱」绕过网关直链拦截；
+ * 3) 若页面确实渲染了验证码挑战，则等待自动过码或人工在 VNC 中完成验证。
  * @returns {'ready'|'loaded'|'timeout'}
  */
 async function waitManualVerify(page, handle, log = () => {}) {
@@ -2839,11 +3140,12 @@ async function waitManualVerify(page, handle, log = () => {}) {
     await st.pauseSaveTrafficForCaptcha(page);
     paused = true;
   } catch { /* ignore */ }
-  const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(handle)}`;
-  log(`@${handle} 主页返回 403（疑似人机验证/风控）：已临时关闭省流并尝试自动恢复/识别旋转验证，最多等 ${Math.round(DM_MANUAL_WAIT_MS / 60000)} 分钟`);
+  log(`@${handle} 主页返回 403（疑似网关风控/人机验证）：已临时关闭省流并启动站内 SPA / 收件箱恢复流程`);
   const end = Date.now() + DM_MANUAL_WAIT_MS;
   let result = 'timeout';
-  let triedSoftRecover = false;
+  let triedSpaRecover = false;
+  let emptyPageChecks = 0;
+
   while (Date.now() < end) {
     if (page.isClosed?.()) break;
     try {
@@ -2856,24 +3158,45 @@ async function waitManualVerify(page, handle, log = () => {}) {
     if (await dmEditorVisible(page, true).catch(() => false)) { result = 'ready'; break; }
     if (await dmMessageButton(page).catch(() => null)) { result = 'loaded'; break; }
     if (await profileLooksLoaded(page).catch(() => false)) { result = 'loaded'; break; }
-    // 网关 403 空页面没有任何 DOM 与验证码脚本：关闭省流后先做一次首页预热再重新进主页，让前端能正常拉起验证弹层或主页
-    if (!triedSoftRecover) {
-      triedSoftRecover = true;
-      const bodyKids = await page.evaluate(() => document.body?.childElementCount || 0).catch(() => 0);
-      const bodyLen = await page.evaluate(() => (document.body?.innerText || '').trim().length).catch(() => 0);
-      if (bodyKids <= 1 && bodyLen < 120) {
-        log(`@${handle} 403 页面为空（子元素=${bodyKids}, 文本=${bodyLen}），尝试回首页预热后重进主页以唤起验证或页面`);
-        await page.goto('https://www.tiktok.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+
+    const pageState = await page.evaluate(() => {
+      const kids = document.body?.childElementCount || 0;
+      const text = String(document.body?.innerText || '').trim();
+      const hasCaptchaDom = Boolean(
+        document.querySelector('#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="secsdk" i], iframe[src*="captcha" i], iframe[src*="verify" i]')
+      ) || /verify to continue|drag the slider|fit the puzzle|security check|人机验证|安全验证|拖动滑块|完成拼图/i.test(text);
+      return { kids, textLen: text.length, hasCaptchaDom };
+    }).catch(() => ({ kids: 0, textLen: 0, hasCaptchaDom: false }));
+
+    // 网关 403 空页面没有任何 DOM 与验证码脚本：改走站内搜索 SPA 路由 + /messages 收件箱，不再裸跳 /@handle
+    if (!pageState.hasCaptchaDom && pageState.kids <= 1 && pageState.textLen < 120) {
+      if (!triedSpaRecover) {
+        triedSpaRecover = true;
+        log(`@${handle} 403 页面为空白网关拦截页（子元素=${pageState.kids}, 文本=${pageState.textLen}），改走首页站内搜索 SPA 路由进入主页`);
+        const viaSpa = await openProfileViaSpaSearch(page, handle, log).catch(() => 'miss');
+        if (viaSpa === 'ready') { result = 'ready'; break; }
+        if (viaSpa === 'loaded') { result = 'loaded'; break; }
+
+        log(`@${handle} 站内搜索未直达输入框，尝试通过 /messages 收件箱定位会话`);
+        const viaInbox = await openViaMessagesInbox(page, handle, log).catch(() => 'miss');
+        if (viaInbox === 'ready') { result = 'ready'; break; }
+
+        // 最后尝试一次从首页同源 <a> 点击进入
+        await navigateToProfileSameOrigin(page, handle, log).catch(() => {});
         await page.waitForTimeout(2000).catch(() => {});
-        try {
-          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
-          await solveRotateCaptchaIfPresent(page, { log });
-        } catch { /* ignore */ }
-        await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-        await page.waitForTimeout(2000).catch(() => {});
+        if (await dmEditorVisible(page, true).catch(() => false)) { result = 'ready'; break; }
+        if (await dmMessageButton(page).catch(() => null)) { result = 'loaded'; break; }
+        if (await profileLooksLoaded(page).catch(() => false)) { result = 'loaded'; break; }
         continue;
       }
+      emptyPageChecks += 1;
+      // 若所有绕行方案后页面依然是无验证码脚本的空 403 页，不必傻等 5 分钟（无任何验证码可供人工操作）
+      if (emptyPageChecks >= 3) {
+        log(`@${handle} 页面仍为空白 403 响应（无验证码组件可操作），结束空等`);
+        break;
+      }
     }
+
     await page.waitForTimeout(2000).catch(() => {});
   }
   if (paused) {
@@ -2882,26 +3205,43 @@ async function waitManualVerify(page, handle, log = () => {}) {
       if (result !== 'timeout') await st.resumeSaveTrafficAfterCaptcha(page);
     } catch { /* ignore */ }
   }
-  log(result === 'timeout' ? '等待人工验证超时，未恢复' : '页面已恢复，继续打开私信');
+  log(result === 'timeout' ? '403 恢复/人工验证未完成' : '页面已恢复，继续打开私信');
   return result;
 }
 
 async function openRecipientChatInner(page, recipient, log = () => {}, netSummary = () => '') {
   const handle = String(recipient || '').replace(/^@/, '').trim();
   if (!handle) return false;
-  const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(handle)}`;
   let noBtn = 0;
+
+  // 若当前已在 /messages（如复用窗口或刚完成会话同步），先顺手在收件箱里找是否已有现成会话
+  if (/\/messages/i.test(String(page.url() || ''))) {
+    const quickInbox = await openViaMessagesInbox(page, handle, log).catch(() => 'miss');
+    if (quickInbox === 'ready') return true;
+  }
 
   for (let attempt = 0; attempt <= DM_LOAD_RETRIES; attempt += 1) {
     log(attempt === 0
       ? `打开私信 @${handle}`
       : `私信界面重新加载 @${handle}（${attempt}/${DM_LOAD_RETRIES}）`);
-    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: DM_NAV_TIMEOUT_MS }).catch(() => {});
+
+    // 第 0 次优先用站内同源 <a> 导航（携带 Referer 与 Sec-Fetch-Site: same-origin）；
+    // 重试时交替使用站内搜索 SPA 路由，避免重复触发网关 403
+    if (attempt === 1) {
+      const spaState = await openProfileViaSpaSearch(page, handle, log).catch(() => 'miss');
+      if (spaState === 'ready') return true;
+    } else {
+      await navigateToProfileSameOrigin(page, handle, log);
+    }
+
     if (/主文档=403/.test(netSummary())) {
       const manual = await waitManualVerify(page, handle, log);
       if (manual === 'ready') return true;
       if (manual === 'timeout') {
-        page.__dmLastProbe = `主文档 403（疑似人机验证/风控），等待人工 ${Math.round(DM_MANUAL_WAIT_MS / 60000)} 分钟后仍未恢复：${await dmPageProbe(page)} ｜网络：${netSummary()}`;
+        // 403 恢复仍未进主页时，最后兜底试一次 /messages 收件箱
+        const inboxFallback = await openViaMessagesInbox(page, handle, log).catch(() => 'miss');
+        if (inboxFallback === 'ready') return true;
+        page.__dmLastProbe = `主文档 403（疑似人机验证/风控），自动绕行与等待后仍未恢复：${await dmPageProbe(page)} ｜网络：${netSummary()}`;
         return false;
       }
     }
@@ -2928,9 +3268,13 @@ async function openRecipientChatInner(page, recipient, log = () => {}, netSummar
         await btn2.click({ timeout: 8000 }).catch(() => {});
         state = await waitDmSurface(page, DM_CHAT_WAIT_MS, true);
         if (state === 'ready') return true;
-        log(`已点击 Message 但未出现输入框，当前页面 ${String(page.url() || '').slice(0, 100)}`);
+        log(`已点击 Message 但未出现输入框，当前页面 ${String(page.url() || '').slice(0, 100)}，尝试从 /messages 收件箱打开`);
+        const viaInboxAfterClick = await openViaMessagesInbox(page, handle, log).catch(() => 'miss');
+        if (viaInboxAfterClick === 'ready') return true;
       } else {
-        // 不再走消息页搜索：新联系人没有历史会话，搜不到；且 /messages 会被重定向到 business-suite
+        // 主页无 Message 按钮时，先试一次 /messages 收件箱（针对客服回复已有历史会话但主页未显示按钮的情况）
+        const viaInboxNoBtn = await openViaMessagesInbox(page, handle, log).catch(() => 'miss');
+        if (viaInboxNoBtn === 'ready') return true;
         const profileProbe = await dmPageProbe(page);
         noBtn += 1;
         page.__dmLastProbe = `主页已加载但没有 Message 按钮（对方可能关闭私信或需互相关注；或页面按钮未加载出来）｜主页：${profileProbe}｜网络：${netSummary()}`;
