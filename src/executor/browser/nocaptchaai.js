@@ -1151,21 +1151,31 @@ async function dragSliderWithAngularCalibration(page, target, info, targetAngleD
   const readRelativeRotationDeg = async () => {
     if (!target) return null;
     return target.evaluate(({ oSrc, iSrc }) => {
-      const parseDeg = (el) => {
-        if (!el) return 0;
+      const parseOwnDeg = (el) => {
+        if (!el) return null;
         const inlineTf = String(el.style?.transform || '');
         const mInline = inlineTf.match(/rotate\(([-\d.]+)deg\)/i);
         if (mInline) return Number(mInline[1]) || 0;
         const st = window.getComputedStyle?.(el);
         const tf = String(st?.transform || '');
-        if (!tf || tf === 'none') return 0;
+        if (!tf || tf === 'none') return null;
         const m = tf.match(/matrix\(([^)]+)\)/i);
-        if (!m) return 0;
+        if (!m) return null;
         const parts = m[1].split(',').map((v) => Number(v.trim()));
         if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+          if (Math.abs(parts[0] - 1) < 1e-4 && Math.abs(parts[1]) < 1e-4) return null;
           let deg = Math.atan2(parts[1], parts[0]) * (180 / Math.PI);
           if (deg < 0) deg += 360;
           return deg;
+        }
+        return null;
+      };
+      const parseDeg = (el) => {
+        let cur = el;
+        for (let d = 0; d < 3 && cur && cur !== document.body; d += 1) {
+          const v = parseOwnDeg(cur);
+          if (v !== null) return v;
+          cur = cur.parentElement;
         }
         return 0;
       };
