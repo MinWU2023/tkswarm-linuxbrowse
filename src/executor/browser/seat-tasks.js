@@ -283,7 +283,11 @@ async function runFetchLang(accountId, payload = {}) {
       try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
       await releaseSeatLease(profileId);
     } else {
+      // 留给 VNC 人工查看：不断开 Electron 窗
       try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* */ }
+      // 必须解除跨机包租约：keepOpen 只保留窗口，租约不释放会挂满 2 小时，
+      // 后续同账号任务全部卡在「等待环境释放」→ 界面永远「执行中」且不打开新环境
+      await releaseSeatLease(profileId);
       liveLog(
         `账号 #${aid}：获取语种任务的浏览器窗口保持打开（环境 ${String(profileId || '').slice(0, 8)}…），可在环境列表 / VNC 查看`,
         'warn',
@@ -452,8 +456,10 @@ async function runSearchUsers(accountId, payload = {}) {
       try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
       await releaseSeatLease(profileId);
     } else {
-      // 留给 VNC 人工查看：不断开 Electron 窗，只解除占用
+      // 留给 VNC 人工查看：不断开 Electron 窗
       try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* */ }
+      // 同上：keepOpen 也必须解除跨机包租约，否则后续任务全卡在等待环境释放
+      await releaseSeatLease(profileId);
       liveLog(
         `账号 #${aid}：搜索任务的浏览器窗口保持打开（环境 ${String(profileId || '').slice(0, 8)}…），可在环境列表 / VNC 查看`,
         'warn',

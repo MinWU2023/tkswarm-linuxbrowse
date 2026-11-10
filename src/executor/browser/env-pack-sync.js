@@ -126,7 +126,9 @@ function packLeaseBusyInfo(err) {
 
 function packLeaseWaitMs() {
   const n = Number(process.env.TKSWARM_PACK_LEASE_WAIT_MS);
-  return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+  // 默认 2 分钟：坐席是交互式操作，等太久界面只会一直显示「执行中」，用户完全看不出卡在哪。
+  // 宁可快速失败给出明确原因（环境被占用/等待释放），也不要静默挂 15 分钟。
+  return Number.isFinite(n) && n > 0 ? n : 2 * 60 * 1000;
 }
 
 /**
