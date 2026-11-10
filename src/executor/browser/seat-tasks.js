@@ -961,6 +961,198 @@ async function ensureSeatLoggedIn(connection, accountId, { label = '任务' } = 
   return { session, fresh: true };
 }
 
+/* ------------------------------------------------------------------ *
+ * 客服坐席「会话操作」：置顶 / 拉黑 / 删除
+ * 三个按钮都走服务器浏览器任务；成功后由 PHP 回写本地会话状态。
+ * ------------------------------------------------------------------ */
+
+/** 打开与该用户的私信窗口：/messages 收件箱点会话，找不到再用收件箱搜索兜底 */
+async function openSeatChatWith(page, recipient, aid) {
+  const target = String(recipient || '').replace(/^@/, '').trim().toLowerCase();
+  if (!target) return false;
+  if (!/\/messages/i.test(String(page.url() || ''))) {
+    await page.goto('https://www.tiktok.com/messages', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+  }
+  await page.waitForTimeout(3000).catch(() => {});
+
+  const clickHit = () => page.evaluate((t) => {
+    const nodes = Array.from(document.querySelectorAll(
+      '[data-e2e*="chat-list"] [data-e2e*="list-item"], [class*="DivChatListContainer"] div,'
+      + ' [class*="ChatItem"], [class*="Conversation"], a[href*="/messages"]'
+    ));
+    for (const n of nodes) {
+      const txt = String(n.innerText || '').toLowerCase();
+      if (txt.includes(`@${t}`)) { n.click(); return true; }
+    }
+    return false;
+  }, target).catch(() => false);
+
+  if (await clickHit()) {
+    liveLog(`账号 #${aid}：已在收件箱选中 @${target} 的会话`, 'info', { accountId: aid });
+    await page.waitForTimeout(1500).catch(() => {});
+    return true;
+  }
+
+  // 兜底：收件箱搜索框
+  const box = page.locator('input[type="search"], input[placeholder*="Search" i], [data-e2e*="search"] input').first();
+  if (await box.count().catch(() => 0)) {
+    await box.click({ timeout: 4000 }).catch(() => {});
+    await box.fill(target, { timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(2500).catch(() => {});
+    if (await clickHit()) {
+      liveLog(`账号 #${aid}：已通过收件箱搜索选中 @${target}`, 'info', { accountId: aid });
+      await page.waitForTimeout(1500).catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 打开会话头部的「…」菜单 */
+async function openSeatChatMoreMenu(page) {
+  const sels = [
+    '[data-e2e="chat-more"]',
+    '[data-e2e="chat-header-more"]',
+    '[data-e2e*="more"]',
+    'button[aria-label*="More" i]',
+    'button[aria-label*="more" i]',
+    'button[aria-label*="Más" i]',
+    'button[aria-label*="Mais" i]',
+    'button[aria-label*="更多"]',
+  ];
+  for (const s of sels) {
+    const loc = page.locator(s).first();
+    if ((await loc.count().catch(() => 0)) && (await loc.isVisible().catch(() => false))) {
+      await loc.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(800).catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 按文案点菜单项（多语言兜底） */
+async function clickSeatMenuText(page, texts) {
+  for (const t of texts) {
+    const loc = page.getByText(new RegExp(`^\\s*${t}\\s*$`, 'i')).first();
+    if ((await loc.count().catch(() => 0)) && (await loc.isVisible().catch(() => false))) {
+      await loc.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(1200).catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 失败时把页面关键信息带回日志，方便下一轮调整选择器 */
+async function seatPageDebug(page) {
+  return page.evaluate(() => {
+    const e2e = Array.from(new Set(Array.from(document.querySelectorAll('[data-e2e]'))
+      .map((n) => n.getAttribute('data-e2e')).filter(Boolean))).slice(0, 30).join(',');
+    const btns = Array.from(document.querySelectorAll('button, [role="button"]'))
+      .map((n) => String(n.getAttribute('aria-label') || n.innerText || '').trim())
+      .filter(Boolean).slice(0, 16).join(' | ');
+    return `url=${String(location.href).slice(0, 110)} data-e2e=[${e2e}] 按钮=${btns}`;
+  }).catch(() => '');
+}
+
+/**
+ * 三个会话操作共用执行器：开窗 → 登录门禁 → 打开会话 → 执行具体动作 → 收尾。
+ */
+async function runSeatChatAction(accountId, payload, cfg) {
+  const aid = Number(accountId);
+  const recipient = String(payload.recipient || payload.toUser || '').replace(/^@/, '').trim();
+  if (!recipient) throw new Error(`${cfg.name}需要对方用户名（recipient）`);
+  liveLog(`账号 #${aid}：开始${cfg.name} @${recipient}（服务器浏览器）`, 'info', { accountId: aid });
+
+  const { connection, profileId } = await openSeatBrowser(aid, 'https://www.tiktok.com/messages');
+  let keepOpen = false;
+  try {
+    await ensureSeatLoggedIn(connection, aid, { label: cfg.name });
+    const page = connection.page;
+    const opened = await openSeatChatWith(page, recipient, aid);
+    let actioned = false;
+    if (opened && cfg.run) {
+      actioned = await cfg.run(page, aid);
+    } else if (opened) {
+      actioned = true;
+    }
+    if (!opened) {
+      const dbg = await seatPageDebug(page);
+      // 置顶在 TikTok 没有对应功能，只做会话存在性校验：找不到也不阻断，交给本地标记
+      if (cfg.tolerateMissing) {
+        liveLog(`账号 #${aid}：收件箱里没找到 @${recipient} 的会话，仍按成功回写本地${cfg.name}标记（${dbg}）`, 'warn', { accountId: aid });
+        return { status: 'completed', result: { recipient, found: false, actioned: false, profileId } };
+      }
+      throw new Error(`收件箱里没找到 @${recipient} 的会话，无法${cfg.name}（${dbg}）`);
+    }
+    if (cfg.run && !actioned) {
+      const dbg = await seatPageDebug(page);
+      throw new Error(`${cfg.name}未成功：页面没出现预期菜单项（${dbg}）`);
+    }
+    liveLog(`账号 #${aid}：${cfg.name} @${recipient} 已完成`, 'info', { accountId: aid });
+    return { status: 'completed', result: { recipient, found: true, actioned, profileId } };
+  } catch (e) {
+    // 出错保留窗口：环境秒关的话远程看不到验证码/登录墙
+    keepOpen = true;
+    throw e;
+  } finally {
+    if (!keepOpen) {
+      try { await closeConnection(connection, { force: true }); } catch { /* */ }
+      try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+      await releaseSeatLease(profileId);
+    } else {
+      try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* */ }
+      await releaseSeatLease(profileId);
+      liveLog(
+        `账号 #${aid}：${cfg.name}任务的浏览器窗口保持打开（环境 ${String(profileId || '').slice(0, 8)}…），可在环境列表 / VNC 查看`,
+        'warn',
+        { accountId: aid, profileId },
+      );
+    }
+  }
+}
+
+/** 置顶：TikTok 无置顶功能，只确认会话在收件箱里存在，置顶标记由 PHP 写本地 */
+async function runPinFriend(accountId, payload = {}) {
+  return runSeatChatAction(accountId, payload, { name: '置顶会话', tolerateMissing: true });
+}
+
+/** 拉黑 / 取消拉黑：会话头部「…」→ Block / Unblock → 确认 */
+async function runBlockUser(accountId, payload = {}) {
+  const blocked = payload.blocked !== false && String(payload.blocked) !== '0';
+  const labels = blocked
+    ? ['Block', 'Bloquear', 'Bloquear usuário', 'Bloquear usuario', '拉黑', '屏蔽']
+    : ['Unblock', 'Desbloquear', '取消拉黑', '解除屏蔽'];
+  return runSeatChatAction(accountId, payload, {
+    name: blocked ? '拉黑用户' : '取消拉黑',
+    run: async (page) => {
+      if (!(await openSeatChatMoreMenu(page))) return false;
+      if (!(await clickSeatMenuText(page, labels))) return false;
+      // 二次确认弹窗
+      await clickSeatMenuText(page, blocked
+        ? ['Block', 'Bloquear', '拉黑', '屏蔽', 'Confirm', '确认']
+        : ['Unblock', 'Desbloquear', '取消拉黑', 'Confirm', '确认']).catch(() => false);
+      await page.waitForTimeout(1500).catch(() => {});
+      return true;
+    },
+  });
+}
+
+/** 删除会话：会话头部「…」→ Delete → 确认 */
+async function runDeleteChat(accountId, payload = {}) {
+  return runSeatChatAction(accountId, payload, {
+    name: '删除会话',
+    run: async (page) => {
+      if (!(await openSeatChatMoreMenu(page))) return false;
+      if (!(await clickSeatMenuText(page, ['Delete', 'Delete chat', 'Eliminar', 'Excluir', '删除', '删除聊天']))) return false;
+      await clickSeatMenuText(page, ['Delete', 'Eliminar', 'Excluir', '删除', 'Confirm', 'OK', '确认']).catch(() => false);
+      await page.waitForTimeout(1500).catch(() => {});
+      return true;
+    },
+  });
+}
+
 module.exports = {
   ensureSeatLoggedIn,
   runCsLogin,
@@ -969,4 +1161,7 @@ module.exports = {
   runSyncFans,
   runFetchLang,
   runSearchUsers,
+  runPinFriend,
+  runBlockUser,
+  runDeleteChat,
 };

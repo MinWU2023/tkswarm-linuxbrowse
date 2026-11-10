@@ -728,6 +728,18 @@ async function executeWorkItemInner(item) {
     const { runSearchUsers } = require('./browser/seat-tasks');
     return runSearchUsers(accountId, payload);
   }
+  if (type === 'pin_friend') {
+    const { runPinFriend } = require('./browser/seat-tasks');
+    return runPinFriend(accountId, payload);
+  }
+  if (type === 'block_user') {
+    const { runBlockUser } = require('./browser/seat-tasks');
+    return runBlockUser(accountId, payload);
+  }
+  if (type === 'delete_chat') {
+    const { runDeleteChat } = require('./browser/seat-tasks');
+    return runDeleteChat(accountId, payload);
+  }
 
   if (type === 'message' || type === 'dm_reply') {
     const seatSend = String(payload.source || '') === 'chat.seat' || payload.autoSend === true;
