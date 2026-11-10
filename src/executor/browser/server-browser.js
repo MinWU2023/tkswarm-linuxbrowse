@@ -38,6 +38,7 @@ const SERVER_BROWSER_TASK_TYPES = new Set([
   'cs_logout',
   'cs_detect',
   'fetch_lang',
+  'search_users',
 ]);
 
 /** 允许使用服务器浏览器的总任务范围 */
@@ -58,7 +59,7 @@ function isCsSeatTaskType(type) {
   const t = String(type || '').trim().toLowerCase();
   return [
     'dm_sync', 'message', 'dm_reply', 'sync_fans',
-    'cs_login', 'cs_logout', 'cs_detect', 'fetch_lang',
+    'cs_login', 'cs_logout', 'cs_detect', 'fetch_lang', 'search_users',
   ].includes(t);
 }
 

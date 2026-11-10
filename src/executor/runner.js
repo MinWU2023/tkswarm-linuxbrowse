@@ -724,6 +724,10 @@ async function executeWorkItemInner(item) {
     const { runFetchLang } = require('./browser/seat-tasks');
     return runFetchLang(accountId, payload);
   }
+  if (type === 'search_users') {
+    const { runSearchUsers } = require('./browser/seat-tasks');
+    return runSearchUsers(accountId, payload);
+  }
 
   if (type === 'message' || type === 'dm_reply') {
     const seatSend = String(payload.source || '') === 'chat.seat' || payload.autoSend === true;

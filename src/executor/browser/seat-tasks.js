@@ -273,6 +273,131 @@ async function runFetchLang(accountId, payload = {}) {
   }
 }
 
+/** 坐席用户搜索：关键词最少长度（大于 5 个字符，与前后端校验保持一致） */
+const SEARCH_KEYWORD_MIN = 6;
+
+/**
+ * 客服坐席「搜索用户」：走服务器浏览器在 TikTok 搜索页拉用户列表。
+ * 结果只随任务返回给界面做临时展示，不写 chat_users；下次搜索直接覆盖。
+ */
+async function runSearchUsers(accountId, payload = {}) {
+  const aid = Number(accountId);
+  const keyword = String(payload.keyword || '').trim();
+  if (keyword.length < SEARCH_KEYWORD_MIN) {
+    throw new Error(`搜索词至少 ${SEARCH_KEYWORD_MIN} 个字符（当前 ${keyword.length} 个）`);
+  }
+  const limit = Math.max(5, Math.min(100, Number(payload.limit || 40) || 40));
+
+  const {
+    searchUsersPage,
+    scrollSearchResults,
+    dismissSearchOverlays,
+    humanPause,
+  } = require('./ai-lead/pipeline-base');
+
+  liveLog(`账号 #${aid}：开始在 TikTok 搜索「${keyword}」（上限 ${limit} 条）`, 'info', { accountId: aid });
+  const { connection, profileId } = await openSeatBrowser(aid, 'https://www.tiktok.com/');
+  try {
+    let session = await probeLogin(connection, aid);
+    if (!session?.loggedIn) {
+      await tryInjectSavedSession(connection, aid);
+      session = await probeLogin(connection, aid);
+    }
+    if (!session?.loggedIn) {
+      throw waitingLoginDataError(aid, '搜索用户前需已登录：请先在 VNC 完成登录后重试');
+    }
+
+    const page = await searchUsersPage(connection, keyword, aid);
+    await humanPause(2500, 0.15).catch(() => {});
+    await dismissSearchOverlays(page).catch(() => {});
+
+    // 从搜索卡片收集用户：优先 @链接，其次卡片容器
+    const collect = () => page.evaluate(() => {
+      const out = [];
+      const seen = new Set();
+      const anchors = Array.from(document.querySelectorAll(
+        'div[class*="DivSearchUserItemContainer"] a[href*="/@"],'
+        + 'div[class*="DivSearchItemContainer"] a[href*="/@"],'
+        + '[data-e2e="search-user-item"] a[href*="/@"],'
+        + 'a[href^="/@"]'
+      ));
+      for (const a of anchors) {
+        const href = String(a.getAttribute('href') || '');
+        const m = href.match(/^\/@([^/?#]+)/);
+        if (!m) continue;
+        const username = decodeURIComponent(m[1]).trim();
+        if (!username || seen.has(username.toLowerCase())) continue;
+        const box = a.closest('div[class*="DivSearchUserItemContainer"], div[class*="DivSearchItemContainer"], [data-e2e="search-user-item"]')
+          || a.parentElement;
+        const txt = String(box?.innerText || '').trim();
+        const lines = txt.split('\n').map((s) => s.trim()).filter(Boolean);
+        const img = box?.querySelector('img');
+        const nickname = lines.find((s) => s.toLowerCase() !== `@${username.toLowerCase()}` && s !== username) || username;
+        // 粉丝数通常是「123.4K followers」这类行
+        const followers = lines.find((s) => /followers|粉丝/i.test(s)) || '';
+        seen.add(username.toLowerCase());
+        out.push({
+          username,
+          nickname: nickname.slice(0, 120),
+          avatar: String(img?.getAttribute('src') || ''),
+          profileUrl: `https://www.tiktok.com/@${encodeURIComponent(username)}`,
+          followersText: followers,
+        });
+        if (out.length >= 200) break;
+      }
+      return out;
+    }).catch(() => []);
+
+    let items = await collect();
+    // 首屏为空时先滚动几轮再判断
+    if (!items.length) {
+      await scrollSearchResults(page).catch(() => {});
+      await humanPause(2500, 0.15).catch(() => {});
+      items = await collect();
+    }
+    let rounds = 0;
+    while (items.length < limit && rounds < 6) {
+      rounds += 1;
+      const before = items.length;
+      await scrollSearchResults(page).catch(() => {});
+      await humanPause(1800, 0.15).catch(() => {});
+      const next = await collect();
+      if (next.length > items.length) items = next;
+      if (items.length <= before) break;
+    }
+
+    const result = items.slice(0, limit).map((u) => ({
+      ...u,
+      friendUid: '',
+      relation: 'stranger',
+    }));
+    if (!result.length) {
+      liveLog(
+        `账号 #${aid}：搜索「${keyword}」未解析到用户卡片（可能触发验证或关键词无结果）`,
+        'warn',
+        { accountId: aid },
+      );
+    } else {
+      liveLog(`账号 #${aid}：搜索「${keyword}」拿到 ${result.length} 个用户（临时结果，未入库）`, 'info', { accountId: aid });
+    }
+    return {
+      status: 'completed',
+      result: {
+        keyword,
+        total: result.length,
+        items: result,
+        profileId,
+        // 明确标记：结果仅在本次任务结果里临时可见，不写本地好友
+        temporary: true,
+      },
+    };
+  } finally {
+    try { await closeConnection(connection, { force: true }); } catch { /* */ }
+    try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+    await releaseSeatLease(profileId);
+  }
+}
+
 async function runCsLogout(accountId) {
   const aid = Number(accountId);
   let profileId = '';
@@ -747,4 +872,5 @@ module.exports = {
   runCsLogout,
   runSyncFans,
   runFetchLang,
+  runSearchUsers,
 };

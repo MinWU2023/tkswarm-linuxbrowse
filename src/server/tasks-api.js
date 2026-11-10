@@ -127,6 +127,7 @@ const SEAT_TYPE_LABEL = {
   dm_sync: '客服私信同步',
   sync_fans: '客服粉丝/关注同步',
   fetch_lang: '客服获取对方语种',
+  search_users: '客服搜索用户',
   ai_lead: 'AI 拓客',
   ai_lead_dm: 'AI 拓客私信',
 };
@@ -137,7 +138,7 @@ const CENTER_TYPE_QUERY = 'ai_lead,ai_lead_dm';
 
 /** 坐席/拓客分任务类型（含误入 general 的 sync_fans 等） */
 const SEAT_WORK_TASK_TYPES = new Set([
-  'sync_fans', 'dm_sync', 'dm_reply', 'cs_login', 'cs_logout', 'cs_detect', 'fetch_lang',
+  'sync_fans', 'dm_sync', 'dm_reply', 'cs_login', 'cs_logout', 'cs_detect', 'fetch_lang', 'search_users',
   'ai_lead', 'ai_lead_dm',
 ]);
 
