@@ -40,6 +40,11 @@ const { runWithBrowserBackend, normalizeBackendId, resolveProfileIdForAccount, g
 const {
   isServerBrowserTaskType,
   isServerBrowserBatchScope,
+  isCsSeatTaskType,
+  withServerBrowserAccountLock,
+  isServerBrowserAccountBusy,
+  enterAccountBatch,
+  leaveAccountBatch,
   serverBrowserForbiddenError,
   ensureServerBrowserEnv,
   waitingLoginDataError,
@@ -558,7 +563,25 @@ async function ensureAccountLogin(account, probedSession = null, options = {}) {
   return login;
 }
 
+/**
+ * 分任务执行入口。客服坐席类分任务（sync_fans / cs_login / cs_detect / message / dm_reply 等）
+ * 共用同账号一个服务器浏览器环境且各自 forceRelaunch 开窗，必须按账号串行，
+ * 否则后开的会关掉先开的 Electron 进程，先开的任务报 ECONNREFUSED（连接浏览器 CDP 失败）。
+ */
 async function executeWorkItem(item) {
+  const type = item?.task_type;
+  const accountId = Number(item?.account_id);
+  if (accountId && isCsSeatTaskType(type)) {
+    return withServerBrowserAccountLock(
+      accountId,
+      `分任务#${item?.id || ''} ${type}`,
+      () => executeWorkItemInner(item),
+    );
+  }
+  return executeWorkItemInner(item);
+}
+
+async function executeWorkItemInner(item) {
   const type = item.task_type;
   const accountId = Number(item.account_id);
   const payload = item.payload || {};
@@ -1174,6 +1197,17 @@ async function executeEnvPackHealOnlyBatch(batch) {
 }
 
 async function executeWorkBatch(batch) {
+  const batchAccountId = Number(batch.account_id || batch.account?.id || 0);
+  // 登记总任务级占用：同账号两个总任务并行时，先结束的那个不能关窗（会杀掉对方 Electron）
+  enterAccountBatch(batchAccountId);
+  try {
+    return await executeWorkBatchInner(batch);
+  } finally {
+    leaveAccountBatch(batchAccountId);
+  }
+}
+
+async function executeWorkBatchInner(batch) {
   const batchId = Number(batch.id);
   if (batch?.env_pending || batch?.wait_reason === 'general_running' || batch?.wait_reason === 'env_busy') {
     batch = await waitForAiLeadEnv(batch);
@@ -1497,7 +1531,18 @@ async function executeWorkBatch(batch) {
           { accountId, batchId, profileId }
         );
       } else {
+        // 同账号还有别的坐席分任务在跑，或还有其它总任务占用同一环境（并发兜底）：绝不能关窗，
+        // 否则会杀掉对方正在使用的 Electron 进程 → 「连接浏览器 CDP 失败 ECONNREFUSED」。
+        // 关窗交给最后一个退出的任务做。selfRunning=true：自己已登记，只有 >1 才说明还有别人。
         let closePid = String(profileId || '').trim();
+        const accountStillBusy = isServerBrowserAccountBusy(accountId, { selfRunning: true });
+        if (accountStillBusy) {
+          liveLog(
+            `总任务 #${batchId} 已结束，但账号 #${accountId} 仍有任务在使用浏览器，本次不关窗（避免打断对方）`,
+            'warn',
+            { accountId, batchId, profileId }
+          );
+        }
         try {
           const {
             getActiveConnection,
@@ -1513,10 +1558,14 @@ async function executeWorkBatch(batch) {
             || '',
           ).trim();
           // 总任务结束：强制断 CDP 并关窗（分任务期间 keepBrowser 会保活连接）
-          if (live) await closeConnection(live, { force: true }).catch(() => {});
+          if (live && !accountStillBusy) await closeConnection(live, { force: true }).catch(() => {});
           clearActiveConnection();
         } catch { /* ignore */ }
-        if (closePid) {
+        if (accountStillBusy && closePid) {
+          // 不关窗也不能占着环境包租约：释放本机占用，让对方任务结束后能正常回传
+          try { await require('./browser/env-pack-sync').releasePackLeaseBestEffort(closePid); } catch { /* ignore */ }
+        }
+        if (closePid && !accountStillBusy) {
           liveLog(`关闭浏览器环境 ${closePid.slice(0, 8)}…（总任务 #${batchId} 已结束）`, 'info', {
             accountId, batchId, profileId: closePid,
           });

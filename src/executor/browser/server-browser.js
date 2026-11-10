@@ -432,7 +432,88 @@ async function ensureServerBrowserEnv(accountId, opts = {}) {
   return task;
 }
 
+/**
+ * 同一账号的服务器浏览器分任务串行执行。
+ * 同账号共用一个环境（profileId），而坐席分任务都会 forceRelaunch 开窗、收尾时又会关窗；
+ * 若并发（如「同步粉丝」与「同步关注」、检测、发信同时跑），后开的会杀掉先开的 Electron 进程，
+ * 先开的任务就会报 ECONNREFUSED / 连接浏览器 CDP 失败。这里按账号排队，一次只允许一个分任务占用环境。
+ */
+const accountBrowserLocks = new Map();
+const accountBrowserLockDepth = new Map();
+
+async function withServerBrowserAccountLock(accountId, label, fn) {
+  const key = Number(accountId) || 0;
+  if (!key) return fn();
+  const prev = accountBrowserLocks.get(key) || Promise.resolve();
+  const depth = (accountBrowserLockDepth.get(key) || 0) + 1;
+  accountBrowserLockDepth.set(key, depth);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const tail = prev.then(() => gate);
+  accountBrowserLocks.set(key, tail);
+  if (depth > 1) {
+    liveLog(
+      `账号 #${key}：${label || '任务'} 排队等待同账号浏览器环境空闲（前面还有 ${depth - 1} 个任务，避免并发开关窗互相打断）`,
+      'info',
+      { accountId: key },
+    );
+  }
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    const left = (accountBrowserLockDepth.get(key) || 1) - 1;
+    if (left <= 0) {
+      accountBrowserLockDepth.delete(key);
+      if (accountBrowserLocks.get(key) === tail) accountBrowserLocks.delete(key);
+    } else {
+      accountBrowserLockDepth.set(key, left);
+    }
+  }
+}
+
+/**
+ * 总任务级占用：同账号有多个总任务并行时（PHP 领取互斥未生效的兜底），
+ * 先结束的任务不能关窗，否则会杀掉另一个任务正在用的 Electron → ECONNREFUSED。
+ * 与分任务锁 accountBrowserLockDepth 不同：分任务全部结束后计数已归零，无法反映总任务是否仍在跑。
+ */
+const accountBatchDepth = new Map();
+
+function enterAccountBatch(accountId) {
+  const key = Number(accountId) || 0;
+  if (!key) return;
+  accountBatchDepth.set(key, (accountBatchDepth.get(key) || 0) + 1);
+}
+
+function leaveAccountBatch(accountId) {
+  const key = Number(accountId) || 0;
+  if (!key) return;
+  const left = (accountBatchDepth.get(key) || 1) - 1;
+  if (left <= 0) accountBatchDepth.delete(key);
+  else accountBatchDepth.set(key, left);
+}
+
+/**
+ * 该账号此刻是否还有别的任务在占用浏览器环境。
+ * - 默认语义：分任务锁计数或总任务计数任一大于 0 即忙。
+ * - selfRunning=true：调用方自己已登记了一个总任务，此时只有计数 >1 才算「还有别人」，
+ *   否则总任务收尾时永远判定为忙，导致所有环境都关不掉。
+ */
+function isServerBrowserAccountBusy(accountId, { selfRunning = false } = {}) {
+  const key = Number(accountId) || 0;
+  if (!key) return false;
+  const lockDepth = accountBrowserLockDepth.get(key) || 0;
+  const batchDepth = accountBatchDepth.get(key) || 0;
+  if (selfRunning) return lockDepth > 0 || batchDepth > 1;
+  return lockDepth > 0 || batchDepth > 0;
+}
+
 module.exports = {
+  withServerBrowserAccountLock,
+  isServerBrowserAccountBusy,
+  enterAccountBatch,
+  leaveAccountBatch,
   SERVER_BROWSER_TASK_TYPES,
   SERVER_BROWSER_BATCH_SCOPES,
   WAITING_ENV_PACK,
