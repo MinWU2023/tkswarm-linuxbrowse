@@ -214,10 +214,24 @@ async function ensureServerBrowserEnv(accountId, opts = {}) {
   if (!aid) throw new Error('账号无效，无法准备服务器浏览器环境');
   if (inflight.has(aid)) return inflight.get(aid);
 
+  // 阶段看门狗：准备环境卡住时，日志直接写出卡在哪一步（否则界面只会一直「执行中」）
+  let stage = '加载账号资料';
+  const stageStart = Date.now();
+  const watchdog = setInterval(() => {
+    liveLog(
+      `账号 #${aid}：准备服务器浏览器环境已耗时 ${Math.round((Date.now() - stageStart) / 1000)}s，当前卡在「${stage}」`,
+      'warn',
+      { accountId: aid },
+    );
+  }, 20000);
+  watchdog.unref?.();
+
   const task = (async () => {
     const account = await loadAccountBundle(aid);
+    stage = '服务器浏览器健康检查';
     const provider = getProvider('linux');
     await assertLinuxEngineOk(provider);
+    stage = '查询中心库环境包列表 env-packs';
     const phpApi = require('../php-api');
 
     let candidates = opts.recreate === true ? [] : sharedPackCandidateIds(account);
@@ -341,11 +355,13 @@ async function ensureServerBrowserEnv(accountId, opts = {}) {
           reason: `no-cloud-pack:${metaReason || 'pack-file-missing'}`,
         };
       }
+      stage = `准备环境 ${String(pid).slice(0, 8)}…（本机 detail / 占用跨机租约）`;
       return tryReadySharedEnv(pid, { accountId: aid, provider });
     };
 
     for (const pid of candidates) {
       try {
+        stage = `检查环境 ${String(pid).slice(0, 8)}…（pack-meta / 桌面本机探测 / 拉包 / 租约）`;
         const ready = await tryOne(pid);
         if (!ready.ok) {
           tried.push(`${pid.slice(0, 8)}…(${ready.reason || 'unavailable'})`);
@@ -428,7 +444,10 @@ async function ensureServerBrowserEnv(accountId, opts = {}) {
       ? `已尝试 ${candidates.length} 个绑定${tried.length ? `：${tried.slice(0, 4).join('；')}` : ''}`
       : '账号未绑定 linux/自研环境，且中心库无可用包';
     throw waitingEnvPackError(aid, detail);
-  })().finally(() => inflight.delete(aid));
+  })().finally(() => {
+    clearInterval(watchdog);
+    inflight.delete(aid);
+  });
 
   inflight.set(aid, task);
   return task;

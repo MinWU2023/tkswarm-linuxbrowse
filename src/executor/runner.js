@@ -1273,6 +1273,7 @@ async function executeWorkBatchInner(batch) {
       throw serverBrowserForbiddenError(batch.batch_scope || 'general');
     }
     // 客服坐席批次：缺包时允许在服务器代建环境并走登录流程；AI 拓客仍保持缺包软等待
+    liveLog(`账号 #${accountId}：总任务 #${batchId} 开始准备服务器浏览器环境…`, 'info', { accountId, batchId });
     profileId = await ensureServerBrowserEnv(accountId, {
       allowProvision: String(batch.batch_scope || '') === 'cs_seat',
     });

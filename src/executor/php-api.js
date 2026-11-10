@@ -85,7 +85,8 @@ async function request(method, apiPath, body, options = {}) {
   if (auth) headers.Authorization = auth;
   if (ctx.actingAs) headers['X-Acting-As'] = ctx.actingAs;
 
-  const timeoutMs = Number(options.timeoutMs) || 0;
+  // 默认 90s 超时：没有超时的请求一旦对端不返回，任务会无日志地永久挂在「执行中」
+  const timeoutMs = Number(options.timeoutMs) || 90000;
   const ac = timeoutMs > 0 ? new AbortController() : null;
   const timer = ac ? setTimeout(() => ac.abort(), timeoutMs) : null;
   let res;
