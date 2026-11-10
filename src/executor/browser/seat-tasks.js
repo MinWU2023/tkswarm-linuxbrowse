@@ -359,12 +359,37 @@ async function runSearchUsers(accountId, payload = {}) {
         if (!m) continue;
         const username = decodeURIComponent(m[1]).trim();
         if (!username || seen.has(username.toLowerCase())) continue;
-        const box = a.closest('div[class*="DivSearchUserItemContainer"], div[class*="DivSearchItemContainer"], [data-e2e="search-user-item"]')
-          || a.parentElement;
-        const txt = String(box?.innerText || '').trim();
+        // 侧边栏/顶栏里的「Perfil / Profile」是当前登录账号自己的主页入口，不是搜索结果
+        if (a.closest('nav, aside, header, [data-e2e="nav-profile"], [data-e2e="profile-icon"], [data-e2e="nav-user"]')) continue;
+        // 卡片 = 从链接向上走、且只包含「这一个用户」链接的最大祖先。
+        // 旧逻辑 closest(容器类名) 可能命中包住整个结果列表的大容器，
+        // 导致每个用户都取到列表第一行（昵称/头像/粉丝数全部相同）。
+        const usersIn = (el) => {
+          const set = new Set();
+          el.querySelectorAll('a[href*="/@"]').forEach((x) => {
+            const mm = String(x.getAttribute('href') || '').match(/\/@([^/?#]+)/);
+            if (mm) set.add(decodeURIComponent(mm[1]).toLowerCase());
+          });
+          return set;
+        };
+        let box = a;
+        for (let el = a.parentElement, depth = 0; el && el !== document.body && depth < 8; el = el.parentElement, depth += 1) {
+          if (usersIn(el).size > 1) break;
+          box = el;
+        }
+        const txt = String(box.innerText || '').trim();
         const lines = txt.split('\n').map((s) => s.trim()).filter(Boolean);
-        const img = box?.querySelector('img');
-        const nickname = lines.find((s) => s.toLowerCase() !== `@${username.toLowerCase()}` && s !== username) || username;
+        const img = box.querySelector('img');
+        const uname = username.toLowerCase();
+        const nickEl = box.querySelector('[data-e2e="search-user-nickname"], [data-e2e="search-user-title"]');
+        const nickText = String(nickEl?.innerText || '').trim();
+        const nickname = nickText || lines.find((s) => {
+          const l = s.toLowerCase();
+          if (l === uname || l === `@${uname}`) return false;
+          if (/\d.*(followers|粉丝)|(followers|粉丝).*\d/i.test(s)) return false;
+          if (/^(follow|following|friends|关注|已关注)$/i.test(s)) return false;
+          return true;
+        }) || username;
         // 粉丝数通常是「123.4K followers」这类行
         const followers = lines.find((s) => /followers|粉丝/i.test(s)) || '';
         seen.add(username.toLowerCase());

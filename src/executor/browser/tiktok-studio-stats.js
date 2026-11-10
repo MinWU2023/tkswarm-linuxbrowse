@@ -102,20 +102,41 @@ function findContentMetricCol(headerCells, kind) {
 }
 
 /** 公开页 / item_list 指标优先于 Studio DOM（DOM 列易错位） */
-function preferCatalogStat(domVal, catalogVal) {
-  const c = Number(catalogVal) || 0;
-  if (c > 0) return c;
-  return Number(domVal) || 0;
+/**
+ * 公开页 / item_list 指标优先于 Studio DOM。
+ * distrustDom：DOM 明显错位（赞/评=播放）时，即使 catalog 为 0 也信任 catalog。
+ */
+function preferCatalogStat(domVal, catalogVal, opts = {}) {
+  const d = Number(domVal) || 0;
+  const hasCatalog = catalogVal != null && catalogVal !== '' && Number.isFinite(Number(catalogVal));
+  const c = hasCatalog ? Math.max(0, Number(catalogVal) || 0) : 0;
+  if (opts.distrustDom && hasCatalog) return c;
+  if (hasCatalog && c > 0) return c;
+  return d;
+}
+
+/** 点赞/评论是否像误读了播放列（三者相同，或赞/评单独等于播放） */
+function looksLikeViewsLeak(views, likes, comments) {
+  const v = Number(views) || 0;
+  if (v <= 0) return false;
+  const l = Number(likes) || 0;
+  const c = Number(comments) || 0;
+  if (l === v && c === v) return true;
+  if (l === v && c === 0) return true;
+  if (c === v && l === 0) return true;
+  if (l === v && c > 0 && c === l) return true;
+  return false;
 }
 
 /**
- * 纠错：评论远大于播放时，多为把「Views」列读进了 comments
- * （常见原因：把筛选条 Views/Likes/Comments 误当成表头）。
+ * 纠错：
+ * 1) 评论远大于播放 → 多为 Views 读进 comments
+ * 2) 点赞/评论与播放完全相同 → Studio 表头列索引撞车，清掉赞/评留给公开目录覆盖
  */
 function sanitizeContentMetrics(row) {
   const views = Number(row?.views) || 0;
-  const likes = Number(row?.likes) || 0;
-  const comments = Number(row?.comments) || 0;
+  let likes = Number(row?.likes) || 0;
+  let comments = Number(row?.comments) || 0;
   const shares = Number(row?.shares) || 0;
   const out = {
     ...row,
@@ -132,7 +153,17 @@ function sanitizeContentMetrics(row) {
       out.views = swappedViews;
       out.comments = swappedComments;
       out._metricsSwapped = 'views<->comments';
+      likes = out.likes;
+      comments = out.comments;
     }
+  }
+  // 赞/评误等于播放：清零（真实赞评几乎不可能长期与播放完全一致）
+  if (looksLikeViewsLeak(out.views, out.likes, out.comments)) {
+    if (out.likes === out.views) out.likes = 0;
+    if (out.comments === out.views) out.comments = 0;
+    out._metricsSwapped = out._metricsSwapped
+      ? `${out._metricsSwapped}|dup-views-cleared`
+      : 'dup-views-cleared';
   }
   return out;
 }
@@ -780,11 +811,18 @@ async function scrapeContentItems(page) {
           continue; // 没有可靠表头，跳过该表，避免 Views 读进 Comments
         }
       }
-      const iViews = findCol(header, 'views');
-      const iLikes = findCol(header, 'likes');
-      const iComments = findCol(header, 'comments');
-      const iShares = findCol(header, 'shares');
+      let iViews = findCol(header, 'views');
+      let iLikes = findCol(header, 'likes');
+      let iComments = findCol(header, 'comments');
+      let iShares = findCol(header, 'shares');
       const iDate = findCol(header, 'date');
+      // 表头文本粘连时 findCol 可能把 views/likes/comments 指到同一列 → 三者读成同一个播放数
+      if (iViews >= 0) {
+        if (iLikes === iViews) iLikes = -1;
+        if (iComments === iViews) iComments = -1;
+        if (iShares === iViews) iShares = -1;
+      }
+      if (iLikes >= 0 && iComments === iLikes) iComments = -1;
       if (iViews < 0 && iComments < 0) continue;
       const bodyStart = trs.indexOf(headerRow) + 1;
       // 表头含空首列（勾选框）而 body 没有时，按「表头列数 - 数据列数」校正下标
@@ -804,7 +842,17 @@ async function scrapeContentItems(page) {
         const title = cells
           .filter((c) => c && !isMetricNum(c))
           .sort((a, b) => b.length - a.length)[0] || (a?.getAttribute('aria-label') || a?.innerText || '').trim();
-        const nums = cells.filter(isMetricNum);
+        // 按列拆开的数字；同时把「67 3 1」这类粘在一格的多个指标拆开
+        const nums = [];
+        for (const c of cells) {
+          if (!c) continue;
+          if (isMetricNum(c)) {
+            nums.push(c);
+            continue;
+          }
+          const parts = String(c).split(/\s+/).filter((p) => isMetricNum(p));
+          if (parts.length >= 2) nums.push(...parts);
+        }
         let cover = img?.currentSrc || img?.src || img?.getAttribute('data-src') || img?.getAttribute('srcset')?.split(/\s/)[0] || '';
         if (!/^https?:\/\//i.test(cover)) {
           const bgEl = tr.querySelector('[style*="background"], [class*="cover"], [class*="thumb"], [class*="Cover"], [class*="Thumb"]');
@@ -818,13 +866,27 @@ async function scrapeContentItems(page) {
           || tr.querySelector('[data-video-id]')?.getAttribute('data-video-id')
           || tr.querySelector('[data-item-id]')?.getAttribute('data-item-id')
           || '';
-        const hasHeaderMap = iViews >= 0 || iLikes >= 0 || iComments >= 0;
+        const pickByCol = (idx, fallback) => (idx >= 0 ? (at(idx) || fallback) : fallback);
+        let viewsRaw = pickByCol(iViews, nums[0]);
+        let likesRaw = pickByCol(iLikes, nums[1]);
+        let commentsRaw = pickByCol(iComments, nums[2]);
+        let sharesRaw = pickByCol(iShares, nums[3]);
+        // 列映射仍撞车 / 只扫到一个数字：不要把播放量复制到赞/评
+        const vNum = parseMetric(viewsRaw);
+        if (vNum > 0) {
+          if (parseMetric(likesRaw) === vNum && iLikes < 0) likesRaw = nums[1] || '';
+          if (parseMetric(commentsRaw) === vNum && iComments < 0) commentsRaw = nums[2] || '';
+          if (parseMetric(likesRaw) === vNum && parseMetric(commentsRaw) === vNum) {
+            likesRaw = nums[1] || '';
+            commentsRaw = nums[2] || '';
+          }
+        }
         push({
           title,
-          views: hasHeaderMap && iViews >= 0 ? at(iViews) : nums[0],
-          likes: hasHeaderMap && iLikes >= 0 ? at(iLikes) : nums[1],
-          comments: hasHeaderMap && iComments >= 0 ? at(iComments) : nums[2],
-          shares: hasHeaderMap && iShares >= 0 ? at(iShares) : nums[3],
+          views: viewsRaw,
+          likes: likesRaw,
+          comments: commentsRaw,
+          shares: sharesRaw,
           postedAt: iDate >= 0 ? at(iDate) : '',
           videoUrl: href,
           videoId: pickId(href) || (/^\d{8,}$/.test(attrId) ? attrId : ''),
@@ -869,20 +931,35 @@ function parseContentRows(tables) {
   for (const table of tables) {
     const header = table[0].map((h) => String(h || '').toLowerCase());
     if (!isLikelyContentTableHeader(header)) continue;
-    const iViews = findContentMetricCol(header, 'views');
-    const iLikes = findContentMetricCol(header, 'likes');
-    const iComments = findContentMetricCol(header, 'comments');
-    const iShares = findContentMetricCol(header, 'shares');
+    let iViews = findContentMetricCol(header, 'views');
+    let iLikes = findContentMetricCol(header, 'likes');
+    let iComments = findContentMetricCol(header, 'comments');
+    let iShares = findContentMetricCol(header, 'shares');
     const iDate = findContentMetricCol(header, 'date');
+    if (iViews >= 0) {
+      if (iLikes === iViews) iLikes = -1;
+      if (iComments === iViews) iComments = -1;
+      if (iShares === iViews) iShares = -1;
+    }
+    if (iLikes >= 0 && iComments === iLikes) iComments = -1;
     for (const row of table.slice(1)) {
       const title = row
         .filter((c) => c && !/^[+-]?[$€£¥]?\s*[0-9][0-9,.\s]*\s*(%|K|M|B)?$/i.test(c) && !/^\d{8,}$/.test(String(c).replace(/,/g, '')))
         .sort((a, b) => b.length - a.length)[0] || '';
-      const nums = row.filter((c) => {
+      const isNumCell = (c) => {
         const t = String(c || '').trim().replace(/,/g, '');
         if (/^\d{8,}$/.test(t)) return false;
         return /^[+-]?[$€£¥]?\s*[0-9][0-9,.\s]*\s*(%|K|M|B)?$/i.test(String(c || '').trim());
-      });
+      };
+      const nums = [];
+      for (const c of row) {
+        if (isNumCell(c)) {
+          nums.push(c);
+          continue;
+        }
+        const parts = String(c || '').split(/\s+/).filter((p) => isNumCell(p));
+        if (parts.length >= 2) nums.push(...parts);
+      }
       if (!title && !nums.length) continue;
       const offset = Math.max(0, header.length - row.length);
       const at = (idx) => {
@@ -890,13 +967,23 @@ function parseContentRows(tables) {
         const j = idx - offset;
         return j >= 0 && j < row.length ? row[j] : '';
       };
-      const hasHeaderMap = iViews >= 0 || iLikes >= 0 || iComments >= 0;
+      const pick = (idx, fallback) => (idx >= 0 ? (at(idx) || fallback) : fallback);
+      let views = num(pick(iViews, nums[0]));
+      let likes = num(pick(iLikes, nums[1]));
+      let comments = num(pick(iComments, nums[2]));
+      let shares = num(pick(iShares, nums[3]));
+      if (views > 0 && likes === views && comments === views) {
+        likes = num(nums[1]) || 0;
+        comments = num(nums[2]) || 0;
+        if (likes === views) likes = 0;
+        if (comments === views) comments = 0;
+      }
       rows.push({
         title: String(title).slice(0, 500),
-        views: num(hasHeaderMap && iViews >= 0 ? at(iViews) : nums[0]),
-        likes: num(hasHeaderMap && iLikes >= 0 ? at(iLikes) : nums[1]),
-        comments: num(hasHeaderMap && iComments >= 0 ? at(iComments) : nums[2]),
-        shares: num(hasHeaderMap && iShares >= 0 ? at(iShares) : nums[3]),
+        views,
+        likes,
+        comments,
+        shares,
         postedAt: iDate >= 0 ? String(at(iDate) || '').slice(0, 64) : '',
         videoId: '',
         videoUrl: '',
@@ -1266,6 +1353,7 @@ function enrichContentWithCatalog(rows, catalog, username = '') {
       }
       return row;
     }
+    const leak = looksLikeViewsLeak(row.views, row.likes, row.comments);
     return {
       ...row,
       videoId: row.videoId || hit.videoId,
@@ -1274,9 +1362,9 @@ function enrichContentWithCatalog(rows, catalog, username = '') {
       title: row.title || hit.title || '',
       // 公开页 item_list 的 playCount/diggCount/commentCount 为准，避免 Studio「Video」列误匹配污染
       views: preferCatalogStat(row.views, hit.views),
-      likes: preferCatalogStat(row.likes, hit.likes),
-      comments: preferCatalogStat(row.comments, hit.comments),
-      shares: preferCatalogStat(row.shares, hit.shares),
+      likes: preferCatalogStat(row.likes, hit.likes, { distrustDom: leak }),
+      comments: preferCatalogStat(row.comments, hit.comments, { distrustDom: leak }),
+      shares: preferCatalogStat(row.shares, hit.shares, { distrustDom: leak }),
     };
   });
 
@@ -1287,6 +1375,7 @@ function enrichContentWithCatalog(rows, catalog, username = '') {
     if (row.videoId) continue; // 已有 ID 就别乱绑
     const leftover = take(() => true);
     if (!leftover) break;
+    const leak = looksLikeViewsLeak(row.views, row.likes, row.comments);
     enriched[i] = {
       ...row,
       videoId: leftover.videoId,
@@ -1294,9 +1383,9 @@ function enrichContentWithCatalog(rows, catalog, username = '') {
       coverUrl: row.coverUrl || leftover.coverUrl,
       title: row.title || leftover.title || '',
       views: preferCatalogStat(row.views, leftover.views),
-      likes: preferCatalogStat(row.likes, leftover.likes),
-      comments: preferCatalogStat(row.comments, leftover.comments),
-      shares: preferCatalogStat(row.shares, leftover.shares),
+      likes: preferCatalogStat(row.likes, leftover.likes, { distrustDom: leak }),
+      comments: preferCatalogStat(row.comments, leftover.comments, { distrustDom: leak }),
+      shares: preferCatalogStat(row.shares, leftover.shares, { distrustDom: leak }),
     };
   }
 
@@ -1377,6 +1466,7 @@ function enrichContentFromApi(rows, apiHits, username = '') {
       }
       return row;
     }
+    const leak = looksLikeViewsLeak(row.views, row.likes, row.comments);
     return {
       ...row,
       videoId: row.videoId || hit.videoId,
@@ -1384,9 +1474,9 @@ function enrichContentFromApi(rows, apiHits, username = '') {
       coverUrl: row.coverUrl || hit.coverUrl,
       title: row.title || hit.title || '',
       views: preferCatalogStat(row.views, hit.views),
-      likes: preferCatalogStat(row.likes, hit.likes),
-      comments: preferCatalogStat(row.comments, hit.comments),
-      shares: preferCatalogStat(row.shares, hit.shares),
+      likes: preferCatalogStat(row.likes, hit.likes, { distrustDom: leak }),
+      comments: preferCatalogStat(row.comments, hit.comments, { distrustDom: leak }),
+      shares: preferCatalogStat(row.shares, hit.shares, { distrustDom: leak }),
     };
   });
   // DOM 没抓到行时，退回 API 列表
@@ -1600,12 +1690,13 @@ async function pullStudioStats(accountId, options = {}) {
       contentRows = contentRows.map((row) => {
         const hit = row.videoId ? byId.get(String(row.videoId)) : null;
         if (!hit) return sanitizeContentMetrics(row);
+        const leak = looksLikeViewsLeak(row.views, row.likes, row.comments);
         return sanitizeContentMetrics({
           ...row,
           views: preferCatalogStat(row.views, hit.views),
-          likes: preferCatalogStat(row.likes, hit.likes),
-          comments: preferCatalogStat(row.comments, hit.comments),
-          shares: preferCatalogStat(row.shares, hit.shares),
+          likes: preferCatalogStat(row.likes, hit.likes, { distrustDom: leak }),
+          comments: preferCatalogStat(row.comments, hit.comments, { distrustDom: leak }),
+          shares: preferCatalogStat(row.shares, hit.shares, { distrustDom: leak }),
         });
       });
     } else {
@@ -1613,7 +1704,7 @@ async function pullStudioStats(accountId, options = {}) {
     }
     const swapped = contentRows.filter((r) => r._metricsSwapped).length;
     if (swapped) {
-      log(`内容指标纠错：已对 ${swapped} 条疑似「播放/评论」对调的数据进行校正`);
+      log(`内容指标纠错：已对 ${swapped} 条疑似列错位（播放/点赞/评论）数据进行校正`);
     }
     const contentSums = sumContentTotals(contentRows);
     const withLink = contentRows.filter((r) => r.videoUrl || r.videoId).length;
