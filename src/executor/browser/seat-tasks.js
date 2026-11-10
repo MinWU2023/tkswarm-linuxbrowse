@@ -1139,8 +1139,51 @@ async function runBlockUser(accountId, payload = {}) {
   });
 }
 
-/** 删除会话：会话头部「…」→ Delete → 确认 */
-async function runDeleteChat(accountId, payload = {}) {
+/**
+ * 客服坐席「拉取会话」：走服务器浏览器把与某个用户的私信记录整段拉回来。
+ * 只负责取数据，删旧记录 + 入库由 PHP 在任务完成后做（入到对方语种译文字段）。
+ */
+async function runPullChat(accountId, payload = {}) {
+  const aid = Number(accountId);
+  const recipient = String(payload.recipient || payload.toUser || '').replace(/^@/, '').trim();
+  if (!recipient) throw new Error('拉取会话需要对方用户名（recipient）');
+  const target = recipient.toLowerCase();
+  liveLog(`账号 #${aid}：开始拉取 @${recipient} 的私信记录（服务器浏览器）`, 'info', { accountId: aid });
+
+  const { fetchInboxViaBit } = require('./tiktok-dm-sync');
+  let fetched = null;
+  try {
+    fetched = await fetchInboxViaBit(aid, {
+      browserBackend: 'linux',
+      maxConversations: 40,
+      maxMessagesPerChat: 50,
+    });
+  } catch (e) {
+    liveLog(`账号 #${aid}：拉取会话失败：${String(e?.message || e).slice(0, 200)}`, 'warn', { accountId: aid });
+    throw e;
+  }
+  if (!fetched?.ok) {
+    throw new Error(`拉取会话失败：${fetched?.reason || '未知原因'}`);
+  }
+  const list = Array.isArray(fetched.conversations) ? fetched.conversations : [];
+  const hit = list.find((c) => String(c.username || '').toLowerCase() === target)
+    || list.find((c) => String(c.uid || '').toLowerCase() === target);
+  if (!hit) {
+    throw new Error(`收件箱里没有 @${recipient} 的会话（本次拉到 ${list.length} 个会话）`);
+  }
+  const messages = (hit.messages || [])
+    .map((m) => ({
+      direction: m.direction === 'out' ? 'out' : 'in',
+      content: String(m.content || '').slice(0, 4000),
+      externalId: m.externalId || null,
+      createdAt: m.createdAt || null,
+    }))
+    .filter((m) => m.content);
+  liveLog(`账号 #${aid}：@${recipient} 拉到 ${messages.length} 条私信，交给中心库覆盖入库`, 'info', { accountId: aid });
+  return { status: 'completed', result: { recipient, total: messages.length, messages } };
+}
+
+/** 删除会话：会话头部「…」→ Delete → 确认 */async function runDeleteChat(accountId, payload = {}) {
   return runSeatChatAction(accountId, payload, {
     name: '删除会话',
     run: async (page) => {
@@ -1164,4 +1207,5 @@ module.exports = {
   runPinFriend,
   runBlockUser,
   runDeleteChat,
+  runPullChat,
 };

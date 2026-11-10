@@ -740,6 +740,10 @@ async function executeWorkItemInner(item) {
     const { runDeleteChat } = require('./browser/seat-tasks');
     return runDeleteChat(accountId, payload);
   }
+  if (type === 'pull_chat') {
+    const { runPullChat } = require('./browser/seat-tasks');
+    return runPullChat(accountId, payload);
+  }
 
   if (type === 'message' || type === 'dm_reply') {
     const seatSend = String(payload.source || '') === 'chat.seat' || payload.autoSend === true;
