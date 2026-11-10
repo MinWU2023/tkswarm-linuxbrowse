@@ -177,6 +177,102 @@ async function runCsDetect(accountId) {
   }
 }
 
+/**
+ * 客服坐席「获取语言」：打开对方主页，从 SSR 的 webapp.user-detail 取简介/昵称，
+ * 回传中心库判断语种（TikTok 用户对象没有 language 字段，只能按文本判断）。
+ * 判断不出由 PHP 侧默认英语，与「对方无语种则默认英语」的约定一致。
+ */
+async function runFetchLang(accountId, payload = {}) {
+  const aid = Number(accountId);
+  const friendId = Number(payload.friendId || 0);
+  const target = String(payload.recipient || payload.toUser || payload.username || '')
+    .replace(/^@+/, '')
+    .trim();
+  if (!friendId) throw new Error('获取语言需要 friendId');
+  if (!target) throw new Error('获取语言需要对方用户名（recipient）');
+
+  liveLog(`账号 #${aid}：开始获取对方 @${target} 的语种`, 'info', { accountId: aid });
+  const { connection, profileId } = await openSeatBrowser(aid, 'https://www.tiktok.com/');
+  try {
+    // 未登录会被踢到登录墙，抓不到主页 SSR：先探测，必要时注入已存会话
+    let session = await probeLogin(connection, aid);
+    if (!session?.loggedIn) {
+      await tryInjectSavedSession(connection, aid);
+      session = await probeLogin(connection, aid);
+    }
+    if (!session?.loggedIn) {
+      throw waitingLoginDataError(aid, '获取对方语种前需已登录：请先在 VNC 完成登录后重试');
+    }
+    const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(target)}`;
+    await connection.page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((e) => {
+      liveLog(`账号 #${aid}：打开对方主页失败：${String(e?.message || e).slice(0, 160)}`, 'warn', { accountId: aid });
+    });
+    await connection.page.waitForTimeout?.(2500).catch(() => {});
+
+    // 主页 SSR 数据：__DEFAULT_SCOPE__['webapp.user-detail'].userInfo.user
+    const profile = await connection.page.evaluate(() => {
+      try {
+        const nodes = Array.from(document.querySelectorAll('script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#__NEXT_DATA__'));
+        for (const n of nodes) {
+          const raw = String(n.textContent || '').trim();
+          if (!raw) continue;
+          const data = JSON.parse(raw);
+          const scope = data?.__DEFAULT_SCOPE__ || data || {};
+          const detail = scope['webapp.user-detail'] || null;
+          const u = detail?.userInfo?.user || null;
+          if (u) {
+            return {
+              uniqueId: String(u.uniqueId || u.unique_id || ''),
+              nickname: String(u.nickname || u.nickName || ''),
+              signature: String(u.signature || u.bio || ''),
+              region: String(u.region || ''),
+            };
+          }
+        }
+      } catch { /* 解析失败按无数据处理 */ }
+      // SSR 缺失时用页面文本兜底：简介通常在 h2 之后的区域，取可见文本片段
+      const h = document.querySelector('[data-e2e="user-bio"]');
+      return {
+        uniqueId: '',
+        nickname: '',
+        signature: String(h?.innerText || '').trim().slice(0, 300),
+        region: '',
+      };
+    }).catch(() => null);
+
+    const bio = String(profile?.signature || '').trim();
+    const nickname = String(profile?.nickname || '').trim();
+    let out = null;
+    try {
+      out = await phpApi.post('/node/chat/friend-lang', {
+        friendId,
+        accountId: aid,
+        bio,
+        nickname,
+        uniqueId: profile?.uniqueId || target,
+        region: profile?.region || '',
+      });
+    } catch (e) {
+      throw new Error(`语种回写中心库失败：${String(e?.message || e).slice(0, 200)}`);
+    }
+    const lang = String(out?.lang || 'en');
+    liveLog(
+      `账号 #${aid}：@${target} 语种=${lang}${out?.fallback ? '（未能判断，按默认英语）' : ''}`
+      + `${bio ? `，依据简介：${bio.slice(0, 40)}` : '，简介为空'}`,
+      out?.fallback ? 'warn' : 'info',
+      { accountId: aid },
+    );
+    return {
+      status: 'completed',
+      result: { friendId, lang, fallback: Boolean(out?.fallback), bio: bio.slice(0, 200), profileId },
+    };
+  } finally {
+    try { await closeConnection(connection, { force: true }); } catch { /* */ }
+    try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+    await releaseSeatLease(profileId);
+  }
+}
+
 async function runCsLogout(accountId) {
   const aid = Number(accountId);
   let profileId = '';
@@ -650,4 +746,5 @@ module.exports = {
   runCsDetect,
   runCsLogout,
   runSyncFans,
+  runFetchLang,
 };

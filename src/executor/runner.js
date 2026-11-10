@@ -720,12 +720,33 @@ async function executeWorkItemInner(item) {
     const { runCsLogout } = require('./browser/seat-tasks');
     return runCsLogout(accountId, payload);
   }
+  if (type === 'fetch_lang') {
+    const { runFetchLang } = require('./browser/seat-tasks');
+    return runFetchLang(accountId, payload);
+  }
 
   if (type === 'message' || type === 'dm_reply') {
     const seatSend = String(payload.source || '') === 'chat.seat' || payload.autoSend === true;
+    // 坐席发信：真正投递的是「对方语种译文」（deliverText），中文原文只留在本地记录里。
+    // 服务端翻译失败时会带回 translateError：此时不能静默把中文发出去，直接判失败让用户知道。
+    if (seatSend && payload.translateError) {
+      return {
+        status: 'failed',
+        result: { error: String(payload.translateError), translated: payload.translated || '' },
+        errorMessage: `发送翻译失败，未发出消息：${payload.translateError}`,
+      };
+    }
+    const deliverText = payload.deliverText || payload.content || payload.publishCaption || payload.reply || '';
+    if (seatSend && payload.deliverText && payload.deliverText !== payload.content) {
+      liveLog(
+        `账号 #${accountId}：按对方语种 ${payload.peerLang || ''} 投递译文（原文：${String(payload.content || '').slice(0, 30)} → ${String(payload.deliverText).slice(0, 40)}）`,
+        'info',
+        logCtx,
+      );
+    }
     const result = await prepareMessage(
       accountId,
-      payload.content || payload.publishCaption || payload.reply || '',
+      deliverText,
       payload.recipient || payload.toUser || '',
       {
         saveTraffic,
