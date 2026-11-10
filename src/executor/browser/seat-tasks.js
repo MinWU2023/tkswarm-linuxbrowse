@@ -193,6 +193,12 @@ async function runFetchLang(accountId, payload = {}) {
 
   liveLog(`账号 #${aid}：开始获取对方 @${target} 的语种`, 'info', { accountId: aid });
   const { connection, profileId } = await openSeatBrowser(aid, 'https://www.tiktok.com/');
+  liveLog(
+    `账号 #${aid}：获取语种用浏览器环境已打开 ${String(profileId || '').slice(0, 8)}…，可在环境列表 / VNC 远程查看`,
+    'info',
+    { accountId: aid, profileId },
+  );
+  let keepOpen = false;
   try {
     // 未登录会被踢到登录墙，抓不到主页 SSR：先探测，必要时注入已存会话
     let session = await probeLogin(connection, aid);
@@ -201,7 +207,8 @@ async function runFetchLang(accountId, payload = {}) {
       session = await probeLogin(connection, aid);
     }
     if (!session?.loggedIn) {
-      throw waitingLoginDataError(aid, '获取对方语种前需已登录：请先在 VNC 完成登录后重试');
+      keepOpen = true;
+      throw waitingLoginDataError(aid, '获取对方语种前需已登录：请在 VNC 完成登录后重试（窗口已保持打开）');
     }
     const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(target)}`;
     await connection.page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((e) => {
@@ -266,10 +273,23 @@ async function runFetchLang(accountId, payload = {}) {
       status: 'completed',
       result: { friendId, lang, fallback: Boolean(out?.fallback), bio: bio.slice(0, 200), profileId },
     };
+  } catch (e) {
+    // 出错保留窗口：环境秒关的话远程看不到登录墙/验证码
+    keepOpen = true;
+    throw e;
   } finally {
-    try { await closeConnection(connection, { force: true }); } catch { /* */ }
-    try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
-    await releaseSeatLease(profileId);
+    if (!keepOpen) {
+      try { await closeConnection(connection, { force: true }); } catch { /* */ }
+      try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+      await releaseSeatLease(profileId);
+    } else {
+      try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* */ }
+      liveLog(
+        `账号 #${aid}：获取语种任务的浏览器窗口保持打开（环境 ${String(profileId || '').slice(0, 8)}…），可在环境列表 / VNC 查看`,
+        'warn',
+        { accountId: aid, profileId },
+      );
+    }
   }
 }
 
@@ -297,6 +317,13 @@ async function runSearchUsers(accountId, payload = {}) {
 
   liveLog(`账号 #${aid}：开始在 TikTok 搜索「${keyword}」（上限 ${limit} 条）`, 'info', { accountId: aid });
   const { connection, profileId } = await openSeatBrowser(aid, 'https://www.tiktok.com/');
+  liveLog(
+    `账号 #${aid}：搜索用浏览器环境已打开 ${String(profileId || '').slice(0, 8)}…，可在环境列表 / VNC 远程查看执行过程`,
+    'info',
+    { accountId: aid, profileId },
+  );
+  // 需要人工介入（未登录 / 触发验证 / 无结果）时保留窗口，方便在 VNC 里查看和排查
+  let keepOpen = false;
   try {
     let session = await probeLogin(connection, aid);
     if (!session?.loggedIn) {
@@ -304,7 +331,8 @@ async function runSearchUsers(accountId, payload = {}) {
       session = await probeLogin(connection, aid);
     }
     if (!session?.loggedIn) {
-      throw waitingLoginDataError(aid, '搜索用户前需已登录：请先在 VNC 完成登录后重试');
+      keepOpen = true;
+      throw waitingLoginDataError(aid, '搜索用户前需已登录：请在 VNC 完成登录后重试（窗口已保持打开）');
     }
 
     const page = await searchUsersPage(connection, keyword, aid);
@@ -393,10 +421,12 @@ async function runSearchUsers(accountId, payload = {}) {
       }
     }
     if (!result.length) {
+      // 无结果：保留窗口，让人能在 VNC 里看是不是撞了验证码 / 登录墙
+      keepOpen = true;
       liveLog(
-        `账号 #${aid}：搜索「${keyword}」未解析到用户卡片（可能触发验证或关键词无结果）`,
+        `账号 #${aid}：搜索「${keyword}」未解析到用户卡片（可能触发验证或关键词无结果），浏览器窗口已保持打开，请在远程查看确认`,
         'warn',
-        { accountId: aid },
+        { accountId: aid, profileId },
       );
     } else {
       liveLog(`账号 #${aid}：搜索「${keyword}」拿到 ${result.length} 个用户（临时结果，未入库）`, 'info', { accountId: aid });
@@ -412,10 +442,24 @@ async function runSearchUsers(accountId, payload = {}) {
         temporary: true,
       },
     };
+  } catch (e) {
+    // 出错也保留窗口，否则环境秒关，远程完全看不到发生了什么
+    keepOpen = true;
+    throw e;
   } finally {
-    try { await closeConnection(connection, { force: true }); } catch { /* */ }
-    try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
-    await releaseSeatLease(profileId);
+    if (!keepOpen) {
+      try { await closeConnection(connection, { force: true }); } catch { /* */ }
+      try { await closeSession(profileId, { accountId: aid, pushPack: false }); } catch { /* */ }
+      await releaseSeatLease(profileId);
+    } else {
+      // 留给 VNC 人工查看：不断开 Electron 窗，只解除占用
+      try { await closeConnection(connection, { force: false, keepAlive: true }); } catch { /* */ }
+      liveLog(
+        `账号 #${aid}：搜索任务的浏览器窗口保持打开（环境 ${String(profileId || '').slice(0, 8)}…），可在环境列表 / VNC 查看`,
+        'warn',
+        { accountId: aid, profileId },
+      );
+    }
   }
 }
 
