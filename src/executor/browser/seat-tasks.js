@@ -371,6 +371,27 @@ async function runSearchUsers(accountId, payload = {}) {
       friendUid: '',
       relation: 'stranger',
     }));
+    // 搜索结果本身没有语种，回查本地会话里已获取过的语言（没加入会话的用户就没有）
+    if (result.length) {
+      try {
+        const back = await phpApi.post('/node/chat/friend-langs', {
+          accountId: aid,
+          usernames: result.map((u) => String(u.username || '')),
+        });
+        const byName = new Map();
+        for (const it of (back?.items || [])) {
+          byName.set(String(it.username || '').toLowerCase(), it);
+        }
+        for (const u of result) {
+          const hit = byName.get(String(u.username || '').toLowerCase());
+          u.lang = String(hit?.lang || '');
+          u.friendId = Number(hit?.friendId || 0) || 0;
+        }
+      } catch (e) {
+        // 回查失败不影响搜索结果本身，只是列表里少了语言标签
+        liveLog(`账号 #${aid}：搜索结果回查语言失败：${String(e?.message || e).slice(0, 160)}`, 'warn', { accountId: aid });
+      }
+    }
     if (!result.length) {
       liveLog(
         `账号 #${aid}：搜索「${keyword}」未解析到用户卡片（可能触发验证或关键词无结果）`,

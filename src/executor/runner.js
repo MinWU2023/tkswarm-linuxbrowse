@@ -731,22 +731,33 @@ async function executeWorkItemInner(item) {
 
   if (type === 'message' || type === 'dm_reply') {
     const seatSend = String(payload.source || '') === 'chat.seat' || payload.autoSend === true;
-    // 坐席发信：真正投递的是「对方语种译文」（deliverText），中文原文只留在本地记录里。
-    // 服务端翻译失败时会带回 translateError：此时不能静默把中文发出去，直接判失败让用户知道。
-    if (seatSend && payload.translateError) {
-      return {
-        status: 'failed',
-        result: { error: String(payload.translateError), translated: payload.translated || '' },
-        errorMessage: `发送翻译失败，未发出消息：${payload.translateError}`,
-      };
-    }
-    const deliverText = payload.deliverText || payload.content || payload.publishCaption || payload.reply || '';
-    if (seatSend && payload.deliverText && payload.deliverText !== payload.content) {
-      liveLog(
-        `账号 #${accountId}：按对方语种 ${payload.peerLang || ''} 投递译文（原文：${String(payload.content || '').slice(0, 30)} → ${String(payload.deliverText).slice(0, 40)}）`,
-        'info',
-        logCtx,
-      );
+    const originalText = payload.content || payload.publishCaption || payload.reply || '';
+    let deliverText = originalText;
+    let translated = String(payload.translated || '');
+    // 坐席发信：用本机 Node 的翻译接口实时把中文翻成对方语种，投递译文。
+    // 目标语种由 PHP 按 chat_users.lang 决定（没获取语言时按英语）。
+    if (seatSend && payload.needTranslate === true && deliverText) {
+      const targetLang = String(payload.peerLang || 'en').toLowerCase();
+      const sourceLang = String(payload.sourceLang || 'zh').toLowerCase();
+      try {
+        const { translateForced } = require('./translator');
+        const tr = await translateForced(originalText, { from: sourceLang, to: targetLang });
+        translated = String(tr?.text || '').trim();
+        if (!translated) throw new Error('翻译接口未返回文本');
+        deliverText = translated;
+        liveLog(
+          `账号 #${accountId}：已按对方语种 ${targetLang} 翻译后投递（${String(originalText).slice(0, 30)} → ${String(translated).slice(0, 40)}）`,
+          'info',
+          logCtx,
+        );
+      } catch (e) {
+        // 翻译失败不能把中文原文发出去（对方看不懂），直接判失败并说明原因
+        return {
+          status: 'failed',
+          result: { error: String(e?.message || e), original: originalText },
+          errorMessage: `实时翻译失败，未发出消息：${String(e?.message || e)}`,
+        };
+      }
     }
     const result = await prepareMessage(
       accountId,
@@ -769,14 +780,15 @@ async function executeWorkItemInner(item) {
     if (result?.status === 'failed') {
       return { status: 'failed', result, errorMessage: result.error || '私信发送失败' };
     }
-    // 坐席发送成功后回写本地会话
+    // 坐席发送成功后回写本地会话：content=原文，translated=实际投递的译文
     if (seatSend && payload.friendId) {
       try {
         await phpApi.post('/node/chat/bit-send-result', {
           friendId: Number(payload.friendId),
           accountId,
-          content: payload.content || '',
-          translated: payload.translated || '',
+          content: originalText,
+          translated,
+          delivered: deliverText,
           recordId: Number(payload.recordId || 0) || undefined,
           status: 'synced',
         });

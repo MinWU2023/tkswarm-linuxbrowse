@@ -63,6 +63,62 @@ async function translateText(text, { from = 'auto', to = 'zh' } = {}) {
   return { text: result, provider, remaining: cfg.translationQuota > 0 ? Math.max(0, cfg.translationQuota - cfg.translationUsed - 1) : null };
 }
 
+/**
+ * 强制翻译：不看「翻译模式」开关，只要配置了接口地址就直接翻。
+ * 客服私信发送用这个——系统设置里已经把翻译接口对接好了，不该因为模式是 off 就发不出去。
+ * 顺序：有密钥走 AI（OpenAI 兼容），否则走普通翻译接口。
+ */
+async function translateForced(text, { from = 'zh', to = 'en' } = {}) {
+  const cfg = await translationConfig();
+  const source = String(text || '').trim();
+  if (!source) throw new Error('翻译内容为空');
+  if (cfg.translationQuota > 0 && cfg.translationUsed >= cfg.translationQuota) {
+    throw new Error('翻译配额已用尽');
+  }
+  const apiUrl = String(cfg.translationApiUrl || '').trim();
+  if (!apiUrl) {
+    throw new Error('未配置翻译接口：请在系统设置填写「翻译 API」');
+  }
+  const apiKey = String(cfg.translationApiKey || '').trim();
+  // 模式是 ai，或有密钥，按 OpenAI 兼容接口处理
+  const useAi = String(cfg.translationMode || '') === 'ai' || apiKey !== '';
+  let result;
+  let provider;
+  if (useAi) {
+    if (!apiKey) throw new Error('智能翻译未配置密钥：请在系统设置填写「翻译 API Key」');
+    const endpoint = apiUrl.replace(/\/$/, '') + '/chat/completions';
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: cfg.translationModelId || 'gpt-3.5-turbo',
+        temperature: 0.2,
+        messages: [
+          { role: 'system', content: `You are a translator. Translate the user text into ${to}. Return only the translation, no explanation.` },
+          { role: 'user', content: source },
+        ],
+      }),
+    });
+    if (!response.ok) throw new Error(`翻译接口失败 ${response.status}`);
+    const data = await response.json();
+    result = data?.choices?.[0]?.message?.content?.trim();
+    provider = 'ai-forced';
+  } else {
+    const url = new URL(apiUrl);
+    url.searchParams.set('q', source);
+    url.searchParams.set('langpair', `${from}|${to}`);
+    const response = await fetch(url, { headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {} });
+    if (!response.ok) throw new Error(`翻译接口失败 ${response.status}`);
+    const data = await response.json();
+    result = data?.responseData?.translatedText || data?.translatedText || data?.data?.translations?.[0]?.translatedText;
+    provider = 'basic-forced';
+  }
+  const out = String(result || '').trim();
+  if (!out) throw new Error('翻译接口未返回有效文本');
+  await dataStore.setSetting('translationUsed', Number(cfg.translationUsed || 0) + 1);
+  return { text: out, provider };
+}
+
 function heuristicLang(text) {
   const s = String(text || '');
   if (/[\u4e00-\u9fff]/.test(s)) return 'zh';
@@ -82,4 +138,4 @@ async function detectLanguage(text) {
   return { language: heuristicLang(source), provider: 'heuristic' };
 }
 
-module.exports = { translateText, detectLanguage, translationConfig };
+module.exports = { translateText, translateForced, detectLanguage, translationConfig };
