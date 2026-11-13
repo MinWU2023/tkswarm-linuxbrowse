@@ -228,6 +228,8 @@ function formatOpenResult(id, session) {
     os: fp.os || 'Win32',
     locale: session.profile?.language || fp.languages || 'en-US',
     timezone: session.timezone || '',
+    latitude: Number(session.latitude || session.profile?.latitude || 0),
+    longitude: Number(session.longitude || session.profile?.longitude || 0),
     fp,
     headless: session.headless,
     display: session.display || null,

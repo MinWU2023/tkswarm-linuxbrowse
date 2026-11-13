@@ -179,7 +179,8 @@ async function ensureConsistentUaAndClientHints(page, openedMeta = null) {
         || (ua.match(/Chrome\/(\d{2,3})/i) || [])[1]
         || '131'
       ).trim();
-      const fullVer = `${ver}.0.0.0`;
+      const { realCoreFullVersion, greaseBrandList } = require('../../browser/fingerprint');
+      const fullVer = realCoreFullVersion(ver);
       const isMac = meta?.os === 'MacIntel' || meta?.fp?.os === 'MacIntel' || /Macintosh|Mac OS X/i.test(ua);
       // 若 UA 仍残留 Linux / Electron 字样，规整为标准桌面 Chrome UA
       if (!ua || /Linux|Electron/i.test(ua)) {
@@ -197,17 +198,11 @@ async function ensureConsistentUaAndClientHints(page, openedMeta = null) {
       const acceptLanguage = primaryLang.includes('-') && baseLang.toLowerCase() !== primaryLang.toLowerCase()
         ? `${primaryLang},${baseLang}`
         : primaryLang;
+      // 品牌列表走 GREASE 算法，与 electron-launcher 下发的 userAgentMetadata / Client Hints 头完全一致
+      const grease = greaseBrandList(ver, fullVer);
       const userAgentMetadata = {
-        brands: [
-          { brand: 'Not-A.Brand', version: '99' },
-          { brand: 'Google Chrome', version: String(ver) },
-          { brand: 'Chromium', version: String(ver) },
-        ],
-        fullVersionList: [
-          { brand: 'Not-A.Brand', version: '99.0.0.0' },
-          { brand: 'Google Chrome', version: fullVer },
-          { brand: 'Chromium', version: fullVer },
-        ],
+        brands: grease.brands,
+        fullVersionList: grease.fullVersionList,
         fullVersion: fullVer,
         platform: uaPlatform,
         platformVersion: uaPlatformVersion,
@@ -237,16 +232,8 @@ async function ensureConsistentUaAndClientHints(page, openedMeta = null) {
           try { delete navigator.webdriver; } catch (e) {}
           try { delete navigator.userAgent; } catch (e) {}
           try { delete navigator.platform; } catch (e) {}
-          const brands = Object.freeze([
-            Object.freeze({ brand: 'Not-A.Brand', version: '99' }),
-            Object.freeze({ brand: 'Google Chrome', version: ver }),
-            Object.freeze({ brand: 'Chromium', version: ver }),
-          ]);
-          const fullVersionList = Object.freeze([
-            Object.freeze({ brand: 'Not-A.Brand', version: '99.0.0.0' }),
-            Object.freeze({ brand: 'Google Chrome', version: fullVer }),
-            Object.freeze({ brand: 'Chromium', version: fullVer }),
-          ]);
+          const brands = Object.freeze(${JSON.stringify(userAgentMetadata.brands)}.map((b) => Object.freeze(b)));
+          const fullVersionList = Object.freeze(${JSON.stringify(userAgentMetadata.fullVersionList)}.map((b) => Object.freeze(b)));
           const highEntropyMap = {
             architecture: 'x86',
             bitness: '64',
@@ -300,6 +287,18 @@ async function ensureConsistentUaAndClientHints(page, openedMeta = null) {
           await cdp.send('Emulation.setUserAgentOverride', uaParams).catch(() => {});
           await cdp.send('Network.setUserAgentOverride', uaParams).catch(() => {});
           await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: uaPatchScript }).catch(() => {});
+          // 常驻会话里补发地区类覆盖：启动阶段的临时 WebSocket 断开后这些覆盖会被 Chromium 清掉
+          const tz = String(meta?.timezone || meta?.fp?.timezone || '').trim();
+          if (tz) await cdp.send('Emulation.setTimezoneOverride', { timezoneId: tz }).catch(() => {});
+          if (lang) await cdp.send('Emulation.setLocaleOverride', { locale: primaryLang }).catch(() => {});
+          const lat = Number(meta?.latitude || 0);
+          const lon = Number(meta?.longitude || 0);
+          if (Number.isFinite(lat) && Number.isFinite(lon) && (lat !== 0 || lon !== 0)) {
+            await cdp.send('Emulation.setGeolocationOverride', { latitude: lat, longitude: lon, accuracy: 100 }).catch(() => {});
+          }
+          const hc = Number(meta?.fp?.hardwareConcurrency || 0);
+          // navigator.hardwareConcurrency 在页面里是 non-configurable，JS 层改不动，只能走 CDP
+          if (hc > 0) await cdp.send('Emulation.setHardwareConcurrencyOverride', { hardwareConcurrency: hc }).catch(() => {});
         }
       }
       await page.addInitScript(uaPatchScript).catch(() => {});

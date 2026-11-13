@@ -10,6 +10,36 @@ const CORE_VERSIONS = ['120', '124', '128', '131', '136', '140', '144', '148', '
  */
 let REAL_CORE_VERSION = '';
 let REAL_CORE_PROBED = false;
+// 真实内核是否为 Electron 内嵌 Chromium，及其完整版本号
+let REAL_CORE_IS_EMBEDDED = false;
+let REAL_CORE_FULL_VERSION = '';
+
+/**
+ * 服务器浏览器只用 Electron 内核（engine.js 禁止回退系统 Chrome），UA 必须以它内嵌的 Chromium 为准。
+ * 父进程是纯 Node，没有 process.versions.chrome：用 ELECTRON_RUN_AS_NODE 让 Electron 二进制自己报版本。
+ * @returns {string} 如 130.0.6723.191；探测失败返回 ''
+ */
+function probeElectronChromium() {
+  try {
+    if (process.versions && process.versions.electron && process.versions.chrome) {
+      return String(process.versions.chrome);
+    }
+    // eslint-disable-next-line import/no-extraneous-dependencies
+    const bin = require('electron');
+    if (typeof bin !== 'string' || !bin) return '';
+    const { spawnSync } = require('node:child_process');
+    const r = spawnSync(bin, ['-p', 'process.versions.chrome'], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      encoding: 'utf8',
+      timeout: 15000,
+      windowsHide: true,
+    });
+    const out = String(r.stdout || '').trim().split(/\r?\n/).pop() || '';
+    return /^\d+\.\d+\.\d+\.\d+$/.test(out) ? out : '';
+  } catch {
+    return '';
+  }
+}
 
 /**
  * 用真实内核版本同步指纹版本。
@@ -19,6 +49,17 @@ let REAL_CORE_PROBED = false;
 function syncRealCoreVersion() {
   if (REAL_CORE_PROBED) return REAL_CORE_VERSION;
   REAL_CORE_PROBED = true;
+  // Electron 内核是唯一真相：环境里存的 131 / 148 都不能覆盖它，否则「UA 说 131、内核是 130」
+  try {
+    const full = probeElectronChromium();
+    const major = (full.match(/^(\d{2,3})\./) || [])[1];
+    if (major) {
+      REAL_CORE_VERSION = major;
+      REAL_CORE_FULL_VERSION = full;
+      REAL_CORE_IS_EMBEDDED = true;
+      return REAL_CORE_VERSION;
+    }
+  } catch { /* 落到下面的 Chrome 探测 */ }
   try {
     const { detectChromeMajorVersion } = require('./chrome-path');
     REAL_CORE_VERSION = String(detectChromeMajorVersion() || '').trim();
@@ -33,6 +74,7 @@ function alignedCoreVersion(rawWanted) {
   const real = syncRealCoreVersion();
   const wanted = String(rawWanted || '').match(/^(\d{2,3})/)?.[1] || '';
   if (!real) return wanted || DEFAULT_FP.coreVersion;
+  if (REAL_CORE_IS_EMBEDDED) return real;
   if (!wanted) return real;
   if (Math.abs(Number(real) - Number(wanted)) >= 5) return real;
   return wanted;
@@ -79,6 +121,8 @@ function platformVersionFor(fpOs, realPlatform = process.platform) {
 function normalizeCoreVersion(raw) {
   const v = String(raw || '').trim();
   const major = (v.match(/^(\d{2,3})/) || [])[1];
+  // 真实内核版本不在固定档位里（如 Electron 33 的 130）也必须原样保留，否则会被吸附成 131
+  if (major && major === syncRealCoreVersion()) return major;
   if (major && CORE_VERSIONS.includes(major)) return major;
   // 允许接近档位：取最近的受支持版本
   if (major) {
@@ -121,14 +165,84 @@ function buildUserAgent(fp) {
 /** Sec-CH-UA 近似串（供后续 CDP Network 覆盖用） */
 function buildSecChUa(fp = {}) {
   const ver = normalizeCoreVersion(fp.coreVersion);
-  return `"Not-A.Brand";v="99", "Google Chrome";v="${ver}", "Chromium";v="${ver}"`;
+  return brandListToHeader(greaseBrandList(ver).brands);
 }
 
 /**
  * 构造与 User-Agent 严格一致的 CDP userAgentMetadata，
  * 避免 Linux Chromium 原生 uaData（Linux / Chromium 130）或空 Sec-CH-UA 暴露真实内核。
  */
+/** 真实内核完整版本号（如 130.0.6723.191）；仅 Electron 内嵌内核可知，其余返回 主版本.0.0.0 */
+function realCoreFullVersion(major) {
+  syncRealCoreVersion();
+  if (REAL_CORE_IS_EMBEDDED && REAL_CORE_FULL_VERSION && String(major) === REAL_CORE_VERSION) {
+    return REAL_CORE_FULL_VERSION;
+  }
+  return `${major}.0.0.0`;
+}
+
+/**
+ * 复刻 Chromium GenerateBrandVersionList 的 GREASE 算法（以主版本号为 seed）。
+ * 之前写死 "Not-A.Brand";v=99 且排第一，与任何真实版本的输出都对不上。
+ * 核对：Chrome 131 → Google Chrome, Chromium, Not_A Brand;v=24。
+ */
+function greaseBrandList(major, fullVer) {
+  const seed = Number(major) || 0;
+  const chars = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
+  const greaseBrand = `Not${chars[seed % 11]}A${chars[(seed + 1) % 11]}Brand`;
+  const greaseMajor = ['8', '99', '24'][seed % 3];
+  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const order = orders[seed % 6];
+  const arrange = (grease, chromium, chrome) => {
+    const list = new Array(3);
+    list[order[0]] = grease;
+    list[order[1]] = chromium;
+    list[order[2]] = chrome;
+    return list;
+  };
+  const m = String(major);
+  const full = String(fullVer || `${m}.0.0.0`);
+  return {
+    brands: arrange(
+      { brand: greaseBrand, version: greaseMajor },
+      { brand: 'Chromium', version: m },
+      { brand: 'Google Chrome', version: m },
+    ),
+    fullVersionList: arrange(
+      { brand: greaseBrand, version: `${greaseMajor}.0.0.0` },
+      { brand: 'Chromium', version: full },
+      { brand: 'Google Chrome', version: full },
+    ),
+  };
+}
+
+function brandListToHeader(list) {
+  return list.map((b) => `"${b.brand}";v="${b.version}"`).join(', ');
+}
+
+/** 与 User-Agent 严格一致的 CDP userAgentMetadata（品牌列表走 GREASE，版本取真实内核） */
 function buildUserAgentMetadata(fp = {}) {
+  const ver = normalizeCoreVersion(fp.coreVersion);
+  const fullVer = realCoreFullVersion(ver);
+  const isMac = fp.os === 'MacIntel';
+  const grease = greaseBrandList(ver, fullVer);
+  return {
+    brands: grease.brands,
+    fullVersionList: grease.fullVersionList,
+    fullVersion: fullVer,
+    platform: isMac ? 'macOS' : 'Windows',
+    // 服务器是 Linux 但声称 Windows：按声称的系统给值，不读 process.platform
+    platformVersion: platformVersionFor(fp.os),
+    architecture: 'x86',
+    model: '',
+    mobile: false,
+    bitness: '64',
+    wow64: false,
+  };
+}
+
+// 旧实现（写死品牌）保留仅供对照，已不再导出
+function buildUserAgentMetadataLegacy(fp = {}) {
   const ver = normalizeCoreVersion(fp.coreVersion);
   const fullVer = `${ver}.0.0.0`;
   const isMac = fp.os === 'MacIntel';
@@ -157,7 +271,32 @@ function buildUserAgentMetadata(fp = {}) {
 /**
  * 构造与 User-Agent 一致的 HTTP Client Hints 请求头（供 Electron webRequest 与 CDP 兜底）
  */
+/** 与 User-Agent 一致的 HTTP Client Hints 请求头 */
 function buildClientHintHeaders(fp = {}, locale = 'en-US') {
+  const ver = normalizeCoreVersion(fp.coreVersion);
+  const fullVer = realCoreFullVersion(ver);
+  const isMac = fp.os === 'MacIntel';
+  const primaryLang = String(locale || fp.languages || 'en-US').split(',')[0].trim() || 'en-US';
+  const baseLang = primaryLang.split('-')[0] || 'en';
+  const acceptLang = primaryLang.includes('-') && baseLang.toLowerCase() !== primaryLang.toLowerCase()
+    ? `${primaryLang},${baseLang};q=0.9`
+    : `${primaryLang};q=0.9`;
+  const grease = greaseBrandList(ver, fullVer);
+  return {
+    'sec-ch-ua': brandListToHeader(grease.brands),
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': isMac ? '"macOS"' : '"Windows"',
+    'sec-ch-ua-platform-version': `"${platformVersionFor(fp.os)}"`,
+    'sec-ch-ua-arch': '"x86"',
+    'sec-ch-ua-bitness': '"64"',
+    'sec-ch-ua-model': '""',
+    'sec-ch-ua-full-version': `"${fullVer}"`,
+    'sec-ch-ua-full-version-list': brandListToHeader(grease.fullVersionList),
+    'accept-language': acceptLang,
+  };
+}
+
+function buildClientHintHeadersLegacy(fp = {}, locale = 'en-US') {
   const ver = normalizeCoreVersion(fp.coreVersion);
   const fullVer = `${ver}.0.0.0`;
   const isMac = fp.os === 'MacIntel';
@@ -262,6 +401,9 @@ module.exports = {
   buildClientHintHeaders,
   normalizeCoreVersion,
   syncRealCoreVersion,
+  realCoreFullVersion,
+  greaseBrandList,
+  brandListToHeader,
   alignedCoreVersion,
   platformVersionFor,
   assignHardwareFingerprint,

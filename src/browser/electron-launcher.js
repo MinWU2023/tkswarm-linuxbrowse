@@ -21,6 +21,7 @@ const { acquireDisplay } = require('./display-pool');
 const { getFreePort, waitForDevtools, waitForPageTarget, fetchJson } = require('./launcher');
 const { buildInjectScript } = require('./fp-inject');
 const { injectFingerprintOnNewDocument, applyEmulation } = require('./cdp-inject');
+const { timezoneScriptFor, uaDataScriptFor, acceptLanguageOf } = require('./emulation-scripts');
 
 function profileDir(profileId) {
   const dir = path.join(PROFILES_DIR, String(profileId));
@@ -80,12 +81,22 @@ async function launchProfileElectron(profile, options = {}) {
 
   const userAgentMetadata = buildUserAgentMetadata(fp);
   const clientHintHeaders = buildClientHintHeaders(fp, locale);
-  const injectSrc = buildInjectScript(profile.id, {
+  // navigator.languages 必须与 Accept-Language 同源（如 id-ID,id）；时区 JS 兜底与指纹脚本合并注入，
+  // 因为 CDP Emulation 覆盖在临时 WebSocket 断开后会被清空，页面内补丁不依赖 CDP 会话
+  let injectSrc = buildInjectScript(profile.id, {
     ...fp,
     userAgent,
-    languages: locale,
+    languages: acceptLanguageOf(locale),
     os: fp.os,
   });
+  try {
+    const tzScript = timezoneScriptFor(timezone);
+    if (tzScript) injectSrc = `${injectSrc}\n;${tzScript}`;
+  } catch { /* 时区兜底生成失败不阻断打开 */ }
+  try {
+    const uaScript = uaDataScriptFor({ userAgent, platform: fp.os, metadata: userAgentMetadata });
+    if (uaScript) injectSrc = `${injectSrc}\n;${uaScript}`;
+  } catch { /* UA 兜底生成失败不阻断打开 */ }
 
   const envConfig = {
     profileId: String(profile.id),
@@ -258,6 +269,9 @@ async function launchProfileElectron(profile, options = {}) {
     process: child,
     userAgent,
     timezone,
+    locale,
+    latitude,
+    longitude,
     fp,
     engine: 'electron',
     preferPageWs: true,
