@@ -546,6 +546,7 @@ function openVncEmbed(id, href) {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
       </button>
       <div class="vnc-menu hidden" id="vnc-menu">
+        <button type="button" class="vnc-menu-item" id="vnc-menu-env">环境参数</button>
         <a class="vnc-menu-item" id="vnc-menu-open" href="${esc(url)}" target="_blank" rel="noopener">新窗打开</a>
         <button type="button" class="vnc-menu-item danger" id="vnc-menu-close">关闭环境</button>
       </div>
@@ -565,11 +566,149 @@ function openVncEmbed(id, href) {
   // 点进 iframe（画面区域）时父页面失焦，顺带收起菜单
   window.addEventListener('blur', () => setMenu(false));
   document.getElementById('vnc-menu-open')?.addEventListener('click', () => setMenu(false));
+  document.getElementById('vnc-menu-env')?.addEventListener('click', () => {
+    setMenu(false);
+    openEnvInfoPanel(id);
+  });
   document.getElementById('vnc-menu-close')?.addEventListener('click', async () => {
     setMenu(false);
     const done = await closeWindow(id);
     if (done) closeModal();
   });
+}
+
+/** VNC 弹框内的「环境参数」浮层：配置参数 + 站点实际读到的参数 */
+function envInfoRows(pairs) {
+  return pairs.map(([k, v, cls]) => `<tr><td class="k">${esc(k)}</td><td class="v${cls ? ` ${cls}` : ''}">${v}</td></tr>`).join('');
+}
+
+function envInfoSection(title, pairs) {
+  return `<div class="env-info-section"><h4>${esc(title)}</h4><table>${envInfoRows(pairs)}</table></div>`;
+}
+
+function buildEnvInfoHtml(data) {
+  const cfg = data?.config || {};
+  const live = data?.live || {};
+  const fp = cfg.fp || {};
+  const dash = (v) => (v == null || v === '' ? '—' : esc(String(v)));
+  const sections = [];
+  const proxyAddr = cfg.proxyHost ? `${cfg.proxyHost}:${cfg.proxyPort || ''}` : '（未绑定，直连）';
+  sections.push(envInfoSection('① 出口 / 地区（按代理）', [
+    ['环境', dash(cfg.name ? `${cfg.name}（${String(cfg.profileId).slice(0, 10)}…）` : cfg.profileId)],
+    ['代理地址', esc(proxyAddr)],
+    ['代理类型', dash(cfg.proxyType)],
+    ['出口 IP（上次探测）', dash(cfg.lastIp)],
+    ['国家/地区', dash(cfg.country)],
+    ['配置时区', dash(cfg.timezone)],
+    ['配置语言', dash(cfg.locale)],
+    ['经纬度', cfg.latitude != null && cfg.longitude != null ? esc(`${cfg.latitude}, ${cfg.longitude}`) : '—'],
+  ]));
+  if (live.ok) {
+    const off = live.tzOffsetMin;
+    sections.push(envInfoSection('② 站点实际读到', [
+      ['页面 URL', dash(live.url)],
+      ['navigator.language', dash(live.language)],
+      ['navigator.languages', dash(live.languages)],
+      ['Intl 时区', dash(live.timezone)],
+      ['时区偏移', off != null ? esc(`UTC${off >= 0 ? '+' : ''}${off / 60}h`) : '—'],
+      ['本地时间', dash(live.localTime)],
+    ]));
+  } else {
+    sections.push(`<div class="env-info-section"><h4>② 站点实际读到</h4><div class="muted">采集失败：${esc(live.error || '页面未就绪')}（可点「刷新」重试）</div></div>`);
+  }
+  const fpRows = [
+    ['User-Agent', dash(live.ok ? live.userAgent : cfg.userAgent)],
+    ['平台', dash(live.ok ? live.platform : fp.os)],
+    ['内核版本', dash(fp.coreVersion)],
+    ['navigator.webdriver', live.ok ? (live.webdriver ? '<span class="warn">true（易被识别）</span>' : '<span class="ok">false</span>') : '—'],
+    ['硬件并发', dash(live.ok ? live.hardwareConcurrency : fp.hardwareConcurrency)],
+    ['设备内存', dash(live.ok ? live.deviceMemory : fp.deviceMemory)],
+    ['屏幕 / dpr', live.ok ? esc(`${live.screen} / dpr ${live.devicePixelRatio}`) : dash(fp.resolution)],
+    ['WebGL 厂商', dash(live.ok && live.webgl ? live.webgl.vendor : fp.webglVendor)],
+    ['WebGL 渲染器', dash(live.ok && live.webgl ? live.webgl.renderer : fp.webglRenderer)],
+  ];
+  if (live.ok && live.uaData) {
+    fpRows.push(
+      ['CH brands', dash(live.uaData.brands)],
+      ['CH platform', dash(`${live.uaData.platform || ''} ${live.uaData.platformVersion || ''}`.trim())],
+      ['CH mobile', dash(live.uaData.mobile)],
+    );
+  }
+  sections.push(envInfoSection('③ 浏览器指纹', fpRows));
+  sections.push(envInfoSection('④ 运行信息', [
+    ['引擎', dash(cfg.engine)],
+    ['窗口模式', cfg.headless ? '无头' : `有头 ${esc(cfg.display || '')}`],
+    ['启动时间', dash(String(cfg.startedAt || '').replace('T', ' ').slice(0, 19))],
+  ]));
+  return sections.join('');
+}
+
+function envInfoPlainText(data) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = buildEnvInfoHtml(data);
+  const out = [];
+  tmp.querySelectorAll('.env-info-section').forEach((sec) => {
+    out.push(`【${sec.querySelector('h4')?.textContent || ''}】`);
+    sec.querySelectorAll('tr').forEach((tr) => {
+      out.push(`${tr.querySelector('.k')?.textContent || ''}: ${tr.querySelector('.v')?.textContent || ''}`);
+    });
+  });
+  return out.join('\n');
+}
+
+async function openEnvInfoPanel(id) {
+  const host = document.getElementById('modal-body');
+  if (!host) return;
+  host.querySelector('#env-info-overlay')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'env-info-overlay';
+  overlay.className = 'env-info-overlay';
+  overlay.innerHTML = `
+    <div class="env-info-card">
+      <div class="env-info-head">
+        <strong>环境参数</strong>
+        <span class="env-info-actions">
+          <button type="button" class="link-btn" data-act="copy">复制</button>
+          <button type="button" class="link-btn" data-act="refresh">刷新</button>
+          <button type="button" class="link-btn" data-act="close">关闭</button>
+        </span>
+      </div>
+      <div class="env-info-body"><div class="muted">采集中…</div></div>
+    </div>`;
+  host.appendChild(overlay);
+  const body = overlay.querySelector('.env-info-body');
+  let last = null;
+  const load = async () => {
+    body.innerHTML = '<div class="muted">采集中…</div>';
+    try {
+      const r = await json('GET', `/api/windows/${encodeURIComponent(id)}/env-info`);
+      if (!r?.ok) {
+        last = null;
+        body.innerHTML = `<div class="error">${esc(r?.message || '获取环境参数失败')}</div>`;
+        return;
+      }
+      last = r.data;
+      body.innerHTML = buildEnvInfoHtml(last);
+    } catch (e) {
+      last = null;
+      body.innerHTML = `<div class="error">获取失败：${esc(e?.message || e)}</div>`;
+    }
+  };
+  overlay.addEventListener('click', async (ev) => {
+    if (ev.target === overlay) { overlay.remove(); return; }
+    const act = ev.target?.dataset?.act;
+    if (act === 'close') overlay.remove();
+    else if (act === 'refresh') await load();
+    else if (act === 'copy' && last) {
+      try {
+        await navigator.clipboard.writeText(envInfoPlainText(last));
+        toast('环境参数已复制', 'ok');
+      } catch {
+        toast('复制失败，请手动选中文本', 'info');
+      }
+    }
+  });
+  await load();
 }
 
 async function doLogin(e) {

@@ -1133,6 +1133,59 @@ code {
 .vnc-menu-item.danger { color: #fda4af; }
 .vnc-menu-item.danger:hover { background: rgba(225, 29, 72, 0.22); }
 
+/* VNC 弹框内的环境参数浮层 */
+.env-info-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(2, 6, 23, 0.55);
+}
+.env-info-card {
+  width: min(720px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.env-info-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 14px;
+}
+.env-info-actions { display: inline-flex; gap: 12px; }
+.env-info-card .link-btn {
+  border: 0;
+  background: transparent;
+  color: #93c5fd;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.env-info-card .link-btn:hover { text-decoration: underline; }
+.env-info-body { padding: 10px 14px 14px; overflow: auto; font-size: 13px; }
+.env-info-section { margin-bottom: 12px; }
+.env-info-section h4 { margin: 0 0 6px; font-size: 13px; color: #cbd5e1; }
+.env-info-section table { width: 100%; border-collapse: collapse; }
+.env-info-section td { padding: 4px 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); vertical-align: top; }
+.env-info-section td.k { width: 170px; color: #94a3b8; white-space: nowrap; }
+.env-info-section td.v { word-break: break-all; user-select: text; }
+.env-info-section .ok { color: #6ee7b7; }
+.env-info-section .warn { color: #fda4af; }
+.env-info-body .muted { color: #94a3b8; }
+.env-info-body .error { color: #fda4af; }
+
 .modal-head {
   display: flex;
   justify-content: space-between;

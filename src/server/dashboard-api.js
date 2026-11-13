@@ -455,6 +455,28 @@ router.get('/api/recordings', async (req, res) => {
   });
 });
 
+/** 环境参数（只读）：配置参数 + 站点实际读到的浏览器参数；不含代理账号密码 */
+router.get('/api/windows/:id/env-info', async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return;
+    const id = req.params.id;
+    const profile = db.getProfile(id);
+    if (profile) {
+      const gate = assertProfileOwner(user, profile);
+      if (!gate.ok) return res.json({ ok: false, message: gate.msg });
+    }
+    const session = manager.getSession?.(id);
+    if (!session) return res.json({ ok: false, message: '环境未在运行' });
+    const { collectEnvInfo } = require('../browser/env-info');
+    const data = await collectEnvInfo(profile || session.profile || {}, session);
+    manager.touchSession?.(id);
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.json({ ok: false, message: e.message || '采集环境参数失败' });
+  }
+});
+
 router.get('/api/recordings/download/:name', async (req, res) => {
   const user = await requireUser(req, res);
   if (!user) return;
