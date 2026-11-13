@@ -11,7 +11,10 @@ const {
   buildUserAgent,
   buildUserAgentMetadata,
   buildClientHintHeaders,
+  assignHardwareFingerprint,
+  explicitFingerprintKeys,
 } = require('./fingerprint');
+const { timezoneForCountry, languageForCountry } = require('./geo-from-ip');
 const { resolveChromeProxy } = require('./proxy-auth');
 const { reclaimBeforeOpen, writePid, clearPid } = require('./process-guard');
 const { acquireDisplay } = require('./display-pool');
@@ -55,12 +58,16 @@ async function launchProfileElectron(profile, options = {}) {
   const electronBin = resolveElectronBinary();
   const mainJs = path.join(__dirname, 'electron-env-main.js');
   const userDataDir = profileDir(profile.id);
-  const fp = mergeFingerprint(JSON.parse(profile.fingerprint_json || '{}'));
+  const rawFp = JSON.parse(profile.fingerprint_json || '{}');
+  const fp = mergeFingerprint(rawFp);
+  // 每环境独立 GPU / 核数 / 分辨率，避免所有环境共用同一套 WebGL 指纹
+  assignHardwareFingerprint(fp, profile.id, explicitFingerprintKeys(rawFp));
   const { width, height } = parseResolution(fp.resolution);
   const userAgent = buildUserAgent(fp);
   const headless = Boolean(options.headless);
-  const timezone = profile.timezone || 'America/New_York';
-  const locale = profile.language || fp.languages || 'en-US';
+  // 时区/语言跟随代理地区，不写死美国东部
+  const timezone = profile.timezone || timezoneForCountry(profile.country, profile.longitude) || '';
+  const locale = profile.language || fp.languages || languageForCountry(profile.country) || 'en-US';
   const latitude = Number(profile.latitude || fp.latitude || 0);
   const longitude = Number(profile.longitude || fp.longitude || 0);
   const port = await getFreePort();
@@ -112,6 +119,13 @@ async function launchProfileElectron(profile, options = {}) {
     '--disable-background-networking',
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--enforce-webrtc-ip-permission-check',
+    // 关掉 navigator.webdriver=true 与「正受自动化软件控制」相关差异
+    '--disable-blink-features=AutomationControlled',
+    '--excludeSwitches=enable-automation',
+    // DNS 防泄露：AsyncDns 会在本地发起解析，暴露真实归属。
+    // 关掉后交给 SOCKS5 上游（ATYP=域名）远程解析，DNS 与 IP 地区保持一致。
+    '--disable-features=AsyncDns,PrefetchDNS',
+    '--dns-prefetch-disable',
     `--lang=${locale}`,
   ];
   if (CHROME_NO_SANDBOX || process.platform === 'linux') {

@@ -52,19 +52,36 @@ function buildInjectScript(seedKey, fp = {}) {
   }
 
   // —— Canvas 2D ——
+  //
+  // 旧实现把噪声 putImageData **写回原画布**，导致同一个 canvas 每读一次就被再改一次，
+  // 连续两次 toDataURL 结果不同。真实设备 canvas 指纹完全稳定，连读两次即可识破，
+  // 比不伪造更危险。改为在**离屏副本**上变换，绝不回写原画布。
+  const cloneWithNoise = (srcCanvas, width, height, salt) => {
+    const off = document.createElement('canvas');
+    off.width = srcCanvas.width || width;
+    off.height = srcCanvas.height || height;
+    const offCtx = off.getContext('2d');
+    if (!offCtx) return null;
+    offCtx.drawImage(srcCanvas, 0, 0);
+    const w = Math.min(off.width, width);
+    const h = Math.min(off.height, height);
+    if (w > 0 && h > 0) {
+      const img = offCtx.getImageData(0, 0, w, h);
+      for (let i = 0; i < img.data.length; i += 4) {
+        img.data[i] = (img.data[i] + noiseByte(i + salt)) & 255;
+      }
+      offCtx.putImageData(img, 0, 0);
+    }
+    return off;
+  };
+
   try {
     const toDataURL = HTMLCanvasElement.prototype.toDataURL;
     HTMLCanvasElement.prototype.toDataURL = function(...args) {
       try {
-        const ctx = this.getContext('2d');
-        if (ctx && this.width && this.height) {
-          const w = Math.min(this.width, 16);
-          const h = Math.min(this.height, 16);
-          const img = ctx.getImageData(0, 0, w, h);
-          for (let i = 0; i < img.data.length; i += 4) {
-            img.data[i] = (img.data[i] + noiseByte(i)) & 255;
-          }
-          ctx.putImageData(img, 0, 0);
+        if (this.width && this.height) {
+          const off = cloneWithNoise(this, 16, 16, 17);
+          if (off) return toDataURL.apply(off, args);
         }
       } catch (e) {}
       return toDataURL.apply(this, args);
@@ -73,18 +90,28 @@ function buildInjectScript(seedKey, fp = {}) {
     if (toBlob) {
       HTMLCanvasElement.prototype.toBlob = function(cb, ...rest) {
         try {
-          const ctx = this.getContext('2d');
-          if (ctx && this.width && this.height) {
-            const img = ctx.getImageData(0, 0, Math.min(this.width, 8), Math.min(this.height, 8));
-            for (let i = 0; i < img.data.length; i += 4) {
-              img.data[i] = (img.data[i] + noiseByte(i + 99)) & 255;
-            }
-            ctx.putImageData(img, 0, 0);
+          if (this.width && this.height) {
+            const off = cloneWithNoise(this, 16, 16, 99);
+            if (off) return toBlob.call(off, cb, ...rest);
           }
         } catch (e) {}
         return toBlob.call(this, cb, ...rest);
       };
     }
+    // getImageData 返回副本，改副本不会污染画布
+    const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+      const img = getImageData.apply(this, args);
+      try {
+        if (img && img.data && img.data.length >= 4) {
+          const n = Math.min(img.data.length, 256 * 4);
+          for (let i = 0; i < n; i += 4) {
+            img.data[i] = (img.data[i] + noiseByte(i + 511)) & 255;
+          }
+        }
+      } catch (e) {}
+      return img;
+    };
   } catch (e) {}
 
   // —— WebGL ——
@@ -124,24 +151,45 @@ function buildInjectScript(seedKey, fp = {}) {
     if (typeof WebGL2RenderingContext !== 'undefined') patchReadPixels(WebGL2RenderingContext.prototype);
   } catch (e) {}
 
-  // —— AudioContext ——
+  // —— AudioContext 指纹 ——
+  //
+  // 旧实现只改 getChannelData 前 32 个样本，而 AudioContext 指纹通常取整段 buffer
+  // 的加权累加和，改 32 个样本几乎不影响结果；且同一份底层数据会被反复叠加（累积污染）。
+  // 现在用 WeakSet 保证每个 buffer 只处理一次，噪声按索引确定性撒在整段上，恒等且有效。
   try {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) {
-      const origCreate = AC.prototype.createAnalyser || AC.prototype.createOscillator;
-      const getChannelData = AudioBuffer.prototype.getChannelData;
-      AudioBuffer.prototype.getChannelData = function(channel) {
-        const data = getChannelData.call(this, channel);
+    const processed = new WeakSet();
+    const getChannelData = AudioBuffer.prototype.getChannelData;
+    AudioBuffer.prototype.getChannelData = function(channel) {
+      const data = getChannelData.call(this, channel);
+      try {
+        if (data && data.length && !processed.has(data)) {
+          processed.add(data);
+          const n = data.length;
+          const step = n > 200000 ? Math.floor(n / 200000) * 997 + 1 : 997;
+          for (let i = 0; i < n; i += step) {
+            data[i] = data[i] + (rnd(i + 300) - 0.5) * 2e-7;
+          }
+          const last = n - 1;
+          if (last > 0) data[last] = data[last] + (rnd(last + 301) - 0.5) * 2e-7;
+        }
+      } catch (e) {}
+      return data;
+    };
+    // copyFromChannel 是另一条读取路径，不能漏
+    const copyFromChannel = AudioBuffer.prototype.copyFromChannel;
+    if (copyFromChannel) {
+      AudioBuffer.prototype.copyFromChannel = function(dest, channel, startInChannel) {
+        const r = copyFromChannel.call(this, dest, channel, startInChannel);
         try {
-          if (data && data.length > 100) {
-            for (let i = 0; i < 32; i += 1) {
-              data[i] = data[i] + (rnd(i + 300) - 0.5) * 1e-7;
+          if (dest && dest.length) {
+            const step = dest.length > 2000 ? Math.floor(dest.length / 2000) + 1 : 1;
+            for (let i = 0; i < dest.length; i += step) {
+              dest[i] = dest[i] + (rnd(i + 302) - 0.5) * 2e-7;
             }
           }
         } catch (e) {}
-        return data;
+        return r;
       };
-      void origCreate;
     }
   } catch (e) {}
 
@@ -267,22 +315,109 @@ function buildInjectScript(seedKey, fp = {}) {
   } catch (e) {}
 
   // —— WebRTC 防泄露 ——
+  //
+  // 旧实现把 RTCPeerConnection 换成抛异常的构造器。问题：
+  //   1. 真实 Chrome 一定存在该对象，构造即抛 NotAllowedError 是极强特征；
+  //   2. 检测脚本 new RTCPeerConnection() 一个 try 就能判定环境被改造；
+  //   3. 音视频类站点会直接崩，行为不自然。
+  // 现在保留原生构造器，只在 ICE 候选与 SDP 两个出口净化，API 语义正常但拿不到本地地址。
+  // 配合启动参数 --force-webrtc-ip-handling-policy=disable_non_proxied_udp 形成双层防护。
   try {
-    const Blocked = function() {
-      throw new DOMException('WebRTC disabled by 第一页自研浏览器', 'NotAllowedError');
-    };
-    Blocked.prototype = {};
-    if (typeof window.RTCPeerConnection !== 'undefined') {
-      window.RTCPeerConnection = Blocked;
-    }
-    if (typeof window.webkitRTCPeerConnection !== 'undefined') {
-      window.webkitRTCPeerConnection = Blocked;
-    }
-    if (typeof navigator.mediaDevices !== 'undefined') {
+    const RTC = window.RTCPeerConnection;
+    if (typeof RTC === 'function') {
+      const isLeakyCandidate = (candStr) => {
+        const s = String(candStr || '');
+        if (!s) return true;
+        if (/\\btyp\\s+host\\b/.test(s) || /\\btyp\\s+srflx\\b/.test(s)) return true;
+        if (/\\b(10|127)\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b/.test(s)) return true;
+        if (/\\b192\\.168\\.\\d{1,3}\\.\\d{1,3}\\b/.test(s)) return true;
+        if (/\\b172\\.(1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}\\b/.test(s)) return true;
+        if (/\\.local\\b/.test(s)) return true;
+        if (/\\b[0-9a-f]{1,4}(:[0-9a-f]{1,4}){2,7}\\b/i.test(s) && /candidate/i.test(s)) return true;
+        return false;
+      };
+      const scrubSdp = (sdp) => String(sdp || '')
+        .split('\\r\\n')
+        .filter((line) => !(line.indexOf('a=candidate:') === 0 && isLeakyCandidate(line)))
+        .join('\\r\\n');
+
+      const scrubCandidateEvent = (ev) => {
+        try {
+          if (!ev) return ev;
+          const c = ev.candidate;
+          if (!c) return ev; // null candidate 表示收集结束，必须放行
+          if (isLeakyCandidate(c.candidate)) {
+            return Object.defineProperty(
+              Object.create(Object.getPrototypeOf(ev) || Object.prototype),
+              'candidate',
+              { value: null, configurable: true },
+            );
+          }
+        } catch (e) {}
+        return ev;
+      };
+
+      const patchEvents = (proto) => {
+        if (!proto || proto.__tkRtcPatched) return;
+        const addEventListener = proto.addEventListener;
+        if (typeof addEventListener === 'function') {
+          proto.addEventListener = function(type, listener, ...rest) {
+            if (type === 'icecandidate' && typeof listener === 'function') {
+              const wrapped = function(ev) {
+                const clean = scrubCandidateEvent(ev);
+                if (clean && clean.candidate === null && ev && ev.candidate) return undefined;
+                return listener.call(this, clean);
+              };
+              return addEventListener.call(this, type, wrapped, ...rest);
+            }
+            return addEventListener.call(this, type, listener, ...rest);
+          };
+        }
+        const setLocalDescription = proto.setLocalDescription;
+        if (typeof setLocalDescription === 'function') {
+          proto.setLocalDescription = function(desc) {
+            try {
+              if (desc && typeof desc === 'object' && typeof desc.sdp === 'string') {
+                desc = { type: desc.type, sdp: scrubSdp(desc.sdp) };
+              }
+            } catch (e) {}
+            return setLocalDescription.call(this, desc);
+          };
+        }
+        const createOffer = proto.createOffer;
+        if (typeof createOffer === 'function') {
+          proto.createOffer = function(...args) {
+            return createOffer.apply(this, args).then((desc) => {
+              try {
+                if (desc && typeof desc.sdp === 'string') {
+                  return { type: desc.type, sdp: scrubSdp(desc.sdp) };
+                }
+              } catch (e) {}
+              return desc;
+            });
+          };
+        }
+        proto.__tkRtcPatched = true;
+      };
+      patchEvents(RTC.prototype);
+
       try {
-        navigator.mediaDevices.getUserMedia = function() {
-          return Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
-        };
+        const desc = Object.getOwnPropertyDescriptor(RTC.prototype, 'onicecandidate');
+        if (desc && desc.set) {
+          Object.defineProperty(RTC.prototype, 'onicecandidate', {
+            configurable: true,
+            get: desc.get,
+            set(fn) {
+              if (typeof fn !== 'function') return desc.set.call(this, fn);
+              const self = this;
+              return desc.set.call(this, function(ev) {
+                const clean = scrubCandidateEvent(ev);
+                if (clean && clean.candidate === null && ev && ev.candidate) return undefined;
+                return fn.call(self, clean);
+              });
+            },
+          });
+        }
       } catch (e) {}
     }
   } catch (e) {}

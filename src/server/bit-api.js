@@ -5,7 +5,7 @@ const { mergeFingerprint } = require('../browser/fingerprint');
 const { getCurrentUser } = require('../db');
 const { resolveRequestUser } = require('../settings');
 const { probeExitIp } = require('../browser/exit-ip');
-const { lookupGeoByIp, applyIpCreateFields } = require('../browser/geo-from-ip');
+const { lookupGeoByIp, applyIpCreateFields, alignRegionToProxy } = require('../browser/geo-from-ip');
 const { clearProfileCache, removeProfileDir } = require('../browser/profile-cleanup');
 const { exportProfilePack, importProfilePack } = require('../browser/profile-backup');
 const fs = require('node:fs');
@@ -170,7 +170,16 @@ async function resolveGeoFromProxy(proxyFields, fp, body = {}) {
     if (lastIp) geo = await lookupGeoByIp(lastIp).catch(() => ({}));
   }
   const fields = applyIpCreateFields(fp, geo, body);
-  return { lastIp, geo, fields, proxyError };
+
+  // 时区 / 语言一律收口到代理 IP 所在国家。
+  // 「美国 IP + 上海时区 + 中文」这类矛盾是风控最容易识破的组合，创建时一次性对齐。
+  const region = alignRegionToProxy(fields, {
+    countryCode: geo.countryCode || fields.country || '',
+    timezone: geo.timezone || '',
+    latitude: fields.latitude,
+    longitude: fields.longitude,
+  });
+  return { lastIp, geo, fields, proxyError, region };
 }
 
 function createRouter() {

@@ -5,7 +5,15 @@ const http = require('node:http');
 const net = require('node:net');
 const { PROFILES_DIR, CHROME_NO_SANDBOX } = require('../config');
 const { resolveChromeExecutable } = require('./chrome-path');
-const { mergeFingerprint, parseResolution, buildUserAgent, buildUserAgentMetadata } = require('./fingerprint');
+const {
+  mergeFingerprint,
+  parseResolution,
+  buildUserAgent,
+  buildUserAgentMetadata,
+  assignHardwareFingerprint,
+  explicitFingerprintKeys,
+} = require('./fingerprint');
+const { timezoneForCountry, languageForCountry } = require('./geo-from-ip');
 const { buildInjectScript } = require('./fp-inject');
 const { injectFingerprintOnNewDocument, applyEmulation } = require('./cdp-inject');
 const { resolveChromeProxy } = require('./proxy-auth');
@@ -92,12 +100,17 @@ async function launchProfile(profile, options = {}) {
 
   const chromePath = resolveChromeExecutable();
   const userDataDir = profileDir(profile.id);
-  const fp = mergeFingerprint(JSON.parse(profile.fingerprint_json || '{}'));
+  const rawFp = JSON.parse(profile.fingerprint_json || '{}');
+  const fp = mergeFingerprint(rawFp);
+  // 每个环境按 ID 分配不同的 GPU / 核数 / 分辨率组合，避免所有环境共用同一套硬件指纹
+  assignHardwareFingerprint(fp, profile.id, explicitFingerprintKeys(rawFp));
   const { width, height } = parseResolution(fp.resolution);
   const userAgent = buildUserAgent(fp);
   const headless = Boolean(options.headless);
-  const timezone = profile.timezone || 'America/New_York';
-  const locale = profile.language || fp.languages || 'en-US';
+  // 时区/语言以代理所在地区为准（创建时已写入 profile），缺失时按国家码兜底。
+  // 绝不写死美国东部 —— 代理在亚洲却报纽约是比留空更严重的破绽。
+  const timezone = profile.timezone || timezoneForCountry(profile.country, profile.longitude) || '';
+  const locale = profile.language || fp.languages || languageForCountry(profile.country) || 'en-US';
   const latitude = Number(profile.latitude || fp.latitude || 0);
   const longitude = Number(profile.longitude || fp.longitude || 0);
   const port = await getFreePort();
@@ -114,7 +127,13 @@ async function launchProfile(profile, options = {}) {
     // WebRTC：禁止非代理 UDP，降低真实 IP 泄露
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--enforce-webrtc-ip-permission-check',
+    // 关掉 navigator.webdriver=true 这类自动化标记
     '--disable-blink-features=AutomationControlled',
+    '--excludeSwitches=enable-automation',
+    // DNS 防泄露：AsyncDns 会在本地发起解析，把真实归属暴露出去。
+    // 关掉后统一交给 SOCKS5 上游（ATYP=域名）远程解析，DNS 与 IP 地区一致。
+    '--disable-features=AsyncDns,PrefetchDNS',
+    '--dns-prefetch-disable',
     `--window-size=${width},${height}`,
     `--lang=${locale}`,
     `--user-agent=${userAgent}`,
