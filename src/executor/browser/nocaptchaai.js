@@ -1,16 +1,63 @@
 /**
- * NoCaptchaAI 对接模块（TikTok 旋转图片验证 / 圆形双环滑块验证码自动识别与拖拽）
+ * TikTok 人机验证自动识别与拖拽模块
  * ---------------------------------------------------------------------------------
+ * 同时兼容三类「图片拖拽」验证，并自动辨别使用的是哪一种：
+ *
+ *   1. rotate  —— 图片拖拽旋转（双圆环验证码，两张近方形同心图）
+ *                  本地 Canvas 极坐标交界像素匹配 + 动态拖拽角度标定 + 松手前闭环纠偏
+ *   2. slide   —— 图片拖拽平移（拼图缺口，一张横向大图 + 一块小拼图）
+ *                  本地 Canvas 模板匹配（亮度 NCC / 梯度 NCC / 拼图轮廓 / 缺口边框）
+ *                  + 试探位移反推「滑块 px → 拼图 px」映射比 + 闭环纠偏
+ *   3. dragbar —— 无图滑条（弹框里只有一条滑轨，文案要求拖到最右）
+ *                  拟人轨迹一把拖到底
+ *
+ * 辨别完全基于可见元素的真实几何关系（图片宽高比、大小比例、是否同心、是否贴左、
+ * 文案是否明确要求"拖到最右"），不依赖 TikTok 的类名文案；任何一条都必须先落在
+ * captcha / secsdk / verify 的弹框外壳里才成立，避免把页面里的正常裁剪、进度、音量
+ * 滑块当成验证码去拖。
+ *
+ * 历史导出名保持不变（调用点 40+ 处，一律无需改动）：
+ *   solveRotateCaptchaIfPresent(page, opts)  -> 检测并自动通过（旋转/平移/滑条都走它）
+ *   detectRotateCaptcha(page)                -> { detected, kind, ... }
+ * 语义更准的新别名：
+ *   solveCaptchaIfPresent(page, opts) / detectCaptcha(page)
+ *
  * 官方文档：https://docs.nocaptchaai.com/docs/imagetasks/tiktok
  * 接口地址：POST https://api.nocaptchaai.com/createTask
  *           POST https://api.nocaptchaai.com/getTaskResult
  *           POST https://api.nocaptchaai.com/solve
  *
+ * 平移验证的实现在 ./captcha-slide.js（惰性加载，加载失败不影响旋转验证）。
  * 默认密钥可通过环境变量 NOCAPTCHAAI_KEY / TKSWARM_NOCAPTCHAAI_KEY 覆盖。
  */
 const { publish: liveLog } = require('../live-log');
 const dataStore = require('../data-store');
 const phpApi = require('../php-api');
+
+// 「图片拖拽平移 / 无图滑条」求解器：按需惰性加载。
+// 故意用 try/catch 包住 require —— 即使该文件出现语法或运行期错误，
+// 也只损失"平移验证自动过码"这一项能力，绝不能连累 node 启动与已在线上的旋转验证路径。
+let captchaSlideModule = null;
+let captchaSlideLoadError = '';
+
+function getCaptchaSlideModule() {
+  if (captchaSlideModule) return captchaSlideModule;
+  if (captchaSlideLoadError) return null;
+  try {
+    // eslint-disable-next-line global-require, import/no-dynamic-require
+    captchaSlideModule = require('./captcha-slide');
+  } catch (err) {
+    captchaSlideLoadError = String((err && err.message) || err);
+    captchaSlideModule = null;
+    try {
+      liveLog(`[平移验证] 模块加载失败，暂时只能处理旋转验证：${captchaSlideLoadError}`, 'error');
+    } catch { /* ignore */ }
+  }
+  return captchaSlideModule;
+}
+
+// 逃生口：TKSWARM_CAPTCHA_FORCE_KIND=slide 时优先按平移识别（用于排查"方形背景的拼图"误判成旋转）
+const FORCED_CAPTCHA_KIND = String(process.env.TKSWARM_CAPTCHA_FORCE_KIND || '').trim().toLowerCase();
 
 const DEFAULT_API_KEY = 'nocap_XrWSZYi3dyxKzr2zvtUxLzbM';
 const BASE_URL = (process.env.NOCAPTCHAAI_BASE_URL || 'https://api.nocaptchaai.com').replace(/\/+$/, '');
@@ -1499,50 +1546,138 @@ async function clickCaptchaRefresh(target) {
 }
 
 /**
- * 在 Page（含子 Frame）中定位旋转验证码详情。
+ * 把「相对某个子 Frame 视口」的矩形换算成「相对 Page 视口」。旋转与平移共用。
  */
-async function detectRotateCaptcha(page) {
+async function shiftCaptchaInfoToPage(page, target, info) {
+  if (!info || !info.detected) return info;
+  const result = { ...info, target };
+  if (target === page || typeof target.frameElement !== 'function') return result;
+
+  let offsetX = 0;
+  let offsetY = 0;
+  try {
+    const frameEl = await target.frameElement();
+    await frameEl?.scrollIntoViewIfNeeded?.().catch(() => {});
+    const box = await frameEl?.boundingBox?.();
+    if (box) {
+      offsetX = Number(box.x) || 0;
+      offsetY = Number(box.y) || 0;
+    }
+  } catch { /* ignore */ }
+  if (!offsetX && !offsetY) return result;
+
+  const shifted = (rect) => {
+    if (!rect) return rect || null;
+    const x = Number(rect.x);
+    const y = Number(rect.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return rect;
+    return { ...rect, x: x + offsetX, y: y + offsetY };
+  };
+
+  result.handleRect = shifted(info.handleRect);
+  result.trackRect = shifted(info.trackRect);
+  result.bgRect = shifted(info.bgRect);
+  result.bgBox = shifted(info.bgBox);
+  result.pieceRect = shifted(info.pieceRect);
+  result.pieceBox = shifted(info.pieceBox);
+  // 不翻 outerRect / innerRect：它们只被 fetchImageAsBase64 与 solveRotateAngleByLocalCanvas
+  // 当作「在 frame 里找那张图」的比对依据，必须保持 frame 坐标系（沿用历史行为）。
+  // 平移侧的 bgRect/pieceRect 则是给 page.screenshot({clip}) 用的，必须是页面坐标。
+  result.frameOffset = { x: offsetX, y: offsetY };
+  return result;
+}
+
+/**
+ * 平移 / 无图滑条识别（薄封装）：模块按需加载，且任何异常都只退化为「没识别到」。
+ */
+async function inspectSlideCaptchaInContext(target, opts = {}) {
+  const mod = getCaptchaSlideModule();
+  if (!mod || typeof mod.inspectSlideCaptchaInContext !== 'function') {
+    return {
+      detected: false,
+      hint: false,
+      reason: 'slide_module_unavailable',
+      error: captchaSlideLoadError || 'captcha-slide 未导出 inspectSlideCaptchaInContext',
+    };
+  }
+  try {
+    const res = await mod.inspectSlideCaptchaInContext(target, opts);
+    return (res && typeof res === 'object') ? res : { detected: false };
+  } catch (err) {
+    return { detected: false, hint: false, error: `slide_inspect_failed: ${(err && err.message) || err}` };
+  }
+}
+
+/**
+ * 在 Page（含子 Frame）中定位人机验证详情，并辨别是「图片拖拽旋转」还是「图片拖拽平移 / 滑条」。
+ *
+ * 判定顺序刻意是「旋转优先」：平移只在旋转没命中时才看。这样旋转验证码的行为
+ * 与改动前逐字节一致（老路径永远不会被新逻辑抢走），平移失败也不会反过来影响旋转。
+ *
+ * @returns {Promise<{detected:boolean, kind?:'rotate'|'slide'|'dragbar', loading?:boolean, hint?:boolean, reason?:string, target?:object, slideError?:string}>}
+ */
+async function detectCaptcha(page) {
   if (!page || page.isClosed?.()) return { detected: false };
   const targets = [page, ...(page.frames?.() || []).filter((f) => f !== page.mainFrame?.())];
+  const slideMod = getCaptchaSlideModule();
+  const tryRotate = FORCED_CAPTCHA_KIND !== 'slide' || !slideMod;
+  const trySlide = Boolean(slideMod) && FORCED_CAPTCHA_KIND !== 'rotate';
+
   let anyLoading = false;
+  let anyHint = false;
   let loadingTarget = null;
+  let lastReason = '';
+  let slideError = '';
+
   for (const target of targets) {
-    const info = await inspectRotateCaptchaInContext(target);
-    if (info?.detected) {
-      let offsetX = 0;
-      let offsetY = 0;
-      if (target !== page && typeof target.frameElement === 'function') {
-        try {
-          const frameEl = await target.frameElement();
-          await frameEl?.scrollIntoViewIfNeeded?.().catch(() => {});
-          const box = await frameEl?.boundingBox?.();
-          if (box) {
-            offsetX = box.x;
-            offsetY = box.y;
-          }
-        } catch { /* ignore */ }
+    if (tryRotate) {
+      const info = await inspectRotateCaptchaInContext(target);
+      if (info?.detected) {
+        return await shiftCaptchaInfoToPage(page, target, { ...info, kind: 'rotate' });
       }
-      return {
-        ...info,
-        target,
-        handleRect: {
-          ...info.handleRect,
-          x: info.handleRect.x + offsetX,
-          y: info.handleRect.y + offsetY,
-        },
-        trackRect: {
-          ...info.trackRect,
-          x: info.trackRect.x + offsetX,
-          y: info.trackRect.y + offsetY,
-        },
-      };
+      if (info?.loading) {
+        anyLoading = true;
+        loadingTarget = target;
+      }
+      if (info?.hint) anyHint = true;
+      if (info?.reason) lastReason = info.reason;
     }
-    if (info?.loading) {
+
+    if (!trySlide) continue;
+    const slide = await inspectSlideCaptchaInContext(target);
+    if (slide?.detected) {
+      return await shiftCaptchaInfoToPage(page, target, slide);
+    }
+    if (slide?.loading) {
       anyLoading = true;
       loadingTarget = target;
     }
+    if (slide?.hint) anyHint = true;
+    if (slide?.reason) {
+      // 旋转侧已经给出更具体的「图在加载」原因时，保留它，别被平移侧的兜底原因盖掉
+      if (!lastReason || lastReason === 'no_captcha_shell') lastReason = slide.reason;
+    }
+    if (slide?.error) slideError = String(slide.error);
   }
-  return anyLoading ? { detected: false, loading: true, target: loadingTarget || page } : { detected: false };
+
+  const result = {
+    detected: false,
+    loading: anyLoading,
+    hint: anyHint,
+    reason: lastReason || '',
+  };
+  if (slideError) result.slideError = slideError;
+  if (anyLoading && loadingTarget) result.target = loadingTarget;
+  return result;
+}
+
+/**
+ * 历史名字（40+ 个调用点在用）：现在只是 detectCaptcha 的别名，三类验证都能认出来。
+ * 注意：本文件的 inspectRotateCaptchaInContext 不产出 hint 字段（hint 目前没有消费方），
+ * 所以这里返回的 hint 恒为 false，仅作占位以保持返回结构一致。
+ */
+async function detectRotateCaptcha(page) {
+  return detectCaptcha(page);
 }
 
 /**
@@ -1577,9 +1712,24 @@ async function solveRotateCaptchaIfPresent(page, {
   };
 
   const runner = (async () => {
-    let firstCheck = await detectRotateCaptcha(page);
+    // 旋转侧默认 maxAttempts=4；平移/滑条另有自己的默认值与 TKSWARM_CAPTCHA_SLIDE_ATTEMPTS。
+    // 只有调用方显式改过次数（传了非 4 的值）才沿用到平移侧，否则传 0 = 「用你自己的配置」，
+    // 免得把 4 硬塞过去、把那个 env 变成永远走不到的死配置。
+    const delegatedMaxAttempts = maxAttempts !== 4 ? maxAttempts : 0;
+
+    let firstCheck = await detectCaptcha(page);
     if (!firstCheck.detected && !firstCheck.loading) {
       return { detected: false, solved: false, attempts: 0 };
+    }
+
+    // 已辨别为「图片拖拽平移 / 无图滑条」：整段交给 captcha-slide（省流由它收尾）
+    if (isNonRotateCaptchaKind(firstCheck.kind)) {
+      return await solveNonRotateCaptcha(page, firstCheck, {
+        accountId: effectiveAccountId,
+        maxAttempts: delegatedMaxAttempts,
+        log,
+        saveTrafficPaused: false,
+      });
     }
 
     let pausedSaveTraffic = false;
@@ -1600,7 +1750,19 @@ async function solveRotateCaptchaIfPresent(page, {
       const loadWaitEnd = loadWaitStart + 10000;
       while (Date.now() < loadWaitEnd) {
         await sleep(450);
-        firstCheck = await detectRotateCaptcha(page);
+        firstCheck = await detectCaptcha(page);
+        // 图还在加载时类型就已经辨认出来（平移验证的拼图块往往先于背景就绪）：直接交接。
+        // 注意 saveTrafficPaused 必须传 false —— 这条路径在下面 try/finally 之外返回，
+        // 由 solveNonRotateCaptcha 自己收尾省流（它会在弹框确实消失后恢复，
+        // 弹框还在则保持关闭交给人工），否则省流会一直挂着。
+        if (isNonRotateCaptchaKind(firstCheck.kind)) {
+          return await solveNonRotateCaptcha(page, firstCheck, {
+            accountId: effectiveAccountId,
+            maxAttempts: delegatedMaxAttempts,
+            log,
+            saveTrafficPaused: false,
+          });
+        }
         if (firstCheck.detected || !firstCheck.loading) break;
         if ((!refreshedWhileLoading && Date.now() - loadWaitStart > 3200) || (firstCheck.failedLoad && !refreshedWhileLoading)) {
           refreshedWhileLoading = true;
@@ -1623,14 +1785,30 @@ async function solveRotateCaptchaIfPresent(page, {
 
     try {
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        let info = attempt === 1 ? firstCheck : await detectRotateCaptcha(page);
+        let info = attempt === 1 ? firstCheck : await detectCaptcha(page);
+        if (isNonRotateCaptchaKind(info.kind)) {
+          return await solveNonRotateCaptcha(page, info, {
+            accountId: effectiveAccountId,
+            maxAttempts: delegatedMaxAttempts,
+            log,
+            saveTrafficPaused: pausedSaveTraffic,
+          });
+        }
         if (!info.detected && info.loading) {
           let refreshedMid = false;
           const waitImgStart = Date.now();
           const waitImgEnd = waitImgStart + 7000;
           while (Date.now() < waitImgEnd) {
             await sleep(400);
-            info = await detectRotateCaptcha(page);
+            info = await detectCaptcha(page);
+            if (isNonRotateCaptchaKind(info.kind)) {
+              return await solveNonRotateCaptcha(page, info, {
+                accountId: effectiveAccountId,
+                maxAttempts: delegatedMaxAttempts,
+                log,
+                saveTrafficPaused: pausedSaveTraffic,
+              });
+            }
             if (info.detected || !info.loading) break;
             if (!refreshedMid && Date.now() - waitImgStart > 2800) {
               refreshedMid = true;
@@ -1644,6 +1822,7 @@ async function solveRotateCaptchaIfPresent(page, {
           return { detected: true, solved: true, attempts: attempt - 1, lastAngle };
         }
 
+        if (attempt === 1) say('已辨别验证类型：图片拖拽旋转（双圆环）');
         say(`检测到旋转图片验证（第 ${attempt}/${maxAttempts} 次），正在执行本地 Canvas 极坐标像素匹配…`);
 
         await sleep(350);
@@ -1893,9 +2072,211 @@ function attachAutoRotateCaptchaWatcher(page, { accountId = 0, apiKey = '' } = {
   });
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// 平移验证 / 无图滑条的调度层
+// ══════════════════════════════════════════════════════════════════════════════
+
+const NON_ROTATE_CAPTCHA_KINDS = new Set(['slide', 'dragbar']);
+
+/** 这个 kind 要不要走 captcha-slide（而不是旋转那套极坐标算法）。 */
+function isNonRotateCaptchaKind(kind) {
+  return NON_ROTATE_CAPTCHA_KINDS.has(String(kind || '').trim().toLowerCase());
+}
+
+const CAPTCHA_KINDS = Object.freeze({
+  ROTATE: 'rotate',
+  SLIDE: 'slide',
+  DRAGBAR: 'dragbar',
+});
+
+/**
+ * 把一次识别结果的现场打包落盘，方便事后调选择器/阈值。
+ * TKSWARM_CAPTCHA_DEBUG=1 时才写，默认完全静默（生产不产生垃圾文件）。
+ */
+async function dumpCaptchaDebug(page, info, extra = {}) {
+  if (!['1', 'true', 'yes', 'on'].includes(String(process.env.TKSWARM_CAPTCHA_DEBUG || '').trim().toLowerCase())) {
+    return null;
+  }
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.resolve(__dirname, '../../data/captcha-debug');
+    fs.mkdirSync(dir, { recursive: true });
+    const stem = `${Date.now()}-${(info && info.kind) || 'unknown'}`;
+    const payload = {
+      at: new Date().toISOString(),
+      kind: (info && info.kind) || '',
+      reason: (info && info.reason) || '',
+      pageUrl: (() => { try { return page.url(); } catch { return ''; } })(),
+      info: info || null,
+      extra,
+    };
+    fs.writeFileSync(path.join(dir, `${stem}.json`), JSON.stringify(payload, null, 2), 'utf8');
+    if (info && info.shellHtml) {
+      fs.writeFileSync(path.join(dir, `${stem}.html`), String(info.shellHtml), 'utf8');
+      delete payload.info.shellHtml;
+    }
+    try {
+      const shot = await page.screenshot({ type: 'png' });
+      if (shot && shot.length) fs.writeFileSync(path.join(dir, `${stem}.png`), shot);
+    } catch { /* ignore */ }
+    return stem;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 求解「非旋转」的人机验证（平移拼图 / 无图滑条）。
+ *
+ * 之所以还要一层包装、而不是让 solveRotateCaptchaIfPresent 直接调 captcha-slide：
+ *   · 依赖注入：captcha-slide 不 require 本模块（否则循环依赖），由这里把工具函数递进去；
+ *   · 省流收尾：滑条解法不碰省流，必须由调度层统一恢复；
+ *   · 失败兜底：任何异常都退化成一个「转人工」结果，绝不能把异常抛给 40+ 个调用点。
+ *
+ * @param {object} page Playwright Page
+ * @param {object} info  detectCaptcha() 的返回（kind 必须是 slide 或 dragbar）
+ * @param {object} [opts]
+ * @param {number} [opts.accountId]
+ * @param {number} [opts.maxAttempts] 0/undefined = 用 captcha-slide 自己的默认值
+ * @param {Function} [opts.log]
+ * @param {boolean} [opts.saveTrafficPaused] 调用方是否已经关掉省流（true 时本函数不再碰省流）
+ * @returns {Promise<{detected:boolean, solved:boolean, kind:string, attempts:number}>}
+ */
+async function solveNonRotateCaptcha(page, info, {
+  accountId = 0,
+  maxAttempts = 0,
+  log = null,
+  saveTrafficPaused = false,
+} = {}) {
+  const kind = String((info && info.kind) || '').trim().toLowerCase() || CAPTCHA_KINDS.SLIDE;
+  const label = kind === CAPTCHA_KINDS.DRAGBAR ? '滑动条验证' : '平移验证';
+
+  const logLevel = (msg, level = 'info') => {
+    if (typeof log === 'function') {
+      try { log(msg, level); } catch { /* ignore */ }
+    }
+    try {
+      liveLog(`[${label}${accountId ? `#${accountId}` : ''}] ${msg}`, level, accountId ? { accountId } : {});
+    } catch { /* ignore */ }
+  };
+
+  // 省流必须在任何 await 之前先降下来：拼图块/滑轨一旦开始动，省流会把它画花
+  // （这里是幂等的，调用方已经关过就不会重复关）。
+  try {
+    // eslint-disable-next-line global-require
+    const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
+    await pauseSaveTrafficForCaptcha(page);
+  } catch { /* ignore */ }
+
+  const mod = getCaptchaSlideModule();
+  if (!mod) {
+    logLevel(`求解模块不可用（${captchaSlideLoadError || '未知原因'}），转人工`, 'error');
+    return {
+      detected: true,
+      solved: false,
+      kind,
+      attempts: 0,
+      manualRequired: true,
+      error: `${label}求解模块不可用：${captchaSlideLoadError || '未知原因'}`,
+    };
+  }
+
+  const solver = kind === CAPTCHA_KINDS.DRAGBAR ? mod.solveDragBarCaptcha : mod.solveSlideCaptcha;
+  if (typeof solver !== 'function') {
+    logLevel(`求解器缺失（captcha-slide.${kind === CAPTCHA_KINDS.DRAGBAR ? 'solveDragBarCaptcha' : 'solveSlideCaptcha'}），转人工`, 'error');
+    return {
+      detected: true,
+      solved: false,
+      kind,
+      attempts: 0,
+      manualRequired: true,
+      error: `${label}求解器未导出`,
+    };
+  }
+
+  let res = null;
+  try {
+    res = await solver(page, info, {
+      accountId,
+      maxAttempts: Number(maxAttempts) > 0 ? Number(maxAttempts) : undefined,
+      log,
+      saveTrafficPaused: Boolean(saveTrafficPaused),
+      deps: {
+        liveLog,
+        detectCaptcha,
+        inspectSlide: inspectSlideCaptchaInContext,
+        fetchImageAsBase64,
+        clickCaptchaRefresh,
+        dumpDebug: dumpCaptchaDebug,
+        pauseSaveTraffic: async (target) => {
+          // eslint-disable-next-line global-require
+          const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
+          return pauseSaveTrafficForCaptcha(target);
+        },
+        resumeSaveTraffic: async (target) => {
+          // eslint-disable-next-line global-require
+          const { resumeSaveTrafficAfterCaptcha } = require('./save-traffic');
+          return resumeSaveTrafficAfterCaptcha(target);
+        },
+      },
+    });
+  } catch (err) {
+    const message = String((err && err.message) || err);
+    logLevel(`求解异常：${message}，转人工处理`, 'warn');
+    try { await dumpCaptchaDebug(page, info, { stage: 'exception', error: message, stack: String((err && err.stack) || '') }); } catch { /* ignore */ }
+    return { detected: true, solved: false, kind, attempts: 0, manualRequired: true, error: `${label}求解异常：${message}` };
+  } finally {
+    // 省流收尾归调度层统一负责：调用方没关过省流（saveTrafficPaused=false）时，
+    // 不管子求解器自己有没有恢复（slide 会、dragbar 不会），这里都补一次——只有确实
+    // 看不到验证弹框了才恢复，仍在验证/加载中则保持关闭，交给人工。
+    // resumeSaveTrafficAfterCaptcha 是幂等的，重复调用没有副作用。
+    if (!saveTrafficPaused) {
+      try {
+        const still = await detectCaptcha(page);
+        if (!(still && (still.detected || still.loading))) {
+          // eslint-disable-next-line global-require
+          const { resumeSaveTrafficAfterCaptcha } = require('./save-traffic');
+          await resumeSaveTrafficAfterCaptcha(page);
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  if (!res || typeof res !== 'object') {
+    return { detected: true, solved: false, kind, attempts: 0, manualRequired: true, error: `${label}求解无返回值` };
+  }
+
+  const normalized = {
+    ...res,
+    detected: Boolean(res.detected),
+    solved: Boolean(res.solved),
+    kind: String(res.kind || kind),
+    attempts: Number(res.attempts) || 0,
+  };
+
+  // 只有「确实检测到验证码、且我们没解掉」才转人工；detected:false（弹框已消失 /
+  // 刷新后自愈 / 状态读不到）不是失败，不能给他们盖 manualRequired 的章、也不该刷告警。
+  if (!normalized.solved && normalized.detected) {
+    normalized.manualRequired = true;
+    logLevel(`自动过码未成功：${normalized.error || '未知原因'}，转人工处理`, 'warn');
+    try { await dumpCaptchaDebug(page, info, { stage: 'manual_required', result: normalized }); } catch { /* ignore */ }
+  }
+  return normalized;
+}
+
+/**
+ * 语义更准的新名字：检测并自动通过页面上的「任意图片拖拽」人机验证。
+ * 等价于 solveRotateCaptchaIfPresent（内部已按 rotate / slide / dragbar 分发）。
+ */
+async function solveCaptchaIfPresent(page, opts = {}) {
+  return solveRotateCaptchaIfPresent(page, opts);
+}
+
 module.exports = {
   DEFAULT_API_KEY,
   QUOTA_LIMIT,
+  CAPTCHA_KINDS,
   getApiKey,
   resolveActiveApiKey,
   clearNocaptchaKeyCache,
@@ -1904,7 +2285,15 @@ module.exports = {
   requestRotateSolution,
   solveRotateAngleByLocalCanvas,
   dragSliderWithAngularCalibration,
+  detectCaptcha,
   detectRotateCaptcha,
+  solveCaptchaIfPresent,
   solveRotateCaptchaIfPresent,
+  isNonRotateCaptchaKind,
+  solveNonRotateCaptcha,
+  inspectSlideCaptchaInContext,
+  dumpCaptchaDebug,
+  fetchImageAsBase64,
+  clickCaptchaRefresh,
   attachAutoRotateCaptchaWatcher,
 };
