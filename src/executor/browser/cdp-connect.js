@@ -360,6 +360,14 @@ async function ensurePlaywrightPage(browser, options) {
   const page = await ensurePlaywrightPageRaw(browser, options);
   if (browser?.__tkOpenedMeta && page) page.__tkOpenedMeta = browser.__tkOpenedMeta;
   installPageSettle(page);
+  // Cookie 政策弹窗：所有服务器浏览器任务/登录/扫码开窗都经过这里，统一常驻巡检并自动同意
+  try {
+    const { attachCookieConsentWatcher, attachCookieConsentToContext } = require('./cookie-consent');
+    if (page) {
+      attachCookieConsentWatcher(page, {});
+      attachCookieConsentToContext(page.context?.(), {});
+    }
+  } catch { /* ignore */ }
   await ensureConsistentUaAndClientHints(page, browser?.__tkOpenedMeta || null).catch(() => {});
   return page;
 }

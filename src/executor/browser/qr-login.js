@@ -103,6 +103,11 @@ async function createQrSession({ groupId = null, proxyId = null, accountId = nul
     attachAutoRotateCaptchaWatcher(page, { accountId: Number(account?.id || 0) });
     await solveRotateCaptchaIfPresent(page, { accountId: Number(account?.id || 0) });
   } catch { /* ignore */ }
+  try {
+    const { attachCookieConsentWatcher, attachCookieConsentToContext } = require('./cookie-consent');
+    attachCookieConsentWatcher(page, { accountId: Number(account?.id || 0) });
+    attachCookieConsentToContext(context, { accountId: Number(account?.id || 0) });
+  } catch { /* ignore */ }
   const shot = await captureQr(page);
   const id = `qr_${Date.now().toString(36)}`;
   const expiresAt = Date.now() + 5 * 60 * 1000;

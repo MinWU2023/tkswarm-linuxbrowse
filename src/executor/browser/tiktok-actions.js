@@ -178,6 +178,13 @@ async function attachSaveTraffic(conn, enabled) {
       await solveRotateCaptchaIfPresent(conn.page, { accountId: aid });
     }
   } catch { /* ignore */ }
+  // Cookie 政策弹窗：打开后过一会儿才出现，所有任务统一常驻巡检，出现就自动同意
+  try {
+    const { attachCookieConsentWatcher, attachCookieConsentToContext } = require('./cookie-consent');
+    const aid = Number(conn.account?.id || 0);
+    if (conn.page) attachCookieConsentWatcher(conn.page, { accountId: aid });
+    if (conn.context) attachCookieConsentToContext(conn.context, { accountId: aid });
+  } catch { /* ignore */ }
 }
 
 async function connectAccount(accountId, url, action = 'publish', options = {}) {
