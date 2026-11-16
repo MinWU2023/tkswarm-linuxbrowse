@@ -154,6 +154,37 @@ async function openProfile(profileId, options = {}) {
       console.warn(`[manager] 代理 API 补全跳过: ${error?.message || error}`);
     }
 
+    // 硬件指纹固化：显卡/核数/内存/DPR/分辨率首次按环境 ID 算出后写回环境记录，
+    // 之后即便显卡池、分辨率池被改动，已有账号的设备指纹也不会再漂移。与 tkswarm-browses 同名逻辑保持一致。
+    try {
+      const fpMod = require('./fingerprint');
+      const rawFp = JSON.parse(profile.fingerprint_json || '{}');
+      const explicit = fpMod.explicitFingerprintKeys(rawFp);
+      const HW_KEYS = ['webglVendor', 'webglRenderer', 'hardwareConcurrency', 'deviceMemory', 'devicePixelRatio', 'resolution'];
+      if (HW_KEYS.some((k) => !explicit.has(k))) {
+        const merged = fpMod.mergeFingerprint(rawFp);
+        fpMod.assignHardwareFingerprint(merged, id, explicit);
+        const target = (rawFp.browserFingerPrint && typeof rawFp.browserFingerPrint === 'object')
+          ? rawFp.browserFingerPrint
+          : rawFp;
+        const pinned = [];
+        for (const k of HW_KEYS) {
+          if (explicit.has(k)) continue;
+          if (merged[k] === undefined || merged[k] === null || merged[k] === '') continue;
+          target[k] = merged[k];
+          pinned.push(k);
+        }
+        if (pinned.length) {
+          const nextJson = JSON.stringify(rawFp);
+          db.updateProfileMeta(id, { fingerprint_json: nextJson });
+          profile = { ...profile, fingerprint_json: nextJson };
+          console.log(`[manager] 环境 ${id} 硬件指纹已固化: ${pinned.join(', ')}`);
+        }
+      }
+    } catch (error) {
+      console.warn(`[manager] 硬件指纹固化跳过: ${error?.message || error}`);
+    }
+
     if (STICKY_HOST) {
       const bound = String(profile.bound_host_id || '').trim();
       if (bound && bound !== HOST_ID) {
@@ -224,6 +255,8 @@ function formatOpenResult(id, session) {
     name: session.profile?.name || id,
     seq: session.profile?.seq,
     coreVersion: fp.coreVersion || '131',
+    // 内核已按环境 ID 固定指纹（fp-inject / cdp-inject / emulation-scripts）；任务侧不要再叠一层覆盖
+    fpManaged: true,
     userAgent: session.userAgent || '',
     os: fp.os || 'Win32',
     locale: session.profile?.language || fp.languages || 'en-US',

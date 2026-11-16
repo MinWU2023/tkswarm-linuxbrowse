@@ -1,4 +1,4 @@
-/**
+﻿/**
  * TikTok Studio 数据分析拉取
  *
  * 目标页：https://www.tiktok.com/tiktokstudio/analytics
@@ -20,6 +20,11 @@ try {
 }
 
 const ANALYTICS_URL = 'https://www.tiktok.com/tiktokstudio/analytics?lang=en';
+/** Studio 首页 Key metrics（含 Last 365 days） */
+const STUDIO_HOME_URLS = [
+  'https://www.tiktok.com/tiktokstudio?lang=en',
+  'https://www.tiktok.com/tiktokstudio/home?lang=en',
+];
 
 /** 四个页签的常见中英文名（按顺序即展示顺序）。注意第 4 个是 Viewers（复数） */
 const TAB_ALIASES = [
@@ -50,10 +55,10 @@ const METRIC_LABELS = [
 /** 明显不是指标的文案，避免误收 */
 const LABEL_BLOCKLIST = [
   'see more', 'view all', 'see all', 'learn more', 'details', 'export', 'export data',
-  'last 28 days', 'last 7 days', 'last 30 days', 'last 60 days', 'last 90 days',
+  'last 28 days', 'last 7 days', 'last 30 days', 'last 60 days', 'last 90 days', 'last 365 days',
   'yesterday', 'today', 'this week', 'this month', 'all', 'more', 'show more',
   'download', 'filter', 'sort by', 'search', 'cancel', 'confirm', 'save', 'apply',
-  '查看全部', '更多', '导出', '近7天', '近28天', '近30天',
+  '查看全部', '更多', '导出', '近7天', '近28天', '近30天', '近365天', '过去365天',
 ];
 
 const METRIC_KEYS = METRIC_LABELS.concat(LABEL_BLOCKLIST);
@@ -444,9 +449,22 @@ async function activateTab(page, label, log) {
 
 // ---------------------------------------------------------------- 时间区间
 // Studio Analytics 默认是 Last 7 days，必须逐个页签切到 Last 28 days，
-// 否则「28 天数据」永远是 7 天的口径。
+// 否则「28 天数据」永远是 7 天的口径。Studio Home 一年数据同理切 Last 365 days。
 const RANGE_TRIGGER_SRC = '^((last|past)\\s*\\d+\\s*days?|近\\s*\\d+\\s*天|过去\\s*\\d+\\s*天|yesterday|昨天|today|今天)$';
-const RANGE_28_TEXTS = ['last 28 days', 'past 28 days', '过去 28 天', '近 28 天', '过去28天', '近28天', '28 days', '28天'];
+
+function rangeDayTexts(days) {
+  const n = Number(days) || 0;
+  return [
+    `last ${n} days`,
+    `past ${n} days`,
+    `过去 ${n} 天`,
+    `近 ${n} 天`,
+    `过去${n}天`,
+    `近${n}天`,
+    `${n} days`,
+    `${n}天`,
+  ];
+}
 
 /** 读当前区间文案（如 "Last 7 days"） */
 async function readRangeLabel(page) {
@@ -456,7 +474,7 @@ async function readRangeLabel(page) {
     for (const sel of tiers) {
       for (const el of document.querySelectorAll(sel)) {
         const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
-        if (!t || t.length > 24 || !re.test(t)) continue;
+        if (!t || t.length > 28 || !re.test(t)) continue;
         if (el.closest('[data-tt*="Sidebar"], nav, aside')) continue;
         const r = el.getBoundingClientRect();
         if (!r.width || !r.height) continue;
@@ -479,7 +497,7 @@ async function openRangeMenu(page) {
     for (const sel of tiers) {
       for (const el of document.querySelectorAll(sel)) {
         const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
-        if (!t || t.length > 24 || !re.test(t)) continue;
+        if (!t || t.length > 28 || !re.test(t)) continue;
         if (el.closest('[data-tt*="Sidebar"], nav, aside')) continue;
         const r = el.getBoundingClientRect();
         if (!r.width || !r.height) continue;
@@ -495,10 +513,12 @@ async function openRangeMenu(page) {
   }, RANGE_TRIGGER_SRC).catch(() => false);
 }
 
-/** 在下拉里点 28 天 */
-async function pick28Option(page) {
-  return page.evaluate((targets) => {
-    const want = new Set(targets);
+/** 在下拉里点 N 天 */
+async function pickDaysOption(page, days) {
+  const n = Number(days) || 0;
+  return page.evaluate((arg) => {
+    const want = new Set(arg.targets);
+    const dayRe = new RegExp(`^[^0-9]{0,12}${arg.days}\\s*(days?|天)\\s*$`, 'i');
     const sel = 'button, [role="option"], [role="menuitem"], li, div, span';
     const nodes = [...document.querySelectorAll(sel)];
     const clickIf = (el) => {
@@ -507,7 +527,6 @@ async function pick28Option(page) {
       el.click();
       return true;
     };
-    // 先精确匹配文案
     for (const el of nodes) {
       const t = (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
       if (!want.has(t)) continue;
@@ -517,58 +536,60 @@ async function pick28Option(page) {
       if (innerSame) continue;
       if (clickIf(el)) return t;
     }
-    // 再宽松匹配：含 28 且带 days/天
     for (const el of nodes) {
       const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
-      if (!/^[^0-9]{0,12}28\s*(days?|天)\s*$/i.test(t)) continue;
+      if (!dayRe.test(t)) continue;
       const innerSame = [...el.children].some(
-        (c) => /^[^0-9]{0,12}28\s*(days?|天)\s*$/i.test((c.innerText || '').replace(/\s+/g, ' ').trim())
+        (c) => dayRe.test((c.innerText || '').replace(/\s+/g, ' ').trim())
       );
       if (innerSame) continue;
       if (clickIf(el)) return t.toLowerCase();
     }
     return '';
-  }, RANGE_28_TEXTS).catch(() => '');
+  }, { targets: rangeDayTexts(n), days: n }).catch(() => '');
 }
 
-/** 把当前页签切到「最近 28 天」，返回切换后的区间文案 */
-async function ensureLast28Days(page, log) {
+/** 把当前页切到「最近 N 天」，返回切换后的区间文案 */
+async function ensureLastNDays(page, log, days) {
+  const n = Number(days) || 0;
+  const dayRe = new RegExp(String(n));
   const before = await readRangeLabel(page);
-  if (before && /28/.test(before)) {
+  if (before && dayRe.test(before)) {
     log(`时间范围：已是「${before}」，无需切换`);
     return before;
   }
-  // 原生 <select> 兜底
-  const hasSelect = await page.evaluate(() => {
+  const hasSelect = await page.evaluate((dn) => {
+    const re = new RegExp(String(dn));
     for (const s of document.querySelectorAll('select')) {
-      if ([...s.options].some((o) => /28/.test(o.textContent || ''))) return true;
+      if ([...s.options].some((o) => re.test(o.textContent || ''))) return true;
     }
     return false;
-  }).catch(() => false);
+  }, n).catch(() => false);
   if (hasSelect) {
-    await page.evaluate(() => {
+    await page.evaluate((dn) => {
+      const re = new RegExp(String(dn));
       for (const s of document.querySelectorAll('select')) {
-        const opt = [...s.options].find((o) => /28/.test(o.textContent || ''));
+        const opt = [...s.options].find((o) => re.test(o.textContent || ''));
         if (opt) {
           s.value = opt.value;
           s.dispatchEvent(new Event('change', { bubbles: true }));
           return;
         }
       }
-    }).catch(() => {});
+    }, n).catch(() => {});
     await page.waitForTimeout(2800);
     const after = await readRangeLabel(page);
-    log(`时间范围：${before || '默认'} → ${after || '未知'}（下拉框）`);
+    log(`时间范围：${before || '默认'} → ${after || '未知'}（下拉框 → ${n} 天）`);
     return after || before;
   }
   if (!await openRangeMenu(page)) {
-    log(`时间范围：找不到选择器，保持默认「${before || '未知'}」——本页数据口径可能不是 28 天`);
+    log(`时间范围：找不到选择器，保持默认「${before || '未知'}」——本页数据口径可能不是 ${n} 天`);
     return before;
   }
   await page.waitForTimeout(1200);
-  const picked = await pick28Option(page);
+  const picked = await pickDaysOption(page, n);
   if (!picked) {
-    log(`时间范围：下拉里没有 28 天选项，保持默认「${before || '未知'}」`);
+    log(`时间范围：下拉里没有 ${n} 天选项，保持默认「${before || '未知'}」`);
     await page.keyboard.press('Escape').catch(() => {});
     return before;
   }
@@ -576,6 +597,105 @@ async function ensureLast28Days(page, log) {
   const after = await readRangeLabel(page);
   log(`时间范围：${before || '默认'} → ${after || '未知'}（点了「${picked}」）`);
   return after || picked;
+}
+
+async function ensureLast28Days(page, log) {
+  return ensureLastNDays(page, log, 28);
+}
+
+function emptyYearPeriod() {
+  return {
+    videoViews: 0,
+    profileViews: 0,
+    likes: 0,
+    comments: 0,
+    shares: 0,
+    estRewards: 0,
+    range: '',
+    pageUrl: '',
+  };
+}
+
+/**
+ * 打开 Studio Home，切到 Last N days，抓 Key metrics 汇总。
+ * @param {number} [days=28]
+ * @param {{ reusePage?: boolean }} [opts]
+ */
+async function scrapeStudioHomeKeyMetrics(page, log, days = 28, opts = {}) {
+  const n = Number(days) || 28;
+  const reusePage = !!(opts && opts.reusePage);
+  const out = emptyYearPeriod();
+  let opened = '';
+  if (reusePage && /tiktokstudio/i.test(String(page.url() || ''))) {
+    opened = page.url();
+    log(`复用当前 Studio Home 页抓 ${n} 天：${opened}`);
+  } else {
+    for (const url of STUDIO_HOME_URLS) {
+      log(`打开 Studio Home（${n} 天）：${url}`);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+      await page.waitForTimeout(1800);
+      await dismissBanners(page);
+      const end = Date.now() + 20000;
+      let ready = false;
+      while (Date.now() < end) {
+        try {
+          const { solveRotateCaptchaIfPresent } = require('./nocaptchaai');
+          await solveRotateCaptchaIfPresent(page);
+        } catch { /* ignore */ }
+        const diag = await pageDiagnostics(page);
+        const textHit = /key metrics|video views|profile views|关键指标|视频播放|主页浏览/i.test(
+          String(diag.head || '')
+        ) || diag.hasKeyMetrics;
+        if (textHit || /tiktokstudio/i.test(diag.url || '')) {
+          const cards = await scrapeCards(page);
+          if (cards.length > 0 || textHit) {
+            ready = true;
+            opened = diag.url || url;
+            break;
+          }
+        }
+        await page.waitForTimeout(800);
+      }
+      if (ready) break;
+    }
+  }
+  if (!opened) {
+    log(`Studio Home：页面未出现 Key metrics，跳过 ${n} 天数据`);
+    return out;
+  }
+  out.pageUrl = opened;
+  await page.evaluate(() => window.scrollTo(0, Math.min(900, document.body.scrollHeight))).catch(() => {});
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+  await page.waitForTimeout(400);
+
+  const range = await ensureLastNDays(page, (m) => log(`Studio Home ${m}`), n);
+  out.range = range || '';
+  await page.waitForTimeout(1800);
+
+  const cards = await scrapeCards(page);
+  const pairs = await scrapeTextPairs(page);
+  const metrics = normalizeMetrics(cards, pairs);
+  const pick = (names) => {
+    const hit = findMetric(metrics, names);
+    return hit ? hit.value : 0;
+  };
+  out.videoViews = pick(['video views', '视频播放', '播放量']);
+  out.profileViews = pick(['profile views', '主页浏览', 'profile view']);
+  out.likes = pick(['likes', '点赞']);
+  out.comments = pick(['comments', '评论']);
+  out.shares = pick(['shares', '分享', '转发']);
+  out.estRewards = pick(['est. rewards', 'estimated rewards', '预估收益', 'rewards']);
+  log(
+    `Studio Home Key metrics（${n} 天）：范围=${out.range || '未知'} `
+    + `播放=${out.videoViews} 主页=${out.profileViews} 赞=${out.likes} `
+    + `评=${out.comments} 转=${out.shares} 收益=${out.estRewards}（指标=${metrics.length}）`
+  );
+  return out;
+}
+
+async function scrapeStudioHomeYearMetrics(page, log) {
+  return scrapeStudioHomeKeyMetrics(page, log, 365);
 }
 
 /** 抓「指标名 + 数值」的卡片/行 */
@@ -1518,6 +1638,301 @@ function mergeContentRows(primary, fallback) {
  * 拉取 Studio 数据并入库（四个页签 + 28 天日序列）
  * 总任务 keepBrowser：复用已打开环境，禁止关窗再开。
  */
+const PORTRAIT_SPECS = [
+  {
+    key: 'overview_traffic_source',
+    title: 'Traffic source',
+    tab: 'overview',
+    kind: 'bars',
+    titles: ['traffic source', '流量来源'],
+  },
+  {
+    key: 'overview_search_queries',
+    title: 'Search queries',
+    tab: 'overview',
+    kind: 'bars',
+    titles: ['search queries', '搜索查询', '搜索词'],
+  },
+  {
+    key: 'viewers_gender',
+    title: 'Gender',
+    tab: 'viewer',
+    kind: 'gender',
+    displayTitle: 'Viewers · Gender',
+    titles: ['gender', '性别'],
+  },
+  {
+    key: 'viewers_age',
+    title: 'Age',
+    tab: 'viewer',
+    kind: 'bars',
+    displayTitle: 'Viewers · Age',
+    titles: ['age', '年龄'],
+  },
+  {
+    key: 'viewers_locations',
+    title: 'Locations',
+    tab: 'viewer',
+    kind: 'bars',
+    displayTitle: 'Viewers · Locations',
+    titles: ['locations', 'location', '地区', '地域', '位置'],
+  },
+  {
+    key: 'followers_gender',
+    title: 'Gender',
+    tab: 'followers',
+    kind: 'gender',
+    displayTitle: 'Followers · Gender',
+    titles: ['gender', '性别'],
+  },
+  {
+    key: 'followers_age',
+    title: 'Age',
+    tab: 'followers',
+    kind: 'bars',
+    displayTitle: 'Followers · Age',
+    titles: ['age', '年龄'],
+  },
+  {
+    key: 'followers_locations',
+    title: 'Locations',
+    tab: 'followers',
+    kind: 'bars',
+    displayTitle: 'Followers · Locations',
+    titles: ['locations', 'location', '地区', '地域', '位置'],
+  },
+];
+
+const GENDER_COLORS = {
+  male: '#2F5BFF',
+  female: '#6B93FF',
+  other: '#B7CBFF',
+  男: '#2F5BFF',
+  女: '#6B93FF',
+  其他: '#B7CBFF',
+};
+
+function emptyPortraitModule(spec, range = '') {
+  return {
+    key: spec.key,
+    title: spec.displayTitle || spec.title,
+    section: spec.title,
+    tab: spec.tab,
+    kind: spec.kind,
+    range: range || '',
+    hint: '',
+    items: [],
+  };
+}
+
+/** 从当前 Analytics 页抓「板块标题 + 百分比列表」卡片 */
+async function scrapePortraitSections(page) {
+  return page.evaluate(() => {
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    const SECTION_ALIASES = [
+      { canon: 'Traffic source', aliases: ['traffic source', '流量来源'] },
+      { canon: 'Search queries', aliases: ['search queries', '搜索查询', '搜索词'] },
+      { canon: 'Gender', aliases: ['gender', '性别'] },
+      { canon: 'Age', aliases: ['age', '年龄'] },
+      { canon: 'Locations', aliases: ['locations', 'location', '地区', '地域', '位置'] },
+    ];
+    const aliasOf = (t) => {
+      const low = norm(t).toLowerCase();
+      for (const s of SECTION_ALIASES) {
+        if (s.aliases.some((a) => low === a || low.startsWith(`${a} `))) return s.canon;
+      }
+      return '';
+    };
+    const parsePct = (raw) => {
+      const s = norm(raw);
+      if (!s) return null;
+      if (/^<\s*1\s*%$/i.test(s) || /^＜\s*1\s*%$/.test(s)) return { value: 0.5, text: '<1%' };
+      const m = s.match(/^([0-9]+(?:\.[0-9]+)?)\s*%$/);
+      if (!m) return null;
+      return { value: Number(m[1]), text: `${m[1]}%` };
+    };
+    const isJunkLabel = (label, canon) => {
+      const low = norm(label).toLowerCase();
+      if (!low || low === '-' || low === '—') return true;
+      if (low === String(canon || '').toLowerCase()) return true;
+      if (/get more insights|reach \d+ followers|达到.*粉丝|see more|view all|export|last \d+ days|近\s*\d+\s*天/i.test(low)) return true;
+      if (low.length > 96) return true;
+      return false;
+    };
+
+    const out = [];
+    const seenCanon = new Set();
+    const nodes = [...document.querySelectorAll('h1,h2,h3,h4,h5,div,span,p,button')];
+    for (const el of nodes) {
+      const raw = norm(el.innerText);
+      if (!raw || raw.length > 28) continue;
+      const canon = aliasOf(raw);
+      if (!canon || seenCanon.has(canon)) continue;
+      // 只要标题叶子，避免父子重复
+      const childHas = [...el.children].some((c) => aliasOf(norm(c.innerText)) === canon);
+      if (childHas) continue;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+
+      let card = el;
+      for (let i = 0; i < 10 && card.parentElement; i += 1) {
+        const p = card.parentElement;
+        const pr = p.getBoundingClientRect();
+        card = p;
+        if (pr.height >= 100 && pr.width >= 220) break;
+      }
+      const text = String(card.innerText || '');
+      const lines = text.split('\n').map(norm).filter(Boolean);
+      const hint = lines.find((l) => /get more insights|reach \d+ followers|达到.*粉丝/i.test(l)) || '';
+      const items = [];
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (aliasOf(line) === canon) continue;
+        if (hint && line === hint) continue;
+        // "Label 96.7%" 同行
+        const same = line.match(/^(.*?)[\s\u00a0]+(<?\s*[0-9]+(?:\.[0-9]+)?\s*%|＜\s*1\s*%)$/);
+        if (same) {
+          const label = norm(same[1]);
+          const pct = parsePct(same[2]);
+          if (pct && !isJunkLabel(label, canon)) {
+            items.push({ label, value: pct.value, text: pct.text });
+          }
+          continue;
+        }
+        // Label\n96.7%
+        const pct = parsePct(lines[i + 1] || '');
+        if (pct && !isJunkLabel(line, canon)) {
+          // 空态占位 "- / -%" 也收，前端可渲染灰条
+          items.push({
+            label: line === '-' || line === '—' ? '-' : line,
+            value: line === '-' || line === '—' ? 0 : pct.value,
+            text: pct.text === '-%' ? '-%' : pct.text,
+            placeholder: line === '-' || line === '—' || pct.text === '-%',
+          });
+          i += 1;
+        }
+      }
+      // 去重 label
+      const uniq = [];
+      const seenL = new Set();
+      for (const it of items) {
+        const k = String(it.label || '').toLowerCase();
+        if (seenL.has(k)) continue;
+        seenL.add(k);
+        uniq.push(it);
+      }
+      seenCanon.add(canon);
+      out.push({
+        section: canon,
+        hint,
+        items: uniq.slice(0, 20),
+        found: true,
+      });
+    }
+    return out;
+  }).catch(() => []);
+}
+
+/**
+ * Analytics 页：Overview / Viewers / Followers 切到 365 天，抓 8 个用户画像板块。
+ */
+async function scrapeUserPortrait365(page, log, tabList = []) {
+  const findTabLabel = (tabKey) => {
+    const aliases = (TAB_ALIASES.find((a) => a.key === tabKey)?.names || []).map((s) => s.toLowerCase());
+    const hit = (tabList || []).find((t) => aliases.includes(String(t.label || '').toLowerCase()));
+    if (hit) return hit.label;
+    const fallback = { overview: 'Overview', viewer: 'Viewers', followers: 'Followers' };
+    return fallback[tabKey] || tabKey;
+  };
+
+  const byTab = {
+    overview: PORTRAIT_SPECS.filter((s) => s.tab === 'overview'),
+    viewer: PORTRAIT_SPECS.filter((s) => s.tab === 'viewer'),
+    followers: PORTRAIT_SPECS.filter((s) => s.tab === 'followers'),
+  };
+  const collected = new Map();
+  const ranges = {};
+
+  for (const tabKey of ['overview', 'viewer', 'followers']) {
+    const label = findTabLabel(tabKey);
+    log(`用户画像：切换页签 ${label} → Last 365 days`);
+    let ok = true;
+    if (tabKey !== 'overview') {
+      ok = await activateTab(page, label, log);
+      if (!ok) {
+        // Viewers 可能显示为 Viewer
+        const alt = tabKey === 'viewer' ? 'Viewer' : label;
+        ok = await activateTab(page, alt, log);
+      }
+    } else {
+      // 前序页签采集可能停在 Content/Viewers，画像必须从 Overview 重开
+      ok = await activateTab(page, label, log);
+      if (!ok) {
+        await page.goto(ANALYTICS_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+        await page.waitForTimeout(2500);
+        ok = true;
+      }
+    }
+    if (!ok) {
+      log(`用户画像：页签 ${label} 未能激活，跳过该页签板块`);
+      for (const spec of byTab[tabKey]) {
+        collected.set(spec.key, emptyPortraitModule(spec));
+      }
+      continue;
+    }
+    await page.evaluate(() => window.scrollTo(0, Math.min(1600, document.body.scrollHeight))).catch(() => {});
+    await page.waitForTimeout(1000);
+    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+    await page.waitForTimeout(500);
+
+    const range = await ensureLastNDays(page, (m) => log(`用户画像 ${m}`), 365);
+    ranges[tabKey] = range || '';
+    await page.waitForTimeout(1800);
+    // 再滚一次触发下方 Gender/Age/Locations 懒加载
+    await page.evaluate(() => window.scrollTo(0, Math.min(2200, document.body.scrollHeight))).catch(() => {});
+    await page.waitForTimeout(1200);
+    await page.evaluate(() => window.scrollTo(0, Math.min(3200, document.body.scrollHeight))).catch(() => {});
+    await page.waitForTimeout(1000);
+
+    const sections = await scrapePortraitSections(page);
+    log(
+      `用户画像：${label} 解析到板块 ${sections.map((s) => `${s.section}(${(s.items || []).length})`).join(' / ') || '无'}`
+    );
+    const sectionMap = new Map(sections.map((s) => [s.section, s]));
+    for (const spec of byTab[tabKey]) {
+      const hit = sectionMap.get(spec.title);
+      const mod = emptyPortraitModule(spec, range || '');
+      if (hit) {
+        mod.hint = hit.hint || '';
+        mod.items = (hit.items || []).map((it) => {
+          const row = {
+            label: String(it.label || ''),
+            value: Number(it.value) || 0,
+            text: String(it.text || ''),
+          };
+          if (spec.kind === 'gender') {
+            const colorKey = String(row.label || '').toLowerCase();
+            row.color = GENDER_COLORS[colorKey] || GENDER_COLORS[row.label] || '#2F5BFF';
+          }
+          if (it.placeholder) row.placeholder = true;
+          return row;
+        });
+      }
+      collected.set(spec.key, mod);
+    }
+  }
+
+  const modules = PORTRAIT_SPECS.map((spec, idx) => {
+    const m = collected.get(spec.key) || emptyPortraitModule(spec, ranges[spec.tab] || '');
+    m.sortNo = idx;
+    return m;
+  });
+  const filled = modules.filter((m) => (m.items || []).some((it) => !it.placeholder && Number(it.value) > 0)).length;
+  log(`用户画像：完成 ${modules.length} 板块（有数据 ${filled} 个），区间=${Object.values(ranges).filter(Boolean).join(' / ') || '未知'}`);
+  return { modules, ranges };
+}
+
+
 async function pullStudioStats(accountId, options = {}) {
   let account;
   try {
@@ -1626,6 +2041,17 @@ async function pullStudioStats(accountId, options = {}) {
     const followersTab = tabsData.find((t) => t.key === 'followers');
     const viewerTab = tabsData.find((t) => t.key === 'viewer');
 
+    let portrait = { modules: [], ranges: {} };
+    try {
+      portrait = await scrapeUserPortrait365(page, log, tabList);
+    } catch (e) {
+      log(`用户画像采集失败：${e.message || e}`);
+      portrait = {
+        modules: PORTRAIT_SPECS.map((spec, idx) => ({ ...emptyPortraitModule(spec), sortNo: idx })),
+        ranges: {},
+      };
+    }
+
     // 3) 28 天日序列
     const keys28 = last28DateKeys();
     const daily = keys28.map((dk) => {
@@ -1640,14 +2066,43 @@ async function pullStudioStats(accountId, options = {}) {
       const hit = findMetric(overviewTab.metrics, names);
       return hit ? hit.value : 0;
     };
-    const period = {
-      videoViews: m(['video views', '视频播放', '播放量', 'views']),
+    const analyticsPeriod = {
+      videoViews: m(['video views', '视频播放', '播放量']),
       profileViews: m(['profile views', '主页浏览', 'profile view']),
       likes: m(['likes', '点赞']),
       comments: m(['comments', '评论']),
       shares: m(['shares', '分享', '转发']),
       estRewards: m(['est. rewards', 'estimated rewards', '预估收益', 'rewards']),
     };
+
+    let home28 = emptyYearPeriod();
+    try {
+      home28 = await scrapeStudioHomeKeyMetrics(page, log, 28);
+    } catch (e) {
+      log(`Studio Home 28 天数据采集失败：${e.message || e}`);
+      home28 = emptyYearPeriod();
+    }
+    const pickPeriod = (homeVal, analyticsVal) => {
+      const h = Number(homeVal);
+      if (Number.isFinite(h) && h > 0) return h;
+      const a = Number(analyticsVal);
+      return Number.isFinite(a) && a > 0 ? a : (Number.isFinite(h) ? h : 0);
+    };
+    const period = {
+      videoViews: pickPeriod(home28.videoViews, analyticsPeriod.videoViews),
+      profileViews: pickPeriod(home28.profileViews, analyticsPeriod.profileViews),
+      likes: pickPeriod(home28.likes, analyticsPeriod.likes),
+      comments: pickPeriod(home28.comments, analyticsPeriod.comments),
+      shares: pickPeriod(home28.shares, analyticsPeriod.shares),
+      estRewards: pickPeriod(home28.estRewards, analyticsPeriod.estRewards),
+      source: (Number(home28.videoViews) > 0 || Number(home28.likes) > 0 || Number(home28.profileViews) > 0)
+        ? `studio_home:${home28.range || '28d'}`
+        : 'analytics_overview_fallback',
+    };
+    log(
+      `28 天汇总：播放=${period.videoViews} 主页=${period.profileViews} 赞=${period.likes}`
+      + ` 评=${period.comments} 转=${period.shares} 收益=${period.estRewards}（来源=${period.source}）`
+    );
     if (!hasSeries && (period.videoViews || period.likes || period.comments || period.shares)) {
       const last = daily[daily.length - 1];
       last.videoViews = period.videoViews;
@@ -1657,6 +2112,16 @@ async function pullStudioStats(accountId, options = {}) {
       last.shares = period.shares;
       last.estRewards = period.estRewards;
       log('analytics: 没有拿到按日序列，已把 28 天汇总记在最后一天');
+    }
+
+    let yearPeriod = emptyYearPeriod();
+    try {
+      yearPeriod = await scrapeStudioHomeKeyMetrics(page, log, 365, {
+        reusePage: !!(home28 && home28.pageUrl),
+      });
+    } catch (e) {
+      log(`Studio Home 一年数据采集失败：${e.message || e}`);
+      yearPeriod = emptyYearPeriod();
     }
 
     // Studio Overview 的 likes/comments 是「近 28 天」，不能当终身总量。
@@ -1749,6 +2214,12 @@ async function pullStudioStats(accountId, options = {}) {
       periodComments: period.comments,
       periodShares: period.shares,
       periodEstRewards: period.estRewards,
+      yearVideoViews: yearPeriod.videoViews,
+      yearProfileViews: yearPeriod.profileViews,
+      yearLikes: yearPeriod.likes,
+      yearComments: yearPeriod.comments,
+      yearShares: yearPeriod.shares,
+      yearEstRewards: yearPeriod.estRewards,
     };
 
     const tabsPayload = tabsData.map((t) => ({
@@ -1770,6 +2241,10 @@ async function pullStudioStats(accountId, options = {}) {
       hasSeries,
       followersTabMetrics: followersTab ? followersTab.metrics.length : 0,
       viewerTabMetrics: viewerTab ? viewerTab.metrics.length : 0,
+      yearRange: yearPeriod.range || '',
+      yearPageUrl: yearPeriod.pageUrl || '',
+      portraitRanges: portrait.ranges || {},
+      portraitCount: Array.isArray(portrait.modules) ? portrait.modules.length : 0,
       capturedAt: nowChinaIso(),
     };
 
@@ -1777,9 +2252,11 @@ async function pullStudioStats(accountId, options = {}) {
       await dataStore.tiktokAnalyticsSync(account.id, {
         profile,
         period,
+        yearPeriod,
         daily,
         rangeDays: 28,
         tabs: tabsPayload,
+        portrait: Array.isArray(portrait.modules) ? portrait.modules : [],
         content: contentRows,
         api: apiHits.slice(0, 10),
         meta,

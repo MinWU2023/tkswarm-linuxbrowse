@@ -161,6 +161,35 @@ async function ensureConsistentUaAndClientHints(page, openedMeta = null) {
     return;
   }
   const meta = openedMeta || page.__tkOpenedMeta || page.context?.()?.__tkOpenedMeta || null;
+  // 内核已接管 UA / ClientHints / WebGL / Canvas / Audio / 时区：执行器再叠一层会造成口径冲突和可枚举的 __tk* 痕迹。
+  // TKSWARM_NODE_FP_OVERRIDE=1 可强制恢复旧行为（排查用）。
+  if (meta && meta.fpManaged === true && String(process.env.TKSWARM_NODE_FP_OVERRIDE || '') !== '1') {
+    // 注意：Linux Electron 内核没有常驻 debugger，启动阶段用临时 WS 下发的 Emulation 覆盖（时区/语言/定位/核数）
+    // 在连接关闭后会被 Chromium 清掉，必须由执行器的常驻 CDP 会话补发。
+    // 所以这里只跳过会与内核冲突的 UA / ClientHints / JS 补丁，地区类覆盖仍然补发。
+    page.__tkUaConsistentPromise = (async () => {
+      try {
+        const ctx = page.context?.();
+        const cdp = ctx ? await ctx.newCDPSession(page).catch(() => null) : null;
+        if (!cdp) return;
+        page.__tkUaCdpSession = cdp;
+        const lang = String(meta?.locale || meta?.fp?.languages || '').trim();
+        const primaryLang = String(lang || 'en-US').split(',')[0].trim() || 'en-US';
+        const tz = String(meta?.timezone || meta?.fp?.timezone || '').trim();
+        if (tz) await cdp.send('Emulation.setTimezoneOverride', { timezoneId: tz }).catch(() => {});
+        if (lang) await cdp.send('Emulation.setLocaleOverride', { locale: primaryLang }).catch(() => {});
+        const lat = Number(meta?.latitude || 0);
+        const lon = Number(meta?.longitude || 0);
+        if (Number.isFinite(lat) && Number.isFinite(lon) && (lat !== 0 || lon !== 0)) {
+          await cdp.send('Emulation.setGeolocationOverride', { latitude: lat, longitude: lon, accuracy: 100 }).catch(() => {});
+        }
+        const hc = Number(meta?.fp?.hardwareConcurrency || 0);
+        if (hc > 0) await cdp.send('Emulation.setHardwareConcurrencyOverride', { hardwareConcurrency: hc }).catch(() => {});
+      } catch { /* ignore */ }
+    })();
+    await page.__tkUaConsistentPromise.catch(() => {});
+    return;
+  }
   page.__tkUaConsistentPromise = (async () => {
     try {
       let ua = String(meta?.userAgent || '').trim();

@@ -488,17 +488,38 @@ function attemptLimitedResult(account, page, screenshot = '') {
   };
 }
 
+/**
+ * 设备标识类 Cookie：代表「这台设备」而不是「这个登录态」。
+ * 清登录态时必须保留，否则下次访问被当成全新设备（设备熟练度归零），更容易弹图形验证。
+ * 登录类（sessionid / sid_tt / uid_tt / sid_guard 等）不在此列，照常清掉。
+ * 与 tkswarm-node/src/services/browser/tiktok-login.js 保持一致，改动需同步。
+ */
+const TIKTOK_DEVICE_COOKIES = new Set([
+  'ttwid', 'odin_tt', 'tt_chain_token', 's_v_web_id', 'tt_csrf_token', 'msToken',
+  'tiktok_webapp_theme', 'tt_webid', 'tt_webid_v2', 'cookie-consent', 'delay_guest_mode_vid',
+  'passport_csrf_token', 'passport_csrf_token_default',
+]);
+
 async function clearTikTokCookiesOnly(context) {
   const cookies = await context.cookies().catch(() => []);
   const keep = (cookies || []).filter((c) => {
     const domain = String(c.domain || '').toLowerCase().replace(/^\./, '');
-    return !domain.includes('tiktok');
+    if (!domain.includes('tiktok')) return true;
+    return TIKTOK_DEVICE_COOKIES.has(String(c.name || ''));
   });
   await context.clearCookies().catch(() => {});
   if (keep.length) await context.addCookies(keep).catch(() => {});
+  // localStorage 里有设备级数据，不再整体清空；只移除明显属于登录/账号态的键。sessionStorage 本就是会话级，可清。
   for (const p of context.pages().filter((item) => !item.isClosed() && /tiktok\.com/i.test(item.url()))) {
     await p.evaluate(() => {
-      try { localStorage.clear(); } catch { /* ignore */ }
+      try {
+        const drop = [];
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const k = localStorage.key(i);
+          if (k && /login|passport|session|user_?info|account|uid|sec_?uid/i.test(k)) drop.push(k);
+        }
+        drop.forEach((k) => localStorage.removeItem(k));
+      } catch { /* ignore */ }
       try { sessionStorage.clear(); } catch { /* ignore */ }
     }).catch(() => {});
   }
