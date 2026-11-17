@@ -1422,6 +1422,39 @@ function emptyProfileTotals() {
   };
 }
 
+/**
+ * 拉取数据任务：把主页目录里「最新发布」的 N 条写入 tiktok_videos，
+ * 供查看数据弹框「最近同步视频」展示。全量替换，避免旧作品残留。
+ */
+async function syncLatestHomepageVideos(accountId, catalog, log = () => {}, limit = 6) {
+  const max = Math.min(30, Math.max(1, Number(limit) || 6));
+  const seen = new Set();
+  const rows = [];
+  for (const it of Array.isArray(catalog) ? catalog : []) {
+    const videoId = String(it?.videoId || it?.video_id || '').trim();
+    if (!/^\d{8,}$/.test(videoId) || seen.has(videoId)) continue;
+    seen.add(videoId);
+    rows.push({
+      videoId,
+      videoUrl: String(it.videoUrl || it.video_url || '').trim()
+        || `https://www.tiktok.com/video/${videoId}`,
+      description: String(it.title || it.description || '').trim().slice(0, 1000),
+      thumbnailUrl: String(it.coverUrl || it.thumbnailUrl || it.thumbnail_url || '').trim(),
+    });
+    if (rows.length >= max) break;
+  }
+  if (!rows.length) {
+    log('最近同步视频：主页目录为空，跳过写入');
+    return { count: 0 };
+  }
+  await dataStore.tiktokSync(accountId, {
+    videos: rows,
+    replaceProfileVideos: true,
+  });
+  log(`最近同步视频：已从主页写入最新 ${rows.length} 条`);
+  return { count: rows.length };
+}
+
 /** 从内容行汇总播放/评论/点赞（主页缺量时兜底） */
 function sumContentTotals(rows = []) {
   let views = 0;
@@ -2268,8 +2301,17 @@ async function pullStudioStats(accountId, options = {}) {
       );
     }
 
+    // Studio 内容入库可能顺带写过 tiktok_videos；这里用主页最新 6 条全量替换，保证「最近同步视频」更新
+    let homepageVideoCount = 0;
+    try {
+      const synced = await syncLatestHomepageVideos(account.id, profileCatalog, log, 6);
+      homepageVideoCount = Number(synced?.count || 0);
+    } catch (e) {
+      log(`最近同步视频：写入失败 ${e.message || e}`);
+    }
+
     const totalMetrics = tabsPayload.reduce((n, t) => n + t.metrics.length, 0);
-    log(`已保存：页签=${tabsPayload.length} 指标=${totalMetrics} 内容=${contentRows.length} 日数据=${daily.length} 接口=${apiHits.length}`);
+    log(`已保存：页签=${tabsPayload.length} 指标=${totalMetrics} 内容=${contentRows.length} 日数据=${daily.length} 接口=${apiHits.length} 最近视频=${homepageVideoCount}`);
 
     // 6) 系统通知：抓通知内容 → PHP 按「时间+内容」排重入库 → 命中违规词由 AI 判定封停状态
     //    通知失败不影响统计数据（统计已入库），只记日志
@@ -2318,6 +2360,7 @@ async function pullStudioStats(accountId, options = {}) {
       tabCount: tabsPayload.length,
       metricCount: totalMetrics,
       contentCount: contentRows.length,
+      homepageVideoCount,
       apiCount: apiHits.length,
       tabs: tabsPayload.map((t) => ({ key: t.key, label: t.label, range: t.range || '', metrics: t.metricCount })),
       notifyInserted: notifySummary ? Number(notifySummary.inserted || 0) : 0,
@@ -2325,6 +2368,7 @@ async function pullStudioStats(accountId, options = {}) {
       notifyViolations: notifySummary ? Number(notifySummary.violations || 0) : 0,
       notifyBan: notifySummary ? (notifySummary.ban || null) : null,
       message: `Studio 数据已拉取：${tabsPayload.length} 个页签 / ${totalMetrics} 项指标 / ${contentRows.length} 条内容数据`
+        + `；最近同步视频 ${homepageVideoCount} 条`
         + (notifySummary
           ? `；系统通知新增 ${notifySummary.inserted} 条（去重 ${notifySummary.skipped} 条，疑似违规 ${notifySummary.violations} 条）`
           : '；系统通知未取到（详见任务日志里的 notify: 行）'),
@@ -2350,4 +2394,4 @@ async function pullStudioStats(accountId, options = {}) {
   }
 }
 
-module.exports = { pullStudioStats, last28DateKeys, fetchProfileVideoCatalog };
+module.exports = { pullStudioStats, last28DateKeys, fetchProfileVideoCatalog, syncLatestHomepageVideos };
