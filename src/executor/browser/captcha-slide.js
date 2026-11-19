@@ -580,11 +580,15 @@ async function inspectSlideCaptchaInContext(target, opts = {}) {
         }
 
         const hintText = hintTextOf(null);
+        // 弹框已显示 "Verification timed out. Please close this window."：里面没有图也没有刷新钮
+        const shellText = shells.slice(0, 12).map((s) => hintTextOf(s.el)).join(' ');
+        const timedOut = /verification timed out|timed out\.?\s*please close|please close this window|验证超时|验证已超时|已超时|请关闭此窗口|请关闭窗口/i.test(`${shellText} ${hintText}`);
         return {
           detected: false,
           hint: true,
           loading: true,
-          reason: hasPuzzleWords(hintText) ? 'slide_images_pending' : 'captcha_shell_without_pair',
+          timedOut,
+          reason: timedOut ? 'captcha_verification_timed_out' : (hasPuzzleWords(hintText) ? 'slide_images_pending' : 'captcha_shell_without_pair'),
           hintText: hintText.slice(0, 200),
         };
       }
@@ -1537,6 +1541,10 @@ async function waitSlideOutcome(page, info, ctx = {}) {
       }
       continue;
     }
+    if (uni && uni.loading && uni.timedOut) {
+      // 弹框已显示 "Verification timed out"：继续等没有意义，立刻返回，由主流程关闭弹框并刷新页面
+      return { gone: false, timeout: true, timedOut: true, changedImage: sawSwap, info: lastDetected, reason: '验证弹框已超时' };
+    }
     if (uni && uni.loading) { misses = 0; continue; }
 
     misses += 1;
@@ -1701,7 +1709,7 @@ async function solveSlideCaptcha(page, firstCheck, opts = {}) {
     };
   }
 
-  const target = info.target || page;
+  let target = info.target || page;
   const readState = async () => {
     try {
       const st = await inspect(target, { mode: dragModePref });
@@ -1722,6 +1730,7 @@ async function solveSlideCaptcha(page, firstCheck, opts = {}) {
   let lastError = '';
   let attemptsDone = 0;
   let lastDrag = null;
+  let timedOutRecoveries = 0;
 
   try {
     if (!opts.saveTrafficPaused && typeof deps.pauseSaveTraffic === 'function') {
@@ -1760,6 +1769,27 @@ async function solveSlideCaptcha(page, firstCheck, opts = {}) {
               };
             }
             fresh = uni;
+          } else if (uni && uni.loading && uni.timedOut && typeof deps.recoverTimedOut === 'function' && timedOutRecoveries < 2) {
+            // 弹框已超时（"Verification timed out"）：没有图也没有刷新钮，只能关掉并刷新页面重新下发验证
+            lastError = '验证弹框已超时';
+            timedOutRecoveries += 1;
+            try { await deps.recoverTimedOut(page, uni.target || page); } catch { /* ignore */ }
+            let again = null;
+            try { again = await detect(page); } catch { again = null; }
+            if (again && again.detected && again.kind === 'slide') {
+              info = again;
+              target = again.target || page;
+              attempt -= 1;
+              continue;
+            }
+            return {
+              detected: Boolean(again && (again.detected || again.loading)),
+              solved: false,
+              kind: KINDS.SLIDE,
+              attempts: attemptsDone,
+              timedOutRecovered: true,
+              reason: 'verification_timed_out',
+            };
           } else if ((uni && uni.loading) || detectFailed) {
             await sleep(rand(420, 620));
             continue;

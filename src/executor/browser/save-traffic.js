@@ -27,14 +27,15 @@ const ALLOW_URL_RE = [
   /recaptcha/i,
   /arkose/i,
   /funcaptcha/i,
-  /(?:^|\.)byteoversea\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|tos-|obj\/)/i,
-  /(?:^|\.)(?:ibyteimg|byteimg|ibytedtos|ttwstatic)\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|tos-|obj\/|eden)/i,
+  // 注意：不能含 tos- / obj/，它们是 TikTok CDN 上所有图片/视频的通用路径前缀，会让整站图片视频被放行
+  /(?:^|\.)byteoversea\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk)/i,
+  /(?:^|\.)(?:ibyteimg|byteimg|ibytedtos|ttwstatic)\.com\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|eden)/i,
   /p\d+-(?:rc-)?cap(?:tcha)?/i,
   /p\d+-security/i,
   /sf\d+-(?:website-login|secsdk|captcha)/i,
   /captcha[-.].*\.(?:tiktok|bytedance|byteoversea|tiktokv|capcut)/i,
   /verification[-.].*\.(?:tiktok|byte|tiktokv|capcut)/i,
-  /tiktokcdn[^/]*\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|eden|tos-)/i,
+  /tiktokcdn[^/]*\/.*(?:captcha|verify|puzzle|slide|whirl|rotate|security|secsdk|eden)/i,
   /rc[-_]?verification/i,
   /secsdk-captcha/i,
   /get_captcha|check_captcha|verify_captcha/i,
@@ -289,6 +290,8 @@ function shouldAbortRequest(request) {
   // 主文档/子框架/长连接绝不 abort（避免验证 iframe 或页面白屏）
   if (type === 'document' || type === 'websocket' || type === 'eventsource') return false;
   // 脚本/样式/接口请求不按 URL 关键字拦（avatar、icon、analytics 等会误伤站点 JS 分包和 API，导致页面白屏）
+  // fetch/xhr 拉视频分片（MSE 播放）同样要拦：只按明确的视频特征拦，不误伤普通接口
+  if ((type === 'xhr' || type === 'fetch') && /(?:\/video\/tos\/|mime_type=video|\.(?:mp4|m4s|webm|m4v)(?:\?|$))/i.test(url)) return true;
   if (['script', 'stylesheet', 'xhr', 'fetch', 'manifest', 'texttrack'].includes(type)) return false;
   if (BLOCK_RESOURCE_TYPES.has(type)) return true;
   if (isSvgLikeUrl(url)) return true;

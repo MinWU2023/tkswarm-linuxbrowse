@@ -115,7 +115,7 @@ function preferCatalogStat(domVal, catalogVal, opts = {}) {
   const d = Number(domVal) || 0;
   const hasCatalog = catalogVal != null && catalogVal !== '' && Number.isFinite(Number(catalogVal));
   const c = hasCatalog ? Math.max(0, Number(catalogVal) || 0) : 0;
-  if (opts.distrustDom && hasCatalog) return c;
+  if ((opts.distrustDom || opts.trustZero) && hasCatalog) return c;
   if (hasCatalog && c > 0) return c;
   return d;
 }
@@ -130,6 +130,16 @@ function looksLikeViewsLeak(views, likes, comments) {
   if (l === v && c === 0) return true;
   if (c === v && l === 0) return true;
   if (l === v && c > 0 && c === l) return true;
+  return false;
+}
+
+/** Studio DOM 常见赞/评对调：赞=0 且评为小正数 */
+function looksLikeLikesCommentsSwap(views, likes, comments) {
+  const v = Number(views) || 0;
+  const l = Number(likes) || 0;
+  const c = Number(comments) || 0;
+  if (v <= 0) return false;
+  if (l === 0 && c > 0 && c < v && c <= Math.max(50, v * 0.2)) return true;
   return false;
 }
 
@@ -150,6 +160,13 @@ function sanitizeContentMetrics(row) {
     comments,
     shares,
   };
+  if (looksLikeLikesCommentsSwap(out.views, out.likes, out.comments)) {
+    out.likes = comments;
+    out.comments = likes;
+    out._metricsSwapped = 'likes<->comments';
+    likes = out.likes;
+    comments = out.comments;
+  }
   // 评论 >= 3×播放 且 评论 > 点赞：对调播放/评论后更合理则对调
   if (comments > 0 && comments >= Math.max(views, 1) * 3 && comments > likes) {
     const swappedViews = comments;
@@ -448,8 +465,8 @@ async function activateTab(page, label, log) {
 }
 
 // ---------------------------------------------------------------- 时间区间
-// Studio Analytics 默认是 Last 7 days，必须逐个页签切到 Last 28 days，
-// 否则「28 天数据」永远是 7 天的口径。Studio Home 一年数据同理切 Last 365 days。
+// Studio Analytics / Home 默认常是 Last 7 days，必须切到目标天数并校验文案，
+// 否则「28 天数据」会静默写成 7 天口径。一年数据同理切 Last 365 days。
 const RANGE_TRIGGER_SRC = '^((last|past)\\s*\\d+\\s*days?|近\\s*\\d+\\s*天|过去\\s*\\d+\\s*天|yesterday|昨天|today|今天)$';
 
 function rangeDayTexts(days) {
@@ -464,6 +481,21 @@ function rangeDayTexts(days) {
     `${n} days`,
     `${n}天`,
   ];
+}
+
+/** 从区间文案解析天数（避免 /7/ 误匹配 "28"） */
+function parseRangeDays(label) {
+  const t = String(label || '').replace(/\s+/g, ' ').trim();
+  if (!t) return 0;
+  const m = t.match(/(?:last|past|近|过去)\s*(\d+)\s*(?:days?|天)/i)
+    || t.match(/(\d+)\s*(?:days?|天)/i);
+  return m ? Number(m[1]) || 0 : 0;
+}
+
+function rangeLabelMatchesDays(label, days) {
+  const n = Number(days) || 0;
+  if (!n) return false;
+  return parseRangeDays(label) === n;
 }
 
 /** 读当前区间文案（如 "Last 7 days"） */
@@ -513,90 +545,132 @@ async function openRangeMenu(page) {
   }, RANGE_TRIGGER_SRC).catch(() => false);
 }
 
-/** 在下拉里点 N 天 */
+/** 在下拉里点 N 天（优先点 listbox/menu 内选项，避免点到页面其它「28 days」文案） */
 async function pickDaysOption(page, days) {
   const n = Number(days) || 0;
   return page.evaluate((arg) => {
     const want = new Set(arg.targets);
-    const dayRe = new RegExp(`^[^0-9]{0,12}${arg.days}\\s*(days?|天)\\s*$`, 'i');
-    const sel = 'button, [role="option"], [role="menuitem"], li, div, span';
-    const nodes = [...document.querySelectorAll(sel)];
+    const dayRe = new RegExp(`^(last|past|近|过去)?\\s*${arg.days}\\s*(days?|天)\\s*$`, 'i');
     const clickIf = (el) => {
       const r = el.getBoundingClientRect();
       if (!r.width || !r.height) return false;
       el.click();
       return true;
     };
-    for (const el of nodes) {
-      const t = (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      if (!want.has(t)) continue;
-      const innerSame = [...el.children].some(
-        (c) => want.has((c.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase())
-      );
-      if (innerSame) continue;
-      if (clickIf(el)) return t;
-    }
-    for (const el of nodes) {
-      const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
-      if (!dayRe.test(t)) continue;
-      const innerSame = [...el.children].some(
-        (c) => dayRe.test((c.innerText || '').replace(/\s+/g, ' ').trim())
-      );
-      if (innerSame) continue;
-      if (clickIf(el)) return t.toLowerCase();
-    }
-    return '';
+    const tryNodes = (nodes) => {
+      for (const el of nodes) {
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!want.has(t)) continue;
+        const innerSame = [...el.children].some(
+          (c) => want.has((c.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase())
+        );
+        if (innerSame) continue;
+        if (clickIf(el)) return t;
+      }
+      for (const el of nodes) {
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (!dayRe.test(t)) continue;
+        const innerSame = [...el.children].some(
+          (c) => dayRe.test((c.innerText || '').replace(/\s+/g, ' ').trim())
+        );
+        if (innerSame) continue;
+        if (clickIf(el)) return t.toLowerCase();
+      }
+      return '';
+    };
+    const menuSel = [
+      '[role="listbox"] button, [role="listbox"] [role="option"]',
+      '[role="menu"] button, [role="menu"] [role="menuitem"]',
+      '[role="option"], [role="menuitem"]',
+      'li[role="option"], li[role="menuitem"]',
+    ].join(', ');
+    const menuNodes = [...document.querySelectorAll(menuSel)];
+    const fromMenu = tryNodes(menuNodes);
+    if (fromMenu) return fromMenu;
+    const sel = 'button, [role="option"], [role="menuitem"], li, div, span';
+    return tryNodes([...document.querySelectorAll(sel)]);
   }, { targets: rangeDayTexts(n), days: n }).catch(() => '');
 }
 
-/** 把当前页切到「最近 N 天」，返回切换后的区间文案 */
+/**
+ * 把当前页切到「最近 N 天」，返回切换后的区间文案。
+ * 必须校验文案天数 === N；切失败时不假装已是 N 天。
+ */
 async function ensureLastNDays(page, log, days) {
   const n = Number(days) || 0;
-  const dayRe = new RegExp(String(n));
   const before = await readRangeLabel(page);
-  if (before && dayRe.test(before)) {
+  if (rangeLabelMatchesDays(before, n)) {
     log(`时间范围：已是「${before}」，无需切换`);
     return before;
   }
-  const hasSelect = await page.evaluate((dn) => {
-    const re = new RegExp(String(dn));
-    for (const s of document.querySelectorAll('select')) {
-      if ([...s.options].some((o) => re.test(o.textContent || ''))) return true;
-    }
-    return false;
-  }, n).catch(() => false);
-  if (hasSelect) {
-    await page.evaluate((dn) => {
-      const re = new RegExp(String(dn));
+
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const hasSelect = await page.evaluate((dn) => {
       for (const s of document.querySelectorAll('select')) {
-        const opt = [...s.options].find((o) => re.test(o.textContent || ''));
-        if (opt) {
-          s.value = opt.value;
-          s.dispatchEvent(new Event('change', { bubbles: true }));
-          return;
+        for (const o of s.options) {
+          const t = String(o.textContent || '');
+          const m = t.match(/(?:last|past|近|过去)?\s*(\d+)\s*(?:days?|天)/i);
+          if (m && Number(m[1]) === dn) return true;
         }
       }
-    }, n).catch(() => {});
-    await page.waitForTimeout(2800);
-    const after = await readRangeLabel(page);
-    log(`时间范围：${before || '默认'} → ${after || '未知'}（下拉框 → ${n} 天）`);
-    return after || before;
-  }
-  if (!await openRangeMenu(page)) {
-    log(`时间范围：找不到选择器，保持默认「${before || '未知'}」——本页数据口径可能不是 ${n} 天`);
-    return before;
-  }
-  await page.waitForTimeout(1200);
-  const picked = await pickDaysOption(page, n);
-  if (!picked) {
-    log(`时间范围：下拉里没有 ${n} 天选项，保持默认「${before || '未知'}」`);
+      return false;
+    }, n).catch(() => false);
+    if (hasSelect) {
+      await page.evaluate((dn) => {
+        for (const s of document.querySelectorAll('select')) {
+          const opt = [...s.options].find((o) => {
+            const t = String(o.textContent || '');
+            const m = t.match(/(?:last|past|近|过去)?\s*(\d+)\s*(?:days?|天)/i);
+            return m && Number(m[1]) === dn;
+          });
+          if (opt) {
+            s.value = opt.value;
+            s.dispatchEvent(new Event('change', { bubbles: true }));
+            return;
+          }
+        }
+      }, n).catch(() => {});
+      await page.waitForTimeout(2800);
+      const afterSel = await readRangeLabel(page);
+      if (rangeLabelMatchesDays(afterSel, n)) {
+        log(`时间范围：${before || '默认'} → ${afterSel}（下拉框 → ${n} 天）`);
+        return afterSel;
+      }
+      log(`时间范围：下拉框切换后仍是「${afterSel || '未知'}」（第 ${attempt}/${maxAttempts} 次）`);
+      continue;
+    }
+
+    if (!await openRangeMenu(page)) {
+      log(`时间范围：找不到选择器（第 ${attempt}/${maxAttempts} 次），当前「${before || '未知'}」`);
+      await page.waitForTimeout(800);
+      continue;
+    }
+    await page.waitForTimeout(1000);
+    const picked = await pickDaysOption(page, n);
+    if (!picked) {
+      log(`时间范围：下拉里没有 ${n} 天选项（第 ${attempt}/${maxAttempts} 次）`);
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(600);
+      continue;
+    }
+    let after = '';
+    for (let w = 0; w < 6; w += 1) {
+      await page.waitForTimeout(900);
+      after = await readRangeLabel(page);
+      if (rangeLabelMatchesDays(after, n)) break;
+    }
+    log(`时间范围：${before || '默认'} → ${after || '未知'}（点了「${picked}」，第 ${attempt}/${maxAttempts} 次）`);
+    if (rangeLabelMatchesDays(after, n)) return after;
     await page.keyboard.press('Escape').catch(() => {});
-    return before;
   }
-  await page.waitForTimeout(3000);
-  const after = await readRangeLabel(page);
-  log(`时间范围：${before || '默认'} → ${after || '未知'}（点了「${picked}」）`);
-  return after || picked;
+
+  const finalLabel = await readRangeLabel(page);
+  log(
+    `时间范围：未能切到 ${n} 天，当前「${finalLabel || before || '未知'}」`
+    + `——本页数据不能当 ${n} 天用`
+  );
+  return finalLabel || before || '';
 }
 
 async function ensureLast28Days(page, log) {
@@ -613,7 +687,112 @@ function emptyYearPeriod() {
     estRewards: 0,
     range: '',
     pageUrl: '',
+    rangeOk: false,
   };
+}
+
+/**
+ * 只在「Key metrics / 关键指标」区块内按标签读六张卡。
+ * 避免整页 scrapeCards 把其它模块的数字误当成点赞。
+ */
+async function scrapeKeyMetricsPrecise(page) {
+  return page.evaluate(() => {
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    const labelDefs = [
+      { key: 'videoViews', names: ['video views', '视频播放', '播放量'] },
+      { key: 'profileViews', names: ['profile views', '主页浏览', 'profile view'] },
+      { key: 'likes', names: ['likes', '点赞'] },
+      { key: 'comments', names: ['comments', '评论'] },
+      { key: 'shares', names: ['shares', '分享', '转发'] },
+      { key: 'estRewards', names: ['est. rewards', 'estimated rewards', 'est rewards', '预估收益'] },
+    ];
+    const isPrimaryNum = (s) => {
+      const t = norm(s);
+      if (!t || t === '--' || t === '—' || t === '-') return false;
+      if (/^[+-]/.test(t)) return false;
+      if (/%\s*$/.test(t)) return false;
+      return /^[$€£¥]?\s*[0-9][0-9,.\s]*\s*[KMB]?$/i.test(t);
+    };
+    const parseNum = (s) => {
+      const t = norm(s).replace(/,/g, '').toUpperCase();
+      const m = t.match(/^[$€£¥]?\s*([0-9]*\.?[0-9]+)\s*([KMB])?$/);
+      if (!m) return 0;
+      const mult = { K: 1e3, M: 1e6, B: 1e9 }[m[2]] || 1;
+      return Math.round(Number(m[1]) * mult * 10000) / 10000;
+    };
+    const nameSet = (names) => names.map((n) => n.toLowerCase());
+
+    let scope = document.body;
+    const heads = [...document.querySelectorAll('h1,h2,h3,h4,div,span,p')];
+    for (const el of heads) {
+      const t = norm(el.innerText);
+      if (!/^(key metrics|关键指标)$/i.test(t)) continue;
+      if (t.length > 24) continue;
+      let root = el.parentElement;
+      for (let i = 0; i < 6 && root; i += 1) {
+        const txt = norm(root.innerText || '');
+        if (/video views|profile views|点赞|主页浏览/i.test(txt) && txt.length < 2500) {
+          scope = root;
+          break;
+        }
+        root = root.parentElement;
+      }
+      break;
+    }
+
+    const out = {
+      videoViews: 0,
+      profileViews: 0,
+      likes: 0,
+      comments: 0,
+      shares: 0,
+      estRewards: 0,
+      found: 0,
+    };
+    const nodes = [...scope.querySelectorAll('div, span, p, dt, h3, h4, label, button')];
+    for (const def of labelDefs) {
+      const names = nameSet(def.names);
+      let best = null;
+      for (const el of nodes) {
+        const raw = norm(el.innerText);
+        if (!raw || raw.length > 48) continue;
+        const low = raw.toLowerCase();
+        if (!names.includes(low)) continue;
+        const childSame = [...el.children].some((c) => names.includes(norm(c.innerText).toLowerCase()));
+        if (childSame) continue;
+        let card = el;
+        for (let i = 0; i < 6 && card.parentElement; i += 1) {
+          const p = card.parentElement;
+          const lines = norm(p.innerText).split('\n').map(norm).filter(Boolean);
+          if (lines.length > 12) break;
+          card = p;
+          if (lines.length >= 2 && lines.some(isPrimaryNum)) break;
+        }
+        const lines = norm(card.innerText).split('\n').map(norm).filter(Boolean);
+        let numLine = '';
+        const labelIdx = lines.findIndex((ln) => names.includes(ln.toLowerCase()));
+        const start = labelIdx >= 0 ? labelIdx + 1 : 0;
+        for (let i = start; i < lines.length; i += 1) {
+          if (isPrimaryNum(lines[i])) {
+            numLine = lines[i];
+            break;
+          }
+          if (i > start && labelDefs.some((d) => nameSet(d.names).includes(lines[i].toLowerCase()))) break;
+        }
+        if (!numLine) continue;
+        const r = el.getBoundingClientRect();
+        const score = Math.max(1, r.width * r.height);
+        if (!best || score < best.score) {
+          best = { value: parseNum(numLine), score };
+        }
+      }
+      if (best) {
+        out[def.key] = best.value;
+        out.found += 1;
+      }
+    }
+    return out;
+  }).catch(() => null);
 }
 
 /**
@@ -671,25 +850,63 @@ async function scrapeStudioHomeKeyMetrics(page, log, days = 28, opts = {}) {
 
   const range = await ensureLastNDays(page, (m) => log(`Studio Home ${m}`), n);
   out.range = range || '';
-  await page.waitForTimeout(1800);
+  out.rangeOk = rangeLabelMatchesDays(range, n);
+  if (!out.rangeOk) {
+    log(`Studio Home：区间未确认到 ${n} 天（当前=${range || '未知'}），不采信本页 Key metrics`);
+    return out;
+  }
+  await page.waitForTimeout(2200);
+
+  const precise = await scrapeKeyMetricsPrecise(page);
+  if (precise && precise.found >= 2) {
+    out.videoViews = Number(precise.videoViews) || 0;
+    out.profileViews = Number(precise.profileViews) || 0;
+    out.likes = Number(precise.likes) || 0;
+    out.comments = Number(precise.comments) || 0;
+    out.shares = Number(precise.shares) || 0;
+    out.estRewards = Number(precise.estRewards) || 0;
+    if (out.likes > 0 && out.likes === out.profileViews) {
+      const cards = await scrapeCards(page);
+      const pairs = await scrapeTextPairs(page);
+      const metrics = normalizeMetrics(cards, pairs);
+      const likeHit = findMetric(metrics, ['likes', '点赞'], { exactOnly: true });
+      if (likeHit && likeHit.value !== out.profileViews) {
+        log(`Studio Home：点赞疑似串到主页浏览(${out.likes})，改用精确标签值=${likeHit.value}`);
+        out.likes = likeHit.value;
+      } else if (likeHit && likeHit.value === out.profileViews) {
+        log(`Studio Home：点赞仍等于主页浏览(${out.likes})，置 0 避免脏数据入库`);
+        out.likes = 0;
+      }
+    }
+    log(
+      `Studio Home Key metrics（${n} 天）：范围=${out.range || '未知'} `
+      + `播放=${out.videoViews} 主页=${out.profileViews} 赞=${out.likes} `
+      + `评=${out.comments} 转=${out.shares} 收益=${out.estRewards}（精确卡=${precise.found}）`
+    );
+    return out;
+  }
 
   const cards = await scrapeCards(page);
   const pairs = await scrapeTextPairs(page);
   const metrics = normalizeMetrics(cards, pairs);
-  const pick = (names) => {
-    const hit = findMetric(metrics, names);
+  const pick = (names, opts) => {
+    const hit = findMetric(metrics, names, opts);
     return hit ? hit.value : 0;
   };
   out.videoViews = pick(['video views', '视频播放', '播放量']);
   out.profileViews = pick(['profile views', '主页浏览', 'profile view']);
-  out.likes = pick(['likes', '点赞']);
-  out.comments = pick(['comments', '评论']);
-  out.shares = pick(['shares', '分享', '转发']);
+  out.likes = pick(['likes', '点赞'], { exactOnly: true });
+  out.comments = pick(['comments', '评论'], { exactOnly: true });
+  out.shares = pick(['shares', '分享', '转发'], { exactOnly: true });
   out.estRewards = pick(['est. rewards', 'estimated rewards', '预估收益', 'rewards']);
+  if (out.likes > 0 && out.likes === out.profileViews) {
+    log(`Studio Home：兜底解析点赞=${out.likes} 与主页浏览相同，置 0`);
+    out.likes = 0;
+  }
   log(
     `Studio Home Key metrics（${n} 天）：范围=${out.range || '未知'} `
     + `播放=${out.videoViews} 主页=${out.profileViews} 赞=${out.likes} `
-    + `评=${out.comments} 转=${out.shares} 收益=${out.estRewards}（指标=${metrics.length}）`
+    + `评=${out.comments} 转=${out.shares} 收益=${out.estRewards}（指标=${metrics.length}，精确卡失败）`
   );
   return out;
 }
@@ -792,14 +1009,18 @@ function normalizeMetrics(cards, pairs) {
   return out;
 }
 
-function findMetric(metrics, names) {
+function findMetric(metrics, names, opts = {}) {
+  const exactOnly = !!(opts && opts.exactOnly);
   for (const n of names) {
     const low = n.toLowerCase();
     const hit = metrics.find((m) => m.label.trim().toLowerCase() === low);
     if (hit) return hit;
   }
+  if (exactOnly) return null;
   for (const n of names) {
     const low = n.toLowerCase();
+    // 短词（如 likes/views）禁止 includes，避免串到 profile views 等
+    if (low.length <= 5) continue;
     const hit = metrics.find((m) => m.label.trim().toLowerCase().includes(low));
     if (hit) return hit;
   }
@@ -2102,9 +2323,9 @@ async function pullStudioStats(accountId, options = {}) {
     const analyticsPeriod = {
       videoViews: m(['video views', '视频播放', '播放量']),
       profileViews: m(['profile views', '主页浏览', 'profile view']),
-      likes: m(['likes', '点赞']),
-      comments: m(['comments', '评论']),
-      shares: m(['shares', '分享', '转发']),
+      likes: findMetric(overviewTab.metrics, ['likes', '点赞'], { exactOnly: true })?.value || 0,
+      comments: findMetric(overviewTab.metrics, ['comments', '评论'], { exactOnly: true })?.value || 0,
+      shares: findMetric(overviewTab.metrics, ['shares', '分享', '转发'], { exactOnly: true })?.value || 0,
       estRewards: m(['est. rewards', 'estimated rewards', '预估收益', 'rewards']),
     };
 
@@ -2115,11 +2336,18 @@ async function pullStudioStats(accountId, options = {}) {
       log(`Studio Home 28 天数据采集失败：${e.message || e}`);
       home28 = emptyYearPeriod();
     }
+    const home28Ok = !!(home28 && home28.rangeOk);
+    if (!home28Ok) {
+      log(
+        `Studio Home 28 天不可用（range=${home28.range || '未知'} rangeOk=false），`
+        + `28 天汇总改用 Analytics Overview 兜底`
+      );
+    }
     const pickPeriod = (homeVal, analyticsVal) => {
       const h = Number(homeVal);
-      if (Number.isFinite(h) && h > 0) return h;
+      if (home28Ok && Number.isFinite(h) && h > 0) return h;
       const a = Number(analyticsVal);
-      return Number.isFinite(a) && a > 0 ? a : (Number.isFinite(h) ? h : 0);
+      return Number.isFinite(a) && a > 0 ? a : (home28Ok && Number.isFinite(h) ? h : 0);
     };
     const period = {
       videoViews: pickPeriod(home28.videoViews, analyticsPeriod.videoViews),
@@ -2128,7 +2356,8 @@ async function pullStudioStats(accountId, options = {}) {
       comments: pickPeriod(home28.comments, analyticsPeriod.comments),
       shares: pickPeriod(home28.shares, analyticsPeriod.shares),
       estRewards: pickPeriod(home28.estRewards, analyticsPeriod.estRewards),
-      source: (Number(home28.videoViews) > 0 || Number(home28.likes) > 0 || Number(home28.profileViews) > 0)
+      source: home28Ok
+        && (Number(home28.videoViews) > 0 || Number(home28.likes) > 0 || Number(home28.profileViews) > 0)
         ? `studio_home:${home28.range || '28d'}`
         : 'analytics_overview_fallback',
     };

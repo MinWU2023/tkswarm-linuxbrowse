@@ -6,9 +6,10 @@ const { connectAccount, closeConnection } = require('./tiktok-actions');
 const {
   scrapeVideoComments,
   scrapeVideoLikeCount,
+  scrapeVideoCommentCount,
   isOopsOrBlockedPage,
   extractVideoId,
-  collectProfileVideoViewsMap,
+  collectProfileVideoStatsMap,
   isVideoBrowseOpen,
   isRecoverableBrowserError,
 } = require('./ai-lead/user-pipeline');
@@ -40,24 +41,30 @@ const PICK_FN = pickLabeledMetricText.toString();
 async function scrapeVideoViews(page) {
   const text = await page.evaluate(({ pickFnSource }) => {
     const pickLabeledMetricText = eval(`(${pickFnSource})`);
+    // 仅在浏览层内取播放量，避免整页 querySelector 命中主页网格第一张角标
+    const browseRoot = document.querySelector(
+      '[data-e2e="browse-video"], [class*="DivBrowserModeContainer"], [class*="DivVideoContainer"], [class*="DivPlayerContainer"]'
+    );
+    const root = browseRoot || document;
     const pick = (sels) => {
       for (const s of sels) {
-        const el = document.querySelector(s);
+        const el = root.querySelector?.(s);
         const t = (el?.textContent || el?.getAttribute?.('title') || '').trim();
         if (t) return t;
       }
       return '';
     };
+    // 不使用 browse-video-desc strong / 全局 video-views（易串到网格或文案数字）
     let t = pick([
+      '[data-e2e="detail-video-views"]',
+      '[data-e2e="browse-play-count"]',
       '[data-e2e="video-views"]',
       'strong[data-e2e="video-views"]',
       'strong.video-count',
-      '[data-e2e="browse-video-desc"] strong',
-      '[data-e2e="detail-video-views"]',
-      '[data-e2e="browse-play-count"]',
     ]);
     if (t) return t;
-    const blob = (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 3000);
+    if (!browseRoot) return '';
+    const blob = (browseRoot.innerText || '').replace(/\s+/g, ' ').slice(0, 2000);
     return pickLabeledMetricText(blob, 'views?|plays?|播放|观看') || '';
   }, { pickFnSource: PICK_FN }).catch(() => '');
   return parseMetricCount(text);
@@ -95,9 +102,10 @@ function resolveVideoUrl(video, accountUsername) {
   const vid = String(video.videoId || video.video_id || extractVideoId(raw) || '').trim();
   const uname = String(accountUsername || '').replace(/^@+/, '').trim();
   // TikTok 短链 /video/{id} 常跳到 /404?fromUrl=…，有用户名时一律用 @user/video/id
-  if (vid && uname) return `https://www.tiktok.com/@${encodeURIComponent(uname)}/video/${vid}`;
-  if (/\/@[^/?#]+\/video\/\d+/i.test(raw)) return raw.split('?')[0];
-  if (vid) return `https://www.tiktok.com/video/${vid}`;
+  const seg = /\/photo\//i.test(raw) ? 'photo' : 'video';
+  if (vid && uname) return `https://www.tiktok.com/@${encodeURIComponent(uname)}/${seg}/${vid}`;
+  if (/\/@[^/?#]+\/(?:video|photo)\/\d+/i.test(raw)) return raw.split('?')[0];
+  if (vid) return `https://www.tiktok.com/${seg}/${vid}`;
   return raw;
 }
 
@@ -106,7 +114,7 @@ function resolveCreatorUsername(videos, accountUsername) {
   if (fromAccount) return fromAccount;
   for (const video of videos || []) {
     const url = resolveVideoUrl(video, '');
-    const m = String(url || '').match(/\/@([^/?#]+)\/video\//);
+    const m = String(url || '').match(/\/@([^/?#]+)\/(?:video|photo)\//);
     if (m) {
       try { return decodeURIComponent(m[1]); } catch { return m[1]; }
     }
@@ -152,13 +160,13 @@ async function runPullComments(accountId, payload = {}) {
   const targetVideoIds = videos
     .map((v) => extractVideoId(resolveVideoUrl(v, accountUsername)))
     .filter(Boolean);
-  let profileViewsMap = new Map();
+  let profileStatsMap = new Map();
   if (accountUsername && targetVideoIds.length) {
     try {
-      profileViewsMap = await collectProfileVideoViewsMap(connection, accountUsername, targetVideoIds);
-      const withViews = targetVideoIds.filter((id) => (profileViewsMap.get(id) || 0) > 0).length;
+      profileStatsMap = await collectProfileVideoStatsMap(connection, accountUsername, targetVideoIds);
+      const withViews = targetVideoIds.filter((id) => (profileStatsMap.get(id)?.views || 0) > 0).length;
       liveLog(
-        `拉取视频数据 主页列表播放量 @${accountUsername} 已解析 ${withViews}/${targetVideoIds.length}（网格+API）`,
+        `拉取视频数据 主页列表互动量 @${accountUsername} 已解析 ${withViews}/${targetVideoIds.length}（网格+API）`,
         withViews > 0 ? 'info' : 'warn',
         { accountId, pullTaskId, matched: withViews, total: targetVideoIds.length, accountUsername }
       );
@@ -166,18 +174,18 @@ async function runPullComments(accountId, payload = {}) {
       if (isRecoverableBrowserError(e)) {
         try {
           connection = await reconnectPullBrowser(accountId, connection, e.message || e);
-          profileViewsMap = await collectProfileVideoViewsMap(connection, accountUsername, targetVideoIds);
-          const withViews = targetVideoIds.filter((id) => (profileViewsMap.get(id) || 0) > 0).length;
+          profileStatsMap = await collectProfileVideoStatsMap(connection, accountUsername, targetVideoIds);
+          const withViews = targetVideoIds.filter((id) => (profileStatsMap.get(id)?.views || 0) > 0).length;
           liveLog(
-            `拉取视频数据 主页列表播放量 @${accountUsername} 重开后已解析 ${withViews}/${targetVideoIds.length}`,
+            `拉取视频数据 主页列表互动量 @${accountUsername} 重开后已解析 ${withViews}/${targetVideoIds.length}`,
             withViews > 0 ? 'info' : 'warn',
             { accountId, pullTaskId, matched: withViews, total: targetVideoIds.length, accountUsername }
           );
         } catch (e2) {
-          liveLog(`拉取视频数据 主页列表播放量解析失败: ${e2.message || e2}`, 'warn', { accountId, pullTaskId });
+          liveLog(`拉取视频数据 主页列表互动量解析失败: ${e2.message || e2}`, 'warn', { accountId, pullTaskId });
         }
       } else {
-        liveLog(`拉取视频数据 主页列表播放量解析失败: ${e.message || e}`, 'warn', { accountId, pullTaskId });
+        liveLog(`拉取视频数据 主页列表互动量解析失败: ${e.message || e}`, 'warn', { accountId, pullTaskId });
       }
     }
   }
@@ -242,8 +250,12 @@ async function runPullComments(accountId, payload = {}) {
           if (detailOpen && !comments.length && !likesEarly && !scraped?.panelOpen) {
             throw new Error('视频详情疑似未真正打开（仍在主页，评论栏不可用）');
           }
-          const likes = Number(scraped?.likes || 0) || await scrapeVideoLikeCount(connection.page);
-          let views = Number(profileViewsMap.get(vid) || scraped?.views || 0);
+          const listEng = profileStatsMap.get(vid) || {};
+          // 点赞：详情角标优先，列表 API diggCount 兜底
+          let likes = Number(scraped?.likes || 0) || await scrapeVideoLikeCount(connection.page);
+          if (!likes && Number(listEng.likes) > 0) likes = Number(listEng.likes);
+          // 播放：主页列表 / item_list playCount 优先，详情页仅在浏览层内兜底
+          let views = Number(listEng.views || scraped?.views || 0);
           let viewsSource = views > 0 ? 'list' : '';
           if (!views) {
             views = await scrapeVideoViews(connection.page);
@@ -252,8 +264,16 @@ async function runPullComments(accountId, payload = {}) {
           if (viewsSource === 'detail') {
             liveLog(`拉取视频数据 素材#${materialId} 列表未解析到播放量，已回退详情页`, 'warn', { accountId, pullTaskId, materialId });
           }
+          // 评论数：平台角标 / API commentCount，绝不用 comments.length
+          let commentCount = Number(scraped?.commentCount || 0);
+          if (!commentCount) {
+            commentCount = await scrapeVideoCommentCount(connection.page);
+          }
+          if (!commentCount && Number(listEng.comments) > 0) {
+            commentCount = Number(listEng.comments);
+          }
           const publishedRaw = await scrapePublishedAt(connection.page);
-          return { scraped, comments, likes, views, viewsSource, publishedRaw };
+          return { scraped, comments, likes, views, viewsSource, commentCount, publishedRaw };
         };
 
         let pulled;
@@ -270,6 +290,7 @@ async function runPullComments(accountId, payload = {}) {
             materialId,
             views: pulled.views,
             likes: pulled.likes,
+            commentCount: pulled.commentCount,
             publishedAt: pulled.publishedRaw,
             comments: pulled.comments,
           });
@@ -280,11 +301,12 @@ async function runPullComments(accountId, payload = {}) {
           status: 'ok',
           views: pulled.views,
           likes: pulled.likes,
-          comments: pulled.comments.length,
+          comments: pulled.commentCount,
+          commentRows: pulled.comments.length,
           publishedAt: pulled.publishedRaw,
         });
         liveLog(
-          `拉取视频数据成功 素材#${materialId} 播放=${pulled.views}${pulled.viewsSource ? `(${pulled.viewsSource === 'list' ? '列表' : '详情'})` : ''} 赞=${pulled.likes} 评论=${pulled.comments.length}`,
+          `拉取视频数据成功 素材#${materialId} 播放=${pulled.views}${pulled.viewsSource ? `(${pulled.viewsSource === 'list' ? '列表' : '详情'})` : ''} 赞=${pulled.likes} 评论=${pulled.commentCount}（入库评论行=${pulled.comments.length}）`,
           'info',
           { accountId, pullTaskId, materialId, viewsSource: pulled.viewsSource || 'none' }
         );

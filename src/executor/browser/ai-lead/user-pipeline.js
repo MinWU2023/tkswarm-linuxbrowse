@@ -574,11 +574,59 @@ async function scrapeProfileStats(page, username) {
   return stats;
 }
 
+/** 从 item_list / SSR item 提取播放·点赞·评论（优先 stats，再 statsV2）。 */
+function pickItemEngagement(item) {
+  const stats = item?.stats || {};
+  const statsV2 = item?.statsV2 || {};
+  const statistics = item?.statistics || {};
+  const views = Number(
+    stats.playCount
+    ?? stats.play_count
+    ?? statsV2.playCount
+    ?? statsV2.play_count
+    ?? statistics.play_count
+    ?? statistics.playCount
+    ?? 0
+  ) || 0;
+  const likes = Number(
+    stats.diggCount
+    ?? stats.digg_count
+    ?? statsV2.diggCount
+    ?? statsV2.digg_count
+    ?? statistics.digg_count
+    ?? statistics.diggCount
+    ?? stats.likeCount
+    ?? stats.like_count
+    ?? 0
+  ) || 0;
+  const comments = Number(
+    stats.commentCount
+    ?? stats.comment_count
+    ?? statsV2.commentCount
+    ?? statsV2.comment_count
+    ?? statistics.comment_count
+    ?? statistics.commentCount
+    ?? 0
+  ) || 0;
+  return { views, likes, comments };
+}
+
+function mergeEngagement(prev, next) {
+  const p = prev && typeof prev === 'object' ? prev : { views: 0, likes: 0, comments: 0 };
+  const n = next && typeof next === 'object' ? next : { views: 0, likes: 0, comments: 0 };
+  return {
+    views: Number(n.views) > 0 ? Number(n.views) : Number(p.views) || 0,
+    likes: Number(n.likes) > 0 ? Number(n.likes) : Number(p.likes) || 0,
+    comments: Number(n.comments) > 0 ? Number(n.comments) : Number(p.comments) || 0,
+  };
+}
+
 /**
- * 监听 TikTok 主页 post/item_list API，提取 playCount（比 DOM 更稳）。
+ * 监听 TikTok 主页 post/item_list API，提取 play/digg/comment（比 DOM 更稳）。
  */
 function attachProfilePostListCapture(page) {
   const map = new Map();
+  const statsMap = new Map();
   const onResponse = async (res) => {
     try {
       const url = res.url();
@@ -598,14 +646,9 @@ function attachProfilePostListCapture(page) {
         for (const item of list) {
           const id = String(item?.id || item?.aweme_id || item?.awemeId || '').trim();
           if (!id) continue;
-          const play = Number(
-            item?.stats?.playCount
-            ?? item?.stats?.play_count
-            ?? item?.statistics?.play_count
-            ?? item?.statistics?.playCount
-            ?? 0
-          );
-          if (play > 0) map.set(id, play);
+          const eng = pickItemEngagement(item);
+          statsMap.set(id, mergeEngagement(statsMap.get(id), eng));
+          if (eng.views > 0) map.set(id, eng.views);
         }
       }
     } catch {
@@ -615,6 +658,7 @@ function attachProfilePostListCapture(page) {
   page.on('response', onResponse);
   return {
     map,
+    statsMap,
     detach: () => page.off('response', onResponse),
   };
 }
@@ -693,7 +737,11 @@ async function collectProfileVideoRows(page, minViews) {
       const img = a.querySelector('img') || scope?.querySelector?.('img');
       const cover = img?.getAttribute('src') || '';
       const title = (a.getAttribute('title') || img?.getAttribute('alt') || a.textContent || '').trim().slice(0, 120);
-      const viewsText = extractViewsText(scope || a);
+      // 作用域必须是单卡片：避免父级网格把第一张的播放量套到其它视频
+      let card = scope || a;
+      const linksInScope = card.querySelectorAll?.('a[href*="/video/"]') || [];
+      if (linksInScope.length > 1) card = a;
+      const viewsText = extractViewsText(card);
       const views = parseMetricCount(viewsText);
       if (views >= minView) {
         out.push({
@@ -714,7 +762,9 @@ async function collectProfileVideoRows(page, minViews) {
         let scope = a.closest('[data-e2e="user-post-item"]');
         if (!scope) {
           for (let p = a.parentElement, i = 0; p && i < 6; i += 1, p = p.parentElement) {
-            if (p.querySelector?.('[data-e2e="video-views"]') || p.querySelector?.('strong')) {
+            const links = p.querySelectorAll?.('a[href*="/video/"]') || [];
+            // 仅接受「只含当前一条视频链接」的父节点，防止列表容器串号
+            if (links.length === 1 && (p.querySelector?.('[data-e2e="video-views"]') || p.querySelector?.('strong'))) {
               scope = p;
               break;
             }
@@ -777,28 +827,42 @@ async function scrapeProfileVideos(page, creatorUsername, minViews) {
 }
 
 /**
- * 用浏览器登录态请求 /api/post/item_list/，读取 stats.playCount（最可靠）。
- * @returns {{ map: Map<string, number>, secUid: string }}
+ * 用浏览器登录态请求 /api/post/item_list/，读取 play/digg/comment（最可靠）。
+ * @returns {{ map: Map<string, number>, statsMap: Map<string, {views:number,likes:number,comments:number}>, secUid: string }}
  */
 async function fetchProfileVideoViewsViaPageApi(page, targetVideoIds = []) {
   const targets = (targetVideoIds || []).map((x) => String(x || '').trim()).filter(Boolean);
   const raw = await page.evaluate(async ({ targetIds }) => {
     const out = {};
+    const pickEng = (item) => {
+      const stats = item?.stats || {};
+      const statsV2 = item?.statsV2 || {};
+      const statistics = item?.statistics || {};
+      return {
+        views: Number(
+          stats.playCount ?? stats.play_count ?? statsV2.playCount ?? statsV2.play_count
+          ?? statistics.play_count ?? statistics.playCount ?? 0
+        ) || 0,
+        likes: Number(
+          stats.diggCount ?? stats.digg_count ?? statsV2.diggCount ?? statsV2.digg_count
+          ?? statistics.digg_count ?? statistics.diggCount ?? stats.likeCount ?? 0
+        ) || 0,
+        comments: Number(
+          stats.commentCount ?? stats.comment_count ?? statsV2.commentCount ?? statsV2.comment_count
+          ?? statistics.comment_count ?? statistics.commentCount ?? 0
+        ) || 0,
+      };
+    };
+    const mergeEng = (prev, next) => ({
+      views: next.views > 0 ? next.views : (prev?.views || 0),
+      likes: next.likes > 0 ? next.likes : (prev?.likes || 0),
+      comments: next.comments > 0 ? next.comments : (prev?.comments || 0),
+    });
     const markFromList = (list) => {
       for (const item of list || []) {
         const id = String(item?.id || item?.aweme_id || item?.awemeId || '').trim();
         if (!id) continue;
-        const play = Number(
-          item?.stats?.playCount
-          ?? item?.stats?.play_count
-          ?? item?.statsV2?.playCount
-          ?? item?.statsV2?.play_count
-          ?? item?.statistics?.play_count
-          ?? item?.statistics?.playCount
-          ?? 0
-        );
-        if (play > 0) out[id] = play;
-        else if (out[id] == null) out[id] = 0;
+        out[id] = mergeEng(out[id], pickEng(item));
       }
     };
     const parseSecUid = () => {
@@ -862,16 +926,22 @@ async function fetchProfileVideoViewsViaPageApi(page, targetVideoIds = []) {
       const next = Number(json?.cursor ?? json?.maxCursor ?? NaN);
       if (Number.isFinite(next) && next !== cursor) cursor = next;
       else cursor += 35;
-      if (targetIds.length && targetIds.every((id) => (out[id] || 0) > 0)) break;
+      if (targetIds.length && targetIds.every((id) => (out[id]?.views || 0) > 0)) break;
     }
     return { items: out, secUid };
   }, { targetIds: targets }).catch(() => ({ items: {}, secUid: '' }));
 
   const map = new Map();
-  for (const [id, play] of Object.entries(raw?.items || {})) {
-    if (id) map.set(id, Number(play) || 0);
+  const statsMap = new Map();
+  for (const [id, eng] of Object.entries(raw?.items || {})) {
+    if (!id) continue;
+    const views = Number(eng?.views) || 0;
+    const likes = Number(eng?.likes) || 0;
+    const comments = Number(eng?.comments) || 0;
+    statsMap.set(id, { views, likes, comments });
+    map.set(id, views);
   }
-  return { map, secUid: String(raw?.secUid || '') };
+  return { map, statsMap, secUid: String(raw?.secUid || '') };
 }
 
 /**
@@ -886,17 +956,17 @@ async function readViewsFromProfileGrid(page, videoId) {
 }
 
 /**
- * 打开作者主页，滚动视频网格，批量解析目标 videoId 的播放量。
+ * 打开作者主页，滚动视频网格，批量解析目标 videoId 的播放/点赞/评论。
  * @param {string[]} targetVideoIds
- * @returns {Map<string, number>}
+ * @returns {Map<string, {views:number,likes:number,comments:number}>}
  */
-async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVideoIds = []) {
+async function collectProfileVideoStatsMap(pageOrConn, creatorUsername, targetVideoIds = []) {
   const connection = toNavConnection(pageOrConn) || { page: pageOrConn };
   let page = await ensureLivePage(connection).catch(() => connection.page);
   const uname = String(creatorUsername || '').replace(/^@+/, '').trim();
   const targets = new Set((targetVideoIds || []).map((x) => String(x || '').trim()).filter(Boolean));
-  const map = new Map();
-  if (!uname) return map;
+  const statsMap = new Map();
+  if (!uname) return statsMap;
 
   const capture = attachProfilePostListCapture(page);
   try {
@@ -905,7 +975,7 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
     const onProfile = new RegExp(`/@${uname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(cur);
     if (!onProfile || /\/video\//i.test(cur) || await isOopsOrBlockedPage(page)) {
       page = await safeGoto(connection, profileUrl, {
-        label: `主页列表播放量 @${uname}`,
+        label: `主页列表互动量 @${uname}`,
         beforeMs: 2500,
         afterMs: 5000,
       });
@@ -916,17 +986,15 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
     await waitForProfileVideoGrid(page);
 
     const apiFetch = await fetchProfileVideoViewsViaPageApi(page, [...targets]);
-    for (const [id, play] of apiFetch.map.entries()) {
-      const prev = map.get(id);
-      if (play > 0 && (prev == null || prev === 0)) map.set(id, play);
-      else if (prev == null) map.set(id, play);
+    for (const [id, eng] of (apiFetch.statsMap || new Map()).entries()) {
+      statsMap.set(id, mergeEngagement(statsMap.get(id), eng));
     }
     if (apiFetch.secUid) {
       const apiHits = targets.size
-        ? [...targets].filter((id) => (map.get(id) || 0) > 0).length
-        : apiFetch.map.size;
+        ? [...targets].filter((id) => (statsMap.get(id)?.views || 0) > 0).length
+        : apiFetch.statsMap?.size || 0;
       liveLog(
-        `主页 item_list API @${uname} secUid OK，API直取播放量 ${apiHits}${targets.size ? `/${targets.size}` : ''}（不足时回退网格 DOM）`,
+        `主页 item_list API @${uname} secUid OK，API直取互动 ${apiHits}${targets.size ? `/${targets.size}` : ''}（不足时回退网格 DOM 播放量）`,
         'info',
         { accountUsername: uname, apiHits, targetCount: targets.size }
       );
@@ -935,9 +1003,13 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
     }
 
     const mergeApi = () => {
+      for (const [id, eng] of (capture.statsMap || new Map()).entries()) {
+        statsMap.set(id, mergeEngagement(statsMap.get(id), eng));
+      }
       for (const [id, play] of capture.map.entries()) {
-        const prev = map.get(id);
-        if (play > 0 && (prev == null || prev === 0)) map.set(id, play);
+        if (play > 0) {
+          statsMap.set(id, mergeEngagement(statsMap.get(id), { views: play, likes: 0, comments: 0 }));
+        }
       }
     };
 
@@ -946,10 +1018,7 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
         const id = extractVideoId(v.videoUrl);
         if (!id) continue;
         const nextViews = Number(v.views || 0) || parseMetricCount(v.viewsText);
-        const prev = map.get(id);
-        if (prev == null || (prev === 0 && nextViews > 0)) {
-          map.set(id, nextViews);
-        }
+        statsMap.set(id, mergeEngagement(statsMap.get(id), { views: nextViews, likes: 0, comments: 0 }));
       }
     };
 
@@ -962,11 +1031,11 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
       mergeApi();
       mergeDom(await collectProfileVideoRows(page, 0));
       const matchedTargets = targets.size
-        ? [...targets].filter((id) => (map.get(id) || 0) > 0).length
+        ? [...targets].filter((id) => (statsMap.get(id)?.views || 0) > 0).length
         : 0;
       if (targets.size && matchedTargets >= targets.size) break;
-      if (targets.size && [...targets].every((id) => map.has(id) && (map.get(id) || 0) > 0)) break;
-      if (!targets.size && map.size > 0) break;
+      if (targets.size && [...targets].every((id) => (statsMap.get(id)?.views || 0) > 0)) break;
+      if (!targets.size && statsMap.size > 0) break;
       await humanPause(round === 0 ? 2500 : 4000, 0.08);
       await page.mouse.wheel(0, 1200).catch(() => {});
       await page.keyboard.press('End').catch(() => {});
@@ -975,6 +1044,20 @@ async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVi
     mergeApi();
   } finally {
     capture.detach();
+  }
+  return statsMap;
+}
+
+/**
+ * 打开作者主页，批量解析目标 videoId 的播放量（兼容旧调用）。
+ * @param {string[]} targetVideoIds
+ * @returns {Map<string, number>}
+ */
+async function collectProfileVideoViewsMap(pageOrConn, creatorUsername, targetVideoIds = []) {
+  const statsMap = await collectProfileVideoStatsMap(pageOrConn, creatorUsername, targetVideoIds);
+  const map = new Map();
+  for (const [id, eng] of statsMap.entries()) {
+    map.set(id, Number(eng?.views) || 0);
   }
   return map;
 }
@@ -1155,9 +1238,12 @@ async function ensureCommentPanelOpen(page) {
 async function scrapeVideoLikeCount(page) {
   const likesText = await page.evaluate(({ pickFnSource }) => {
     const pickLabeledMetricText = eval(`(${pickFnSource})`);
+    const browseRoot = document.querySelector(
+      '[data-e2e="browse-video"], [class*="DivBrowserModeContainer"], [class*="DivVideoContainer"]'
+    ) || document;
     const pick = (sels) => {
       for (const s of sels) {
-        const el = document.querySelector(s);
+        const el = browseRoot.querySelector?.(s) || document.querySelector(s);
         const t = (el?.textContent || el?.getAttribute?.('title') || '').trim();
         if (t) return t;
       }
@@ -1171,12 +1257,14 @@ async function scrapeVideoLikeCount(page) {
       '[data-e2e="video-like-count"]',
     ]);
     if (t) return t;
-    // 点赞按钮旁的数字 / aria
-    const likeBtn = document.querySelector(
+    // 点赞按钮旁的数字 / aria —— 禁止 unbound closest('div')，避免误抓评论数
+    const likeBtn = browseRoot.querySelector?.(
+      '[data-e2e="browse-like-icon"], [data-e2e="like-icon"], button[aria-label*="Like"], button[aria-label*="赞"]'
+    ) || document.querySelector(
       '[data-e2e="browse-like-icon"], [data-e2e="like-icon"], button[aria-label*="Like"], button[aria-label*="赞"]'
     );
     if (likeBtn) {
-      const near = likeBtn.closest('button, [role="button"], div') || likeBtn.parentElement;
+      const near = likeBtn.closest('button, [role="button"]') || likeBtn.parentElement;
       const strong = near?.querySelector?.('strong');
       if (strong?.textContent) return strong.textContent.trim();
       const aria = likeBtn.getAttribute('aria-label') || near?.getAttribute?.('aria-label') || '';
@@ -1184,11 +1272,59 @@ async function scrapeVideoLikeCount(page) {
         || (aria.match(/([\d]{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*([kKmMbB万亿wW])?/i) || [])[0];
       if (fromAria) return fromAria;
     }
-    // 浏览态侧栏合写兜底
-    const blob = (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 2500);
+    const blob = ((browseRoot !== document ? browseRoot.innerText : document.body?.innerText) || '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 2500);
     return pickLabeledMetricText(blob, 'likes?|获赞') || '';
   }, { pickFnSource: PICK_LABELED_METRIC_FN }).catch(() => '');
   return parseMetricCount(likesText);
+}
+
+/**
+ * 视频详情/浏览态读取平台评论总数（角标），不是已抓取的评论条数。
+ */
+async function scrapeVideoCommentCount(page) {
+  const text = await page.evaluate(({ pickFnSource }) => {
+    const pickLabeledMetricText = eval(`(${pickFnSource})`);
+    const browseRoot = document.querySelector(
+      '[data-e2e="browse-video"], [class*="DivBrowserModeContainer"], [class*="DivVideoContainer"]'
+    ) || document;
+    const pick = (sels) => {
+      for (const s of sels) {
+        const el = browseRoot.querySelector?.(s) || document.querySelector(s);
+        const t = (el?.textContent || el?.getAttribute?.('title') || '').trim();
+        if (t) return t;
+      }
+      return '';
+    };
+    let t = pick([
+      '[data-e2e="browse-comment-count"]',
+      'strong[data-e2e="browse-comment-count"]',
+      '[data-e2e="comment-count"]',
+      'strong[data-e2e="comment-count"]',
+      '[data-e2e="video-comment-count"]',
+    ]);
+    if (t) return t;
+    const cmtBtn = browseRoot.querySelector?.(
+      '[data-e2e="browse-comment-icon"], [data-e2e="comment-icon"], button[aria-label*="Comment"], button[aria-label*="评论"]'
+    ) || document.querySelector(
+      '[data-e2e="browse-comment-icon"], [data-e2e="comment-icon"], button[aria-label*="Comment"], button[aria-label*="评论"]'
+    );
+    if (cmtBtn) {
+      const near = cmtBtn.closest('button, [role="button"]') || cmtBtn.parentElement;
+      const strong = near?.querySelector?.('strong');
+      if (strong?.textContent) return strong.textContent.trim();
+      const aria = cmtBtn.getAttribute('aria-label') || near?.getAttribute?.('aria-label') || '';
+      const fromAria = pickLabeledMetricText(aria, 'comments?|comment|评论')
+        || (aria.match(/([\d]{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*([kKmMbB万亿wW])?/i) || [])[0];
+      if (fromAria) return fromAria;
+    }
+    const blob = ((browseRoot !== document ? browseRoot.innerText : document.body?.innerText) || '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 2500);
+    return pickLabeledMetricText(blob, 'comments?|评论') || '';
+  }, { pickFnSource: PICK_LABELED_METRIC_FN }).catch(() => '');
+  return parseMetricCount(text);
 }
 
 /**
@@ -1314,18 +1450,19 @@ async function scrapeVideoComments(pageOrConn, videoUrl, creatorUsername, option
   }
   if (!opened) {
     liveLog(`AI拓客跳过视频（无法打开/风控）: ${videoUrl}`, 'warn');
-    return { comments: [], likes: 0, views: listViews, opened: false, panelOpen: false };
+    return { comments: [], likes: 0, views: listViews, commentCount: 0, opened: false, panelOpen: false };
   }
 
   page = await ensureLivePage(connection);
   if (await isOopsOrBlockedPage(page)) {
     liveLog(`AI拓客跳过视频（评论页 Oops）: ${videoUrl}`, 'warn');
-    return { comments: [], likes: 0, views: listViews, opened: false, panelOpen: false };
+    return { comments: [], likes: 0, views: listViews, commentCount: 0, opened: false, panelOpen: false };
   }
 
-  // 详情页时机：先拿点赞数
+  // 详情页时机：先拿点赞 / 平台评论总数角标
   await humanPause(800, 0.15);
   const likes = await scrapeVideoLikeCount(page);
+  let commentCount = await scrapeVideoCommentCount(page);
 
   const panelOk = await ensureCommentPanelOpen(page);
   if (!panelOk) {
@@ -1336,7 +1473,14 @@ async function scrapeVideoComments(pageOrConn, videoUrl, creatorUsername, option
   const reallyOpen = await isVideoBrowseOpen(page, vidCheck);
   if (!reallyOpen) {
     liveLog(`视频浏览态未确认（可能仍在主页）: ${videoUrl}`, 'warn');
-    return { comments: [], likes: 0, views: listViews, opened: false, panelOpen: false };
+    return {
+      comments: [],
+      likes,
+      views: listViews,
+      commentCount,
+      opened: false,
+      panelOpen: false,
+    };
   }
 
   const authorFilter = includeAuthorComments
@@ -1504,7 +1648,18 @@ async function scrapeVideoComments(pageOrConn, videoUrl, creatorUsername, option
     await humanPause(900, 0.2);
   }
 
-  return { comments, likes, views: listViews, opened: true, panelOpen: panelOk };
+  if (!commentCount) {
+    commentCount = await scrapeVideoCommentCount(page);
+  }
+
+  return {
+    comments,
+    likes,
+    views: listViews,
+    commentCount,
+    opened: true,
+    panelOpen: panelOk,
+  };
 }
 
 async function runUserPipeline(accountId, payload) {
@@ -1831,10 +1986,12 @@ module.exports = {
   readViewsFromProfileGrid,
   fetchProfileVideoViewsViaPageApi,
   collectProfileVideoViewsMap,
+  collectProfileVideoStatsMap,
   openVideoViaProfileClick,
   openVideoDirect,
   ensureCommentPanelOpen,
   scrapeVideoLikeCount,
+  scrapeVideoCommentCount,
   isOopsOrBlockedPage,
   isVideoBrowseOpen,
   extractVideoId,

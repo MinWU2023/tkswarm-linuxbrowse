@@ -590,12 +590,14 @@ async function inspectRotateCaptchaInContext(target) {
         const failedImg = Array.from(root.querySelectorAll('img')).some(
           (img) => img.complete === true && img.naturalWidth === 0
         );
-        const widgetErr = /something went wrong|couldn'?t load|network error|try again|刷新|重试/i.test(rootText);
+        const timedOut = /verification timed out|timed out\.?\s*please close|please close this window|验证超时|验证已超时|已超时|请关闭此窗口|请关闭窗口/i.test(rootText);
+        const widgetErr = timedOut || /something went wrong|couldn'?t load|network error|try again|刷新|重试/i.test(rootText);
         return {
           detected: false,
           loading: true,
           failedLoad: Boolean(failedImg || widgetErr),
-          reason: widgetErr ? 'captcha_widget_error' : 'captcha_container_images_loading',
+          timedOut,
+          reason: timedOut ? 'captcha_verification_timed_out' : (widgetErr ? 'captcha_widget_error' : 'captcha_container_images_loading'),
         };
       }
       return { detected: false };
@@ -1546,6 +1548,40 @@ async function clickCaptchaRefresh(target) {
 }
 
 /**
+ * 验证弹框已显示 "Verification timed out. Please close this window."：
+ * 这个状态下弹框里没有图也没有刷新按钮，只能关掉弹框并刷新页面，让 TikTok 重新下发验证。
+ * @returns {Promise<boolean>} 是否执行了恢复动作
+ */
+async function recoverCaptchaTimedOut(page, target, say = () => {}) {
+  try { say('检测到「Verification timed out」弹框，关闭弹框并刷新页面以重新触发验证', 'warn'); } catch { /* ignore */ }
+  try {
+    await (target || page).evaluate(() => {
+      const scopes = Array.from(document.querySelectorAll(
+        '#captcha-verify-container, .captcha_verify_container, [id*="captcha" i], [class*="captcha" i], [class*="secsdk" i], .TUXModal, [role="dialog"]'
+      ));
+      for (const scope of scopes) {
+        const btns = Array.from(scope.querySelectorAll('button, [role="button"], a, [class*="close" i], [aria-label*="close" i]'));
+        const hit = btns.find((b) => {
+          const txt = String(b.innerText || b.getAttribute('aria-label') || b.className || '').trim();
+          return /close|关闭|×|✕/i.test(txt);
+        });
+        if (hit && typeof hit.click === 'function') {
+          hit.click();
+          return true;
+        }
+      }
+      return false;
+    }).catch(() => false);
+  } catch { /* ignore */ }
+  await sleep(500);
+  try {
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+  } catch { /* ignore */ }
+  await sleep(1800);
+  return true;
+}
+
+/**
  * 把「相对某个子 Frame 视口」的矩形换算成「相对 Page 视口」。旋转与平移共用。
  */
 async function shiftCaptchaInfoToPage(page, target, info) {
@@ -1624,6 +1660,7 @@ async function detectCaptcha(page) {
   const trySlide = Boolean(slideMod) && FORCED_CAPTCHA_KIND !== 'rotate';
 
   let anyLoading = false;
+  let anyTimedOut = false;
   let anyHint = false;
   let loadingTarget = null;
   let lastReason = '';
@@ -1639,6 +1676,7 @@ async function detectCaptcha(page) {
         anyLoading = true;
         loadingTarget = target;
       }
+      if (info?.timedOut) anyTimedOut = true;
       if (info?.hint) anyHint = true;
       if (info?.reason) lastReason = info.reason;
     }
@@ -1652,6 +1690,7 @@ async function detectCaptcha(page) {
       anyLoading = true;
       loadingTarget = target;
     }
+    if (slide?.timedOut) anyTimedOut = true;
     if (slide?.hint) anyHint = true;
     if (slide?.reason) {
       // 旋转侧已经给出更具体的「图在加载」原因时，保留它，别被平移侧的兜底原因盖掉
@@ -1667,6 +1706,7 @@ async function detectCaptcha(page) {
     reason: lastReason || '',
   };
   if (slideError) result.slideError = slideError;
+  if (anyTimedOut) result.timedOut = true;
   if (anyLoading && loadingTarget) result.target = loadingTarget;
   return result;
 }
@@ -1738,6 +1778,20 @@ async function solveRotateCaptchaIfPresent(page, {
       await pauseSaveTrafficForCaptcha(page);
       pausedSaveTraffic = true;
     } catch { /* ignore */ }
+
+    if (!firstCheck.detected && firstCheck.loading && firstCheck.timedOut) {
+      await recoverCaptchaTimedOut(page, firstCheck.target || page, say);
+      firstCheck = await detectCaptcha(page);
+      if (!firstCheck.detected && !firstCheck.loading) {
+        if (pausedSaveTraffic) {
+          try {
+            const { resumeSaveTrafficAfterCaptcha } = require('./save-traffic');
+            await resumeSaveTrafficAfterCaptcha(page);
+          } catch { /* ignore */ }
+        }
+        return { detected: true, solved: false, attempts: 0, timedOutRecovered: true };
+      }
+    }
 
     if (!firstCheck.detected && firstCheck.loading) {
       let refreshedWhileLoading = false;
@@ -2209,6 +2263,7 @@ async function solveNonRotateCaptcha(page, info, {
         fetchImageAsBase64,
         clickCaptchaRefresh,
         dumpDebug: dumpCaptchaDebug,
+        recoverTimedOut: (pg, tgt) => recoverCaptchaTimedOut(pg, tgt, (m, l) => logLevel(m, l)),
         pauseSaveTraffic: async (target) => {
           // eslint-disable-next-line global-require
           const { pauseSaveTrafficForCaptcha } = require('./save-traffic');
